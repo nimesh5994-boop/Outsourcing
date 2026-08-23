@@ -6,7 +6,7 @@ import openpyxl
 import pandas as pd
 import pytest
 
-from app import control_accounts, corporation_tax, financial_statements, fixed_assets, mapping, nominal_matrix, parsers, recon, xero_reports
+from app import anomaly_detection, compliance_checks, control_accounts, corporation_tax, excel_builder, financial_statements, fixed_assets, mapping, nominal_matrix, parsers, recon, xero_reports
 from app.excel_builder import build_workbook
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
@@ -212,3 +212,31 @@ def test_full_workbook_builds_and_saves(tmp_path, canonical_data):
     assert "Index" in reopened.sheetnames
     assert any("TB Lead Schedule" in s for s in reopened.sheetnames)
     assert len(reopened.sheetnames) > 10
+
+
+def test_full_workbook_includes_anomaly_and_compliance_checks(tmp_path, canonical_data):
+    results = (
+        recon.run_all_recons(canonical_data)
+        + anomaly_detection.run_all_anomaly_checks(canonical_data["nominal_current"])
+        + compliance_checks.run_all_compliance_checks(
+            canonical_data["tb_current"], canonical_data["tb_comparative"], canonical_data["nominal_current"],
+            current_year_profit=float(canonical_data["pl_current"]["amount"].sum()),
+        )
+    )
+    wb = build_workbook(
+        "Brightwell Landscaping Supplies Limited",
+        "Year ended 31 December 2025", "Year ended 31 December 2024",
+        canonical_data, results,
+    )
+    out = tmp_path / "working_paper_with_checks.xlsx"
+    wb.save(out)
+
+    reopened = openpyxl.load_workbook(out)
+    assert any("Compliance Checklist" in s for s in reopened.sheetnames)
+    checklist_ws = next(reopened[s] for s in reopened.sheetnames if "Compliance Checklist" in s)
+    non_empty_rows = sum(1 for row in checklist_ws.iter_rows() if row[0].value)
+    assert non_empty_rows > len(excel_builder.COMPLIANCE_CHECKLIST_ITEMS)  # title rows + every checklist line
+
+    # the automated checks (DLA/dividend/petty cash/loan) show up as their
+    # own recon-style sheets too, not just the static manual checklist
+    assert any("DLA Review" in s for s in reopened.sheetnames)

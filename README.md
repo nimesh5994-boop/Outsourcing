@@ -197,6 +197,33 @@ noticing every ordinary invoice was getting flagged as its own duplicate).
 They surface candidates for a human to confirm, the same as every other
 check in this system - not an auto-fixer.
 
+## Compliance checklist
+
+Distilled from a real manual-job review checklist covering fixed assets,
+bank, stock, debtors, creditors, VAT, PAYE, pensions, loans, DLA, and
+dividends - split into the two kinds of item it actually contains:
+
+**Data-driven checks** (`app/compliance_checks.py`) - answerable from data
+already ingested, so the system flags them automatically:
+
+| Check | What it does |
+|---|---|
+| Directors' loan account review | Flags any calendar month where net DLA withdrawals exceed £10,000 (the point HMRC treats it as a loan needing a benefit-in-kind/interest review, not routine drawings), and - separately - flags an S455 consideration with a drafted year-end balance note whenever the account is in debit (the director owes the company) |
+| Dividend vs distributable reserves review | Compares dividends declared this year against retained earnings b/fwd + this year's profit; flags a potential unlawful dividend if declared amounts exceed what's available |
+| Petty cash running balance review | Rolls the petty cash account's balance forward transaction by transaction through the year; flags any point it goes negative (physically impossible for cash, so it means a mis-dated/mis-posted entry or cash fronted by the business) |
+| Loan facility review | Detects Bounce Back Loan / Hire Purchase / Bank Loan-style accounts and lists the specific checklist points that apply to each (BBL's 12-month interest holiday, HP's within/after-one-year split, agreement/statement received) - a reminder, not a computed check, since there's no repayment schedule or agreement in the data this system has |
+
+**Manual checklist tab** (`app/excel_builder.py: build_compliance_checklist_sheet`,
+config key `compliance_checklist`) - a static, editable pro-forma sheet
+for everything in that source checklist that *can't* be answered from
+data: "was the HP agreement received?", "does the CT liability agree to
+the HMRC online account?", "was a bank statement received for every
+account?". ~28 items across fixed assets, bank, stock, debtors,
+creditors, VAT, PAYE/wages, pensions, loans, DLA, dividends, government
+grants, and corporation tax, each with a blank Status and Notes column for
+the preparer to complete. Deliberately doesn't repeat anything the
+data-driven checks above already cover.
+
 ## Corporation Tax computation
 
 Built from `app/tax_rates.py` (the current rates, as a config - not
@@ -276,6 +303,7 @@ app/
   xero_reports.py        Xero-specific report parsers (see above)
   recon.py                 the reconciliation/cross-check engine
   anomaly_detection.py       cross-transaction checks (miscoding, duplicates, unusual posting dates)
+  compliance_checks.py        data-driven checklist checks (DLA/S455, dividends, petty cash, loans)
   control_accounts.py       control account rollforward + aged breakdown engine
   nominal_matrix.py          nominal activity → contra nominal code analysis matrix (+ formula row-id grouping)
   fixed_assets.py             category-level + asset-level fixed asset register engine

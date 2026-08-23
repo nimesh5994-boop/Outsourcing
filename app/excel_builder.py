@@ -1229,6 +1229,85 @@ def build_points_forward_sheet(wb: Workbook, client_name: str, period_label: str
     ws.freeze_panes = f"A{row + 1}"
 
 
+# The confirmation-only half of a real manual-job review checklist: items
+# that need a preparer to check something outside the data this system
+# ingests (an agreement, a bank statement, an HMRC login) rather than
+# something a data-driven check can flag on its own - see
+# compliance_checks.py for the automatable subset (DLA monthly threshold +
+# S455, dividends vs reserves, petty cash running balance, loan/BBL/HP
+# presence), which is deliberately NOT repeated here to avoid the same
+# point appearing twice in different places in the pack.
+COMPLIANCE_CHECKLIST_ITEMS = [
+    ("Fixed Assets", "Depreciation method and rate applied consistently with last year for brought-forward assets."),
+    ("Fixed Assets", "Current year additions have a depreciation method/rate assigned (see the Fixed Asset Register schedule for additions found in nominal activity but not yet in the register)."),
+    ("Fixed Assets", "Any disposals in the year identified and the resulting profit/loss on disposal calculated."),
+    ("Bank", "Statement received and matches the closing balance for every bank account held during the year, including any account opened or closed mid-year."),
+    ("Bank", "Any unrecorded bank receipts or payments (per statement but not per the books) identified and posted."),
+    ("Stock", "Closing stock figure confirmed - by count, or by an estimation basis (e.g. GP ratio) agreed and documented."),
+    ("Trade Debtors", "Sales invoices for the year agree to sales per the VAT working; any missing sales journal identified."),
+    ("Trade Debtors", "Unmatched sales (invoiced but not receipted) agreed as the closing debtors figure; opening debtors traced to receipt."),
+    ("Trade Debtors", "For Xero jobs: outstanding debtor receipts after the year end checked for correct allocation to P&L vs balance sheet, with the receipt date noted on the debtors schedule."),
+    ("Prepayments", "Prepayment basis confirmed (per invoice or per last year), and any accountancy fee prepayment correctly reversed/re-booked for the current year."),
+    ("Other Debtors", "Opening balance (if any) traced and cleared; s455 note prepared if any balance relates to a director."),
+    ("Petty Cash", "Closing petty cash balance agreed to the count/last year's basis; any deficit covered through the DLA rather than left as a negative cash balance."),
+    ("Trade Creditors", "Purchases per the VAT working agree to purchase invoices; unmatched purchases agreed as the closing creditors figure."),
+    ("Trade Creditors", "Any expense assumed paid in cash, or paid through the DLA, checked against last year's treatment."),
+    ("Accruals", "Opening accruals reversed and the current year's accountancy/other accrual booked and reconciled to the source ledger."),
+    ("VAT", "VAT scheme confirmed (standard/cash/flat rate; registered or deregistered in year) and consistent with the return filed."),
+    ("VAT", "Input VAT correctly claimed/reversed on expenses where relevant (e.g. entertainment, personal use)."),
+    ("PAYE / Wages", "Payroll figures received for the year and agreed to the PAYE control/wages control account; employment allowance claimed correctly if more than one director."),
+    ("PAYE / Wages", "Any subcontractor payments (CIS) identified, suffered CIS reconciled to HMRC."),
+    ("Pension", "Pension contributions for the year received and the closing liability agreed to the pension provider/payment made after the year end."),
+    ("Loans / HP / Credit Card", "Agreement or statement received for every loan/HP/credit card facility; closing balance split between amounts due within one year and after one year."),
+    ("Loans / HP / Credit Card", "Interest for the year booked correctly (per statement, or per calculator where no statement is available)."),
+    ("Directors' Loan Account", "DLA transaction-by-transaction detail agrees to the movements schedule; any capital introduced or drawings for the year identified."),
+    ("Directors' Loan Account", "Use-of-home-as-office and any other expenses due to be booked through the DLA (per last year's treatment) have been included."),
+    ("Dividends", "Dividend minutes/vouchers in place; dividend correctly apportioned to the tax year and rounded appropriately; split according to shareholdings."),
+    ("Government Grants", "Any government grant (e.g. SEISS for a sole trader) shown correctly - in the capital account for a sole trader, separately (and in the CT600) for a limited company."),
+    ("Corporation Tax", "CT liability agreed to the HMRC online account; loss brought forward/carried back correctly offset or claimed; refund due tracked to the correct bank account."),
+    ("Corporation Tax", "CT600 box 775 (expenditure on machinery/plant not a long-life asset or integral feature, excluding anything in box 760) reviewed and completed where relevant."),
+]
+
+
+def build_compliance_checklist_sheet(wb: Workbook, client_name: str, period_label: str, ref: str):
+    """A static, editable pro-forma of the confirmation-only checklist
+    items - not computed from data (there's nothing in a TB or nominal
+    activity export that answers "was the HP agreement received?"), so
+    this is a structured place for the preparer to work through and tick
+    off, the same role the real firm's own manual-job checklist plays."""
+    ws = wb.create_sheet(f"{ref} Compliance Checklist"[:31])
+    row = _write_title(ws, client_name, period_label, "COMPLIANCE CHECKLIST (MANUAL REVIEW POINTS)", ref)
+    ws.cell(row=row, column=1, value=(
+        "Confirmation-only items that need a document, statement, or external check rather than something "
+        "the uploaded data can answer on its own. Data-driven checks for DLA/S455, dividends vs reserves, "
+        "petty cash, and loan/BBL/HP presence are on their own schedules - see the Index."
+    )).font = SUBTITLE_FONT
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+    ws.row_dimensions[row].height = 30
+
+    table_row = row + 2
+    headers = ["Area", "Checklist item", "Status (Yes / No / N/A)", "Notes"]
+    for j, h in enumerate(headers):
+        ws.cell(row=table_row, column=1 + j, value=h)
+    _style_header_row(ws, table_row, len(headers))
+
+    r = table_row + 1
+    for area, item in COMPLIANCE_CHECKLIST_ITEMS:
+        ws.cell(row=r, column=1, value=area).border = BORDER
+        ws.cell(row=r, column=2, value=item).border = BORDER
+        ws.cell(row=r, column=2).alignment = Alignment(wrap_text=True)
+        ws.cell(row=r, column=3).border = BORDER
+        ws.cell(row=r, column=4).border = BORDER
+        ws.cell(row=r, column=4).alignment = Alignment(wrap_text=True)
+        r += 1
+
+    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["B"].width = 75
+    ws.column_dimensions["C"].width = 20
+    ws.column_dimensions["D"].width = 45
+    ws.freeze_panes = f"A{table_row + 1}"
+
+
 def _generate_schedules(
     wb: Workbook,
     ref: _RefCounter,
@@ -1313,6 +1392,10 @@ def _generate_schedules(
         "Contact coding consistency (possible miscoding)": ("contact_coding_consistency", "Contact Coding Check"),
         "Duplicate transaction check": ("duplicate_check", "Duplicate Check"),
         "Unusual posting date check (weekend manual journals)": ("unusual_posting_dates", "Weekend Journals"),
+        "Directors' loan account review (S455 / £10,000 monthly threshold)": ("dla_review", "DLA Review"),
+        "Dividend vs distributable reserves review": ("dividend_reserves_review", "Dividend Review"),
+        "Petty cash running balance review": ("petty_cash_review", "Petty Cash Review"),
+        "Loan facility review (BBL / Hire Purchase / Bank Loan)": ("loan_facility_review", "Loan Facility Review"),
     }
     recon_refs = {}
     recon_sheet_names = {}
@@ -1337,6 +1420,11 @@ def _generate_schedules(
         for r in matrix_results:
             mx_refs[r.account_code] = ref.next()
             entries.append({"ref": mx_refs[r.account_code], "title": f"{r.account_name} nominal analysis", "status": r.status, "message": r.message})
+
+    cl_on = enabled("compliance_checklist")
+    cl_ref = ref.next() if cl_on else None
+    if cl_on:
+        entries.append({"ref": cl_ref, "title": "Compliance Checklist (manual review points)", "status": "n/a", "message": "To be completed by preparer - see the data-driven checks above for the automatable subset"})
 
     pf_on = enabled("points_forward")
     pf_ref = ref.next() if pf_on else None
@@ -1400,6 +1488,9 @@ def _generate_schedules(
                 place("nominal_matrix", lambda r=r: build_matrix_sheet_formulas(wb, client_name, current_label, mx_refs[r.account_code], r, refs, data.get("nominal_current")))
             else:
                 place("nominal_matrix", lambda r=r: build_matrix_sheet(wb, client_name, current_label, mx_refs[r.account_code], r))
+
+    if cl_on:
+        place("compliance_checklist", lambda: build_compliance_checklist_sheet(wb, client_name, current_label, cl_ref))
 
     if pf_on:
         place("points_forward", lambda: build_points_forward_sheet(wb, client_name, current_label, pf_ref))
