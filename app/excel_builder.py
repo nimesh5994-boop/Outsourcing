@@ -13,7 +13,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from app.control_accounts import ControlAccountResult
 from app.corporation_tax import CTComputation
-from app.data_sheets import DataRefs
+from app.data_sheets import DataRefs, with_row_ids
 from app.financial_statements import (
     _BS_CURRENT_ASSETS,
     _BS_CURRENT_LIABILITIES,
@@ -27,9 +27,9 @@ from app.financial_statements import (
     build_pl_statement,
 )
 from app.fixed_assets import AssetRegisterResult, FixedAssetResult
-from app.nominal_matrix import MatrixResult
+from app.nominal_matrix import MatrixResult, build_matrix_row_groups
 from app.recon import MATERIALITY_AMOUNT, VARIANCE_PCT_THRESHOLD, ReconResult
-from app.xlformulas import cell_ref, quote, sum_of_values, sumifs_exact
+from app.xlformulas import cell_ref, literal, quote, sum_of_values, sumifs_exact
 
 NAVY = "1F3864"
 GREEN = "C6EFCE"
@@ -825,6 +825,83 @@ def build_matrix_sheet(wb: Workbook, client_name: str, current_label: str, ref: 
     df = result.matrix.rename(columns={"date": "Date", "reference": "Reference", "description": "Description", "contact": "Contact"})
     _write_dataframe(ws, df, start_row=table_row)
     ws.freeze_panes = f"A{table_row + 1}"
+
+
+def build_matrix_sheet_formulas(
+    wb: Workbook, client_name: str, current_label: str, ref: str, result: MatrixResult, refs: DataRefs,
+    nominal_current: pd.DataFrame,
+):
+    """Formula-linked version of the nominal activity matrix: same
+    (date/reference/description/contact) x contra-account pivot, but every
+    cell is a live SUMPRODUCT re-summing the DATA_Nominal 'net' column for
+    exactly the row_ids Python bucketed into that cell - see
+    nominal_matrix.build_matrix_row_groups(). Python still decides the
+    bucketing itself (which contra account each transaction belongs to, and
+    which accounts make the top-N-by-value cut vs fold into OTHER - a
+    text/ranking decision, not something an Excel formula should attempt),
+    but the amount in every cell recalculates from the raw data, and the
+    row/column totals and the DIFF self-check are formulas too."""
+    sheet_name = f"{ref} {result.account_name} Analysis"[:31]
+    ws = wb.create_sheet(sheet_name)
+    title = f"NOMINAL ACTIVITY ANALYSIS - {result.account_name} ({result.account_code})"
+    row = _write_title(ws, client_name, current_label, title, ref)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
+    status_cell.font = _status_font(result.status)
+    status_cell.fill = _status_fill(result.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=8)
+    ws.row_dimensions[row].height = 30
+
+    table_row = row + 2
+    if refs.nominal_current is None:
+        ws.cell(row=table_row, column=1, value="No data available.")
+        return sheet_name
+
+    pivot_rows, col_names = build_matrix_row_groups(result.account_code, with_row_ids(nominal_current))
+    if not pivot_rows:
+        ws.cell(row=table_row, column=1, value="No data available.")
+        return sheet_name
+
+    headers = ["Date", "Reference", "Description", "Contact", *col_names, "TOTAL", "DIFF"]
+    for j, h in enumerate(headers):
+        ws.cell(row=table_row, column=1 + j, value=h)
+    _style_header_row(ws, table_row, len(headers))
+
+    net_range = refs.nominal_current.col_range("net")
+    row_id_range = refs.nominal_current.col_range("row_id")
+    first_col = 5  # after Date/Reference/Description/Contact
+    total_col = first_col + len(col_names)
+    diff_col = total_col + 1
+
+    r = table_row + 1
+    for pivot_row in pivot_rows:
+        ws.cell(row=r, column=1, value=pivot_row["date"]).border = BORDER
+        ws.cell(row=r, column=2, value=pivot_row["reference"]).border = BORDER
+        ws.cell(row=r, column=3, value=pivot_row["description"]).border = BORDER
+        ws.cell(row=r, column=4, value=pivot_row["contact"]).border = BORDER
+
+        all_row_ids: list = []
+        for j, col in enumerate(col_names):
+            row_ids = pivot_row["row_ids_by_column"].get(col, [])
+            all_row_ids.extend(row_ids)
+            formula = sum_of_values(net_range, row_id_range, [literal(rid) for rid in row_ids]) if row_ids else "=0"
+            cell = ws.cell(row=r, column=first_col + j, value=formula)
+            cell.number_format = CURRENCY_FMT
+            cell.border = BORDER
+
+        total_col_letters = get_column_letter(first_col), get_column_letter(total_col - 1)
+        total_cell = ws.cell(row=r, column=total_col, value=f"=SUM({total_col_letters[0]}{r}:{total_col_letters[1]}{r})")
+        total_cell.number_format = CURRENCY_FMT
+        total_cell.font = BOLD
+
+        actual_formula = sum_of_values(net_range, row_id_range, [literal(rid) for rid in all_row_ids]) if all_row_ids else "=0"
+        diff_cell = ws.cell(row=r, column=diff_col, value=f"={get_column_letter(total_col)}{r}-({actual_formula[1:]})")
+        diff_cell.number_format = CURRENCY_FMT
+        r += 1
+
+    ws.freeze_panes = f"A{table_row + 1}"
+    return sheet_name
 
 
 def build_asset_register_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: AssetRegisterResult):

@@ -33,13 +33,16 @@ def _label(code: str, name: str) -> str:
     return code or name or "(unspecified)"
 
 
-def build_matrix(account_code: str, account_name: str, nominal_activity: pd.DataFrame) -> MatrixResult:
-    if nominal_activity is None or nominal_activity.empty or "contra_code" not in nominal_activity.columns:
-        return MatrixResult(account_code, account_name, "n/a", "No contra-account detail available for this account (requires a Xero Account Transactions export).")
-
+def _label_rows(account_code: str, nominal_activity: pd.DataFrame) -> pd.DataFrame | None:
+    """Filters nominal_activity to this account and buckets each row into
+    its contra_label / matrix_col (top N contra accounts by value, the rest
+    folded into OTHER) - the shared basis for both build_matrix's pivot
+    values and build_matrix_row_groups' row-id groupings (used by the
+    formula-linked Excel builder), so the two can never drift apart on
+    which transaction landed in which bucket."""
     sub = nominal_activity[nominal_activity["account_code"].astype(str) == account_code].copy()
     if sub.empty:
-        return MatrixResult(account_code, account_name, "n/a", "No transactions found for this account.")
+        return None
 
     sub["net"] = sub["debit"] - sub["credit"]
     sub["contra_label"] = sub.apply(
@@ -51,6 +54,16 @@ def build_matrix(account_code: str, account_name: str, nominal_activity: pd.Data
     totals_by_label = sub.groupby("contra_label")["net"].sum().abs().sort_values(ascending=False)
     top_labels = list(totals_by_label.head(MAX_CONTRA_COLUMNS).index)
     sub["matrix_col"] = sub["contra_label"].where(sub["contra_label"].isin(top_labels), "OTHER (see nominal activity detail)")
+    return sub
+
+
+def build_matrix(account_code: str, account_name: str, nominal_activity: pd.DataFrame) -> MatrixResult:
+    if nominal_activity is None or nominal_activity.empty or "contra_code" not in nominal_activity.columns:
+        return MatrixResult(account_code, account_name, "n/a", "No contra-account detail available for this account (requires a Xero Account Transactions export).")
+
+    sub = _label_rows(account_code, nominal_activity)
+    if sub is None:
+        return MatrixResult(account_code, account_name, "n/a", "No transactions found for this account.")
 
     pivot = sub.pivot_table(index=["date", "reference", "description", "contact"], columns="matrix_col", values="net", aggfunc="sum", fill_value=0.0)
     pivot = pivot.reset_index()
@@ -74,6 +87,35 @@ def build_matrix(account_code: str, account_name: str, nominal_activity: pd.Data
     msg = "; ".join(parts) + "." if parts else "All transactions allocated to a contra nominal code."
 
     return MatrixResult(account_code, account_name, status, msg, pivot)
+
+
+def build_matrix_row_groups(account_code: str, nominal_activity_with_row_ids: pd.DataFrame) -> tuple[list[dict], list[str]]:
+    """Same bucketing as build_matrix, but for the formula-linked Excel
+    builder: instead of computing each cell's value in Python, returns
+    each pivot row's grouping key plus - per matrix column - the row_ids
+    (from the DATA_Nominal sheet's synthetic RowID column, see
+    data_sheets.py) of the transactions bucketed into it. The Excel sheet
+    then re-sums the raw debit/credit figures for exactly those row_ids via
+    formula, rather than trusting a Python-computed literal - so recompute
+    matches the pivot's contra-account bucketing, but the number itself
+    stays live against the raw data. Column order matches build_matrix's
+    pivot_table (sorted, pandas' default)."""
+    sub = _label_rows(account_code, nominal_activity_with_row_ids)
+    if sub is None:
+        return [], []
+
+    col_names = sorted(sub["matrix_col"].unique())
+    rows = []
+    for (date, reference, description, contact), g in sub.groupby(["date", "reference", "description", "contact"], dropna=False):
+        row_ids_by_column = {
+            col: g.loc[g["matrix_col"] == col, "row_id"].tolist()
+            for col in col_names if (g["matrix_col"] == col).any()
+        }
+        rows.append({
+            "date": date, "reference": reference, "description": description, "contact": contact,
+            "row_ids_by_column": row_ids_by_column,
+        })
+    return rows, col_names
 
 
 def build_all_matrices(tb_current: pd.DataFrame, nominal_activity: pd.DataFrame, account_codes: list[str] | None = None) -> list[MatrixResult]:

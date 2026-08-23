@@ -21,6 +21,7 @@ from app import control_accounts as ca  # noqa: E402
 from app import corporation_tax as ct_mod  # noqa: E402
 from app import financial_statements as fs  # noqa: E402
 from app import fixed_assets as fa  # noqa: E402
+from app import nominal_matrix as nm  # noqa: E402
 from app import recon, xero_reports as xr  # noqa: E402
 from app.data_sheets import write_data_sheets  # noqa: E402
 from app.excel_builder import (  # noqa: E402
@@ -28,6 +29,7 @@ from app.excel_builder import (  # noqa: E402
     build_control_account_sheet_formulas,
     build_corporation_tax_sheet_formulas,
     build_fixed_asset_category_sheet_formulas,
+    build_matrix_sheet_formulas,
     build_pl_statement_sheet_formulas,
     build_tb_lead_schedule_formulas,
 )
@@ -263,3 +265,38 @@ def test_corporation_tax_formulas_match_python_ground_truth(tmp_path, accounting
     assert _cell(sol, out.name, sheet_name, f"B{rows['relief']}") == pytest.approx(ct.marginal_relief, abs=0.01)
     assert _cell(sol, out.name, sheet_name, f"B{rows['charge']}") == pytest.approx(ct.tax_charge, abs=0.01)
     assert _cell(sol, out.name, sheet_name, f"B{rows['variance']}") == pytest.approx(ct.variance, abs=0.01)
+
+
+def test_nominal_matrix_formulas_match_python_ground_truth(tmp_path, canonical_data):
+    tb_current, nominal_current = canonical_data["tb_current"], canonical_data["nominal_current"]
+    result = nm.build_matrix("8010", "TRADE CREDITORS", nominal_current)
+    assert not result.matrix.empty
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, canonical_data)
+    sheet_name = build_matrix_sheet_formulas(
+        wb, "Brightwell Landscaping Supplies Limited", "Year ended 31 December 2025", "1", result, refs, nominal_current
+    )
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / "matrix_formula.xlsx"
+    wb.save(out)
+
+    sol = _evaluate(out)
+
+    errors = [k for k, v in sol.items() if f"[{out.name}]{sheet_name.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value))]
+    assert not errors, f"formula errors: {errors}"
+
+    col_names = [c for c in result.matrix.columns if c not in ("date", "reference", "description", "contact", "TOTAL", "DIFF")]
+    n_cols = len(col_names)
+    first_col, total_col, diff_col = 5, 5 + n_cols, 5 + n_cols + 1
+    from openpyxl.utils import get_column_letter as _gcl
+
+    matrix_sorted = result.matrix.sort_values(["date", "reference", "description", "contact"]).reset_index(drop=True)
+    for i, py_row in matrix_sorted.iterrows():
+        r = 8 + i  # row5=status, table header row7, first data row8
+        for j, col in enumerate(col_names):
+            letter = _gcl(first_col + j)
+            assert _cell(sol, out.name, sheet_name, f"{letter}{r}") == pytest.approx(py_row[col], abs=0.01)
+        assert _cell(sol, out.name, sheet_name, f"{_gcl(total_col)}{r}") == pytest.approx(py_row["TOTAL"], abs=0.01)
+        assert _cell(sol, out.name, sheet_name, f"{_gcl(diff_col)}{r}") == pytest.approx(py_row["DIFF"], abs=0.01)

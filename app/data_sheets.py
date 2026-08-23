@@ -83,6 +83,16 @@ def _write_sheet(wb: Workbook, sheet_name: str, df: pd.DataFrame) -> SheetRefs:
     return SheetRefs(sheet_name=sheet_name, columns=col_letters, first_row=2, last_row=last_row)
 
 
+def with_row_ids(nominal_activity: pd.DataFrame) -> pd.DataFrame:
+    """Adds the same synthetic RowID column write_data_sheets puts on
+    DATA_Nominal, in the same row order - so Python-side code (e.g. the
+    nominal matrix's formula-linked row grouping) can compute row_ids that
+    line up exactly with the ones baked into the workbook."""
+    df = nominal_activity.copy().reset_index(drop=True)
+    df.insert(0, "row_id", range(1, len(df) + 1))
+    return df
+
+
 def write_data_sheets(wb: Workbook, data: dict) -> DataRefs:
     refs = DataRefs()
 
@@ -95,9 +105,10 @@ def write_data_sheets(wb: Workbook, data: dict) -> DataRefs:
         refs.tb_comparative = _write_sheet(wb, "DATA_TB_Comparative", df)
 
     if data.get("nominal_current") is not None and not data["nominal_current"].empty:
-        df = data["nominal_current"].copy().reset_index(drop=True)
-        df.insert(0, "row_id", range(1, len(df) + 1))
-        cols = ["row_id", "date", "account_code", "account_name", "reference", "description", "contact", "source_type", "debit", "credit"]
+        df = with_row_ids(data["nominal_current"])
+        if "debit" in df.columns and "credit" in df.columns:
+            df["net"] = df["debit"] - df["credit"]
+        cols = ["row_id", "date", "account_code", "account_name", "reference", "description", "contact", "source_type", "debit", "credit", "net"]
         cols = [c for c in cols if c in df.columns]
         refs.nominal_current = _write_sheet(wb, "DATA_Nominal", df[cols])
 
