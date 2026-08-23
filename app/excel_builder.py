@@ -13,10 +13,12 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from app.control_accounts import ControlAccountResult
 from app.corporation_tax import CTComputation
+from app.data_sheets import DataRefs
 from app.financial_statements import StatementResult, build_bs_statement, build_pl_statement
 from app.fixed_assets import AssetRegisterResult, FixedAssetResult
 from app.nominal_matrix import MatrixResult
-from app.recon import ReconResult
+from app.recon import MATERIALITY_AMOUNT, VARIANCE_PCT_THRESHOLD, ReconResult
+from app.xlformulas import quote, sumifs_exact
 
 NAVY = "1F3864"
 GREEN = "C6EFCE"
@@ -191,6 +193,64 @@ def build_tb_lead_schedule(wb: Workbook, client_name: str, current_label: str, r
         if ws.cell(row=r, column=flag_col).value is True:
             for c in range(1, len(df.columns) + 1):
                 ws.cell(row=r, column=c).fill = PatternFill("solid", fgColor=AMBER)
+    ws.freeze_panes = f"A{row + 1}"
+
+
+def build_tb_lead_schedule_formulas(wb: Workbook, client_name: str, current_label: str, ref: str, variance_detail: pd.DataFrame, refs: DataRefs):
+    """Same schedule as build_tb_lead_schedule, but every numeric cell is a
+    live formula against the DATA_TB_* sheets instead of a Python-computed
+    literal - which accounts appear and their sort order still come from
+    variance_detail (a listing question, not a value one)."""
+    ws = wb.create_sheet(f"{ref} TB Lead Schedule"[:31])
+    row = _write_title(ws, client_name, current_label, "TRIAL BALANCE LEAD SCHEDULE", ref)
+    if variance_detail is None or variance_detail.empty or refs.tb_current is None:
+        ws.cell(row=row, column=1, value="No trial balance data available.")
+        return
+
+    headers = ["Account Code", "Account Name", "Current Year", "Comparative Year", "Variance (£)", "Variance (%)", "Flagged?", "Reviewed / reallocation required?"]
+    for j, h in enumerate(headers):
+        ws.cell(row=row, column=1 + j, value=h)
+    _style_header_row(ws, row, len(headers))
+
+    cur_range = refs.tb_current.col_range("balance")
+    cur_code_range = refs.tb_current.col_range("account_code")
+    comp_range = refs.tb_comparative.col_range("balance") if refs.tb_comparative else None
+    comp_code_range = refs.tb_comparative.col_range("account_code") if refs.tb_comparative else None
+
+    r = row + 1
+    for _, acct in variance_detail.iterrows():
+        code = str(acct["account_code"])
+        ws.cell(row=r, column=1, value=code).border = BORDER
+        ws.cell(row=r, column=2, value=acct["account_name"]).border = BORDER
+
+        cur_cell = ws.cell(row=r, column=3, value=sumifs_exact(cur_range, (cur_code_range, quote(code))))
+        cur_cell.number_format = CURRENCY_FMT
+        cur_cell.border = BORDER
+
+        if comp_range:
+            comp_cell = ws.cell(row=r, column=4, value=sumifs_exact(comp_range, (comp_code_range, quote(code))))
+        else:
+            comp_cell = ws.cell(row=r, column=4, value=0)
+        comp_cell.number_format = CURRENCY_FMT
+        comp_cell.border = BORDER
+
+        var_cell = ws.cell(row=r, column=5, value=f"=C{r}-D{r}")
+        var_cell.number_format = CURRENCY_FMT
+        var_cell.border = BORDER
+
+        pct_cell = ws.cell(row=r, column=6, value=f"=IF(D{r}=0,IF(E{r}<>0,1,0),E{r}/ABS(D{r}))")
+        pct_cell.number_format = "0.0%"
+        pct_cell.border = BORDER
+
+        flag_cell = ws.cell(row=r, column=7, value=f"=AND(ABS(E{r})>={MATERIALITY_AMOUNT!r},ABS(F{r})>={VARIANCE_PCT_THRESHOLD!r})")
+        flag_cell.border = BORDER
+
+        ws.cell(row=r, column=8, value="").border = BORDER
+        r += 1
+
+    widths = [14, 40, 14, 16, 14, 12, 10, 40]
+    for i, w in enumerate(widths):
+        ws.column_dimensions[get_column_letter(1 + i)].width = w
     ws.freeze_panes = f"A{row + 1}"
 
 
