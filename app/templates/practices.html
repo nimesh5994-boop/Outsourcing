@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1>Practices</h1>
+  <p class="muted">A practice owns its own working paper template(s); every client set up under a practice uses that practice's template by default.</p>
+  {% if practices %}
+  <table>
+    <tr><th>Practice</th><th>Created</th><th></th></tr>
+    {% for p in practices %}
+    <tr>
+      <td>{{ p.name }}</td>
+      <td class="muted">{{ p.created_at[:10] }}</td>
+      <td><a class="button secondary" href="/practices/{{ p.id }}">Open</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No practices yet.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Add a practice</h2>
+  <form method="post" action="/practices">
+    <label>Practice name</label>
+    <input type="text" name="name" required placeholder="e.g. Affinity Associates Limited">
+    <div style="margin-top:16px"><button type="submit">Create practice</button></div>
+  </form>
+</div>
+{% endblock %}

@@ -21,6 +21,23 @@ A small internal web app: staff upload a client's export files for a job,
 confirm (or correct) how columns map to the working paper's fields, and
 generate a downloadable `.xlsx` pack.
 
+## Practices, templates, and clients
+
+The data model is **Practice → Template(s) → Client(s) → Job(s)**: a
+practice uploads its own working paper template(s) (`.xlsx`), sets one as
+the default, and every client created under that practice inherits it
+(overridable per client). Each client is then processed job-by-job,
+period-by-period, building up history over time.
+
+Each template carries a JSON **customisation config** (edited from its
+detail page) controlling which schedules get generated for that template,
+where each one should be inserted, the header-cell convention used for the
+CLIENT NAME/PERIOD/SCHEDULE TITLE block, and materiality thresholds. This
+is the seam for supporting more than one template format without new code -
+adding a second template is configuration, not a rebuild. **Not yet wired
+up**: `generate` doesn't read this config yet (schedules always run, always
+land in the system's own generic layout) - see Roadmap.
+
 ## Status
 
 This is a working MVP built and validated against real Xero exports for a
@@ -197,6 +214,27 @@ subtotals) for a fictional client - no real client data is in this repo.
 
 ## Known limitations / roadmap
 
+- **The template config doesn't drive generation yet.** A practice can
+  upload a template and edit its schedule/insertion/materiality config, but
+  `generate` still always runs every schedule into the system's own generic
+  layout regardless of what's configured. Wiring the config in, and then
+  actually inserting the generated schedules into a copy of the uploaded
+  template file, is the next phase of work.
+- **Formula-linked output.** Every schedule currently writes Python-computed
+  final values into cells, not live Excel formulas referencing raw-data
+  sheets. Converting the whole engine (control accounts, nominal matrix,
+  fixed assets, CT, P&L/B&S) to emit formulas instead is a substantial
+  rewrite, planned but not started.
+- **Inserting into a real template file has a known fidelity cost.**
+  Round-tripping a real client's `.xlsx` through openpyxl (load, add sheets,
+  save) strips embedded images (e.g. a firm's logo) and dropdown data
+  validation lists - confirmed by testing against a real 63-sheet working
+  paper file, where a plain load-then-save with zero changes dropped it
+  from 24MB to 11MB. Cell values, formulas, and most cell-level formatting
+  survive intact; visual branding elements and validation dropdowns don't.
+  Worth deciding deliberately (accept the cost, or move to lower-level
+  zip/XML sheet injection to avoid it) before this ships for real use, not
+  something to discover after the fact.
 - **Balance Sheet balance check** assumes the standard account-type
   categorisation (Fixed Asset/Current Asset/Bank/Current Liability/
   Liability/Equity) holds for every account - a genuinely miscategorised

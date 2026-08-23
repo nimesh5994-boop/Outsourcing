@@ -10,8 +10,36 @@ from datetime import datetime
 from pathlib import Path
 
 DATA_DIR = Path("data")
+PRACTICES_DIR = DATA_DIR / "practices"
 CLIENTS_DIR = DATA_DIR / "clients"
 JOBS_DIR = DATA_DIR / "jobs"
+
+# Default customization config for a newly-uploaded template. A practice
+# edits this to control which schedules get generated, where each one
+# lands in the template, and the thresholds/cell conventions used - so
+# adding a second (or fifth) template format later is configuration, not
+# new code.
+DEFAULT_TEMPLATE_CONFIG = {
+    "schedules": {
+        "tb_lead_schedule": {"enabled": True, "insert_after_sheet": None},
+        "profit_and_loss": {"enabled": True, "insert_after_sheet": None},
+        "balance_sheet": {"enabled": True, "insert_after_sheet": None},
+        "corporation_tax": {"enabled": True, "insert_after_sheet": None},
+        "fixed_asset_category": {"enabled": True, "insert_after_sheet": None},
+        "fixed_asset_register": {"enabled": True, "insert_after_sheet": None},
+        "control_account_rollforward": {"enabled": True, "insert_after_sheet": None},
+        "nominal_matrix": {"enabled": True, "insert_after_sheet": None, "max_accounts": 6},
+        "debtors_recon": {"enabled": True, "insert_after_sheet": None},
+        "creditors_recon": {"enabled": True, "insert_after_sheet": None},
+        "bank_recon": {"enabled": True, "insert_after_sheet": None},
+        "vat_recon": {"enabled": True, "insert_after_sheet": None},
+        "nominal_review": {"enabled": True, "insert_after_sheet": None},
+        "points_forward": {"enabled": True, "insert_after_sheet": None},
+    },
+    "header_cells": {"client_name_cell": "A1", "period_cell": "A2", "schedule_title_cell": "A3"},
+    "materiality": {"default_amount": 500, "variance_pct_threshold": 0.10},
+    "numbering": {"style": "sequential", "start_at": 1},
+}
 
 
 def _new_id(prefix: str) -> str:
@@ -29,11 +57,91 @@ def _write_json(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload, indent=2, default=str))
 
 
-# ---------- clients ----------
+# ---------- practices ----------
 
-def create_client(name: str) -> dict:
+def create_practice(name: str) -> dict:
+    practice_id = _new_id("practice")
+    practice = {"id": practice_id, "name": name, "created_at": datetime.utcnow().isoformat(), "default_template_id": None}
+    _write_json(PRACTICES_DIR / practice_id / "info.json", practice)
+    return practice
+
+
+def get_practice(practice_id: str) -> dict | None:
+    return _read_json(PRACTICES_DIR / practice_id / "info.json")
+
+
+def save_practice(practice: dict) -> None:
+    _write_json(PRACTICES_DIR / practice["id"] / "info.json", practice)
+
+
+def list_practices() -> list[dict]:
+    if not PRACTICES_DIR.exists():
+        return []
+    out = []
+    for d in sorted(PRACTICES_DIR.iterdir()):
+        info = _read_json(d / "info.json")
+        if info:
+            out.append(info)
+    return out
+
+
+# ---------- templates (scoped to a practice) ----------
+
+def create_template(practice_id: str, name: str, file_bytes: bytes, filename: str) -> dict:
+    template_id = _new_id("template")
+    template_dir = PRACTICES_DIR / practice_id / "templates" / template_id
+    template_dir.mkdir(parents=True, exist_ok=True)
+    file_path = template_dir / filename
+    file_path.write_bytes(file_bytes)
+
+    template = {
+        "id": template_id,
+        "practice_id": practice_id,
+        "name": name,
+        "filename": filename,
+        "file_path": str(file_path),
+        "created_at": datetime.utcnow().isoformat(),
+        "version": 1,
+        "config": DEFAULT_TEMPLATE_CONFIG,
+    }
+    _write_json(template_dir / "info.json", template)
+
+    practice = get_practice(practice_id)
+    if practice and not practice.get("default_template_id"):
+        practice["default_template_id"] = template_id
+        save_practice(practice)
+    return template
+
+
+def get_template(practice_id: str, template_id: str) -> dict | None:
+    return _read_json(PRACTICES_DIR / practice_id / "templates" / template_id / "info.json")
+
+
+def save_template(template: dict) -> None:
+    template["version"] = template.get("version", 1) + 1
+    _write_json(PRACTICES_DIR / template["practice_id"] / "templates" / template["id"] / "info.json", template)
+
+
+def list_templates(practice_id: str) -> list[dict]:
+    templates_dir = PRACTICES_DIR / practice_id / "templates"
+    if not templates_dir.exists():
+        return []
+    out = []
+    for d in sorted(templates_dir.iterdir()):
+        info = _read_json(d / "info.json")
+        if info:
+            out.append(info)
+    return out
+
+
+# ---------- clients (scoped to a practice) ----------
+
+def create_client(practice_id: str, name: str, template_id: str | None = None) -> dict:
     client_id = _new_id("client")
-    client = {"id": client_id, "name": name, "created_at": datetime.utcnow().isoformat()}
+    client = {
+        "id": client_id, "practice_id": practice_id, "name": name,
+        "template_id": template_id, "created_at": datetime.utcnow().isoformat(),
+    }
     _write_json(CLIENTS_DIR / client_id / "info.json", client)
     return client
 
@@ -42,13 +150,13 @@ def get_client(client_id: str) -> dict | None:
     return _read_json(CLIENTS_DIR / client_id / "info.json")
 
 
-def list_clients() -> list[dict]:
+def list_clients(practice_id: str | None = None) -> list[dict]:
     if not CLIENTS_DIR.exists():
         return []
     out = []
     for d in sorted(CLIENTS_DIR.iterdir()):
         info = _read_json(d / "info.json")
-        if info:
+        if info and (practice_id is None or info.get("practice_id") == practice_id):
             out.append(info)
     return out
 

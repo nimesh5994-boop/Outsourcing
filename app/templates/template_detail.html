@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1>{{ template.name }}</h1>
+  <p class="muted">{{ template.filename }} &mdash; version {{ template.version }}</p>
+  <p class="muted">This config controls which schedules get generated, where each one is inserted, and the thresholds used. Edit as JSON for now &mdash; a proper form editor can follow once the schema settles.</p>
+  {% if error %}<p style="color:#b42318">{{ error }}</p>{% endif %}
+  <form method="post" action="/practices/{{ practice_id }}/templates/{{ template.id }}/config">
+    <label>Configuration (JSON)</label>
+    <textarea name="config_json" rows="30" style="width:100%; font-family:monospace; font-size:13px; padding:10px; border:1px solid #dfe3e8; border-radius:6px;">{{ config_json }}</textarea>
+    <div style="margin-top:16px">
+      <button type="submit">Save configuration</button>
+      <a class="button secondary" href="/practices/{{ practice_id }}">Back</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

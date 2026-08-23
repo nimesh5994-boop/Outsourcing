@@ -38,18 +38,77 @@ DATA_KEY = {
 
 @app.get("/")
 def home():
-    return RedirectResponse("/clients")
+    return RedirectResponse("/practices")
 
 
-@app.get("/clients")
-def list_clients(request: Request):
-    clients = storage.list_clients()
-    return templates.TemplateResponse("clients.html", {"request": request, "clients": clients})
+@app.get("/practices")
+def list_practices(request: Request):
+    practices = storage.list_practices()
+    return templates.TemplateResponse("practices.html", {"request": request, "practices": practices})
 
 
-@app.post("/clients")
-def create_client(name: str = Form(...)):
-    client = storage.create_client(name.strip())
+@app.post("/practices")
+def create_practice(name: str = Form(...)):
+    practice = storage.create_practice(name.strip())
+    return RedirectResponse(f"/practices/{practice['id']}", status_code=303)
+
+
+@app.get("/practices/{practice_id}")
+def practice_detail(request: Request, practice_id: str):
+    practice = storage.get_practice(practice_id)
+    templates_list = storage.list_templates(practice_id)
+    clients = storage.list_clients(practice_id)
+    return templates.TemplateResponse("practice_detail.html", {
+        "request": request, "practice": practice, "templates_list": templates_list, "clients": clients,
+    })
+
+
+@app.post("/practices/{practice_id}/templates")
+async def upload_template(practice_id: str, name: str = Form(...), file: UploadFile = None):
+    content = await file.read()
+    storage.create_template(practice_id, name.strip(), content, file.filename)
+    return RedirectResponse(f"/practices/{practice_id}", status_code=303)
+
+
+@app.get("/practices/{practice_id}/templates/{template_id}")
+def template_detail(request: Request, practice_id: str, template_id: str):
+    import json as _json
+    template = storage.get_template(practice_id, template_id)
+    return templates.TemplateResponse("template_detail.html", {
+        "request": request, "practice_id": practice_id, "template": template,
+        "config_json": _json.dumps(template["config"], indent=2),
+    })
+
+
+@app.post("/practices/{practice_id}/templates/{template_id}/config")
+async def save_template_config(request: Request, practice_id: str, template_id: str):
+    import json as _json
+    form = await request.form()
+    template = storage.get_template(practice_id, template_id)
+    try:
+        template["config"] = _json.loads(form.get("config_json"))
+    except _json.JSONDecodeError as exc:
+        return templates.TemplateResponse("template_detail.html", {
+            "request": request, "practice_id": practice_id, "template": template,
+            "config_json": form.get("config_json"), "error": f"Invalid JSON: {exc}",
+        })
+    storage.save_template(template)
+    return RedirectResponse(f"/practices/{practice_id}/templates/{template_id}", status_code=303)
+
+
+@app.post("/practices/{practice_id}/templates/{template_id}/make-default")
+def make_template_default(practice_id: str, template_id: str):
+    practice = storage.get_practice(practice_id)
+    practice["default_template_id"] = template_id
+    storage.save_practice(practice)
+    return RedirectResponse(f"/practices/{practice_id}", status_code=303)
+
+
+@app.post("/practices/{practice_id}/clients")
+def create_client(practice_id: str, name: str = Form(...), template_id: str = Form("")):
+    practice = storage.get_practice(practice_id)
+    chosen_template = template_id or practice.get("default_template_id")
+    client = storage.create_client(practice_id, name.strip(), chosen_template)
     return RedirectResponse(f"/clients/{client['id']}", status_code=303)
 
 
