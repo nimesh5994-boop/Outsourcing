@@ -5,7 +5,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import control_accounts, corporation_tax, fixed_assets, mapping, nominal_matrix, parsers, recon, storage, xero_reports
+from app import anomaly_detection, control_accounts, corporation_tax, fixed_assets, mapping, nominal_matrix, parsers, recon, storage, xero_reports
 from app.excel_builder import build_workbook
 from app.models import PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS
 
@@ -365,7 +365,7 @@ def _build_ct_computation(job: dict, data: dict) -> corporation_tax.CTComputatio
 def generate(job_id: str):
     job = storage.get_job(job_id)
     data = _load_canonical_data(job)
-    results = recon.run_all_recons(data)
+    results = recon.run_all_recons(data) + anomaly_detection.run_all_anomaly_checks(data.get("nominal_current"))
 
     ca_results = control_accounts.build_all_rollforwards(
         data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),

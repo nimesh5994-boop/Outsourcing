@@ -155,10 +155,26 @@ quirks each one works around.
 | Corporation Tax computation | Current UK rates (small profits/marginal relief/main rate) applied to accounting profit, checked against the booked tax charge |
 | Fixed asset register (category) | Cost/depreciation rollforward per asset category, derived from TB + nominal activity, checked against the TB |
 | Fixed asset register (asset detail) | Prior-year register rolled forward asset-by-asset, new additions/possible disposals flagged from nominal activity, totals checked against TB |
+| Contact coding consistency | A contact whose postings are mostly on one nominal code but a small minority land on a different one - the "BT: 10 postings to Telephone, 2 to Light & Heat" pattern - flags the minority transactions with the likely correct code |
+| Duplicate transaction check | Same contact+date+amount posted more than once, or the same reference/invoice number reused on the same nominal code for the same amount - excludes the natural double-entry legs of one transaction (same reference on different codes, or an invoice and its later payment, which share a reference but have opposite signs) |
+| Unusual posting date check | Manual journals (not bank feed or trading transactions, which legitimately happen any day) posted on a weekend |
 
 Every check produces a status (`ok` / `review` / `error` / `n/a`) and a
 plain-English message, shown on the workbook's Index sheet and again on
 each schedule.
+
+The last three (`app/anomaly_detection.py`) are a different kind of check
+from the rest of the table: everything else compares a total against
+another total (TB vs aged listing, VAT return vs nominal ledger); these
+look across *many* transactions for the same contact to find a pattern a
+single row can't reveal on its own. They're deliberately conservative -
+each requires a decent transaction sample and a genuinely lopsided pattern
+before flagging anything, specifically to avoid drowning a reviewer in
+noise from transactions that only look similar (see the double-entry
+exclusion above, found by running this against real sample data and
+noticing every ordinary invoice was getting flagged as its own duplicate).
+They surface candidates for a human to confirm, the same as every other
+check in this system - not an auto-fixer.
 
 ## Corporation Tax computation
 
@@ -238,6 +254,7 @@ app/
   parsers.py            generic CSV/XLSX loading + column mapping; DataSource abstraction
   xero_reports.py        Xero-specific report parsers (see above)
   recon.py                 the reconciliation/cross-check engine
+  anomaly_detection.py       cross-transaction checks (miscoding, duplicates, unusual posting dates)
   control_accounts.py       control account rollforward + aged breakdown engine
   nominal_matrix.py          nominal activity → contra nominal code analysis matrix (+ formula row-id grouping)
   fixed_assets.py             category-level + asset-level fixed asset register engine

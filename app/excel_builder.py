@@ -1280,6 +1280,9 @@ def build_workbook(
         "Bank reconciliation": "Bank Recon",
         "VAT return cross-check": "VAT Recon",
         "Nominal activity review (reallocation candidates)": "Nominal Review",
+        "Contact coding consistency (possible miscoding)": "Contact Coding Check",
+        "Duplicate transaction check": "Duplicate Check",
+        "Unusual posting date check (weekend manual journals)": "Weekend Journals",
     }
     recon_refs = {}
     for res in results:
