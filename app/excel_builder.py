@@ -18,7 +18,7 @@ from app.financial_statements import StatementResult, build_bs_statement, build_
 from app.fixed_assets import AssetRegisterResult, FixedAssetResult
 from app.nominal_matrix import MatrixResult
 from app.recon import MATERIALITY_AMOUNT, VARIANCE_PCT_THRESHOLD, ReconResult
-from app.xlformulas import quote, sumifs_exact
+from app.xlformulas import cell_ref, quote, sumifs_exact
 
 NAVY = "1F3864"
 GREEN = "C6EFCE"
@@ -351,6 +351,128 @@ def build_control_account_sheet(wb: Workbook, client_name: str, current_label: s
         if result.status != "ok" and str(ws.cell(row=diff_row, column=1).value or "").startswith("UNEXPLAINED"):
             for c in range(1, 3):
                 ws.cell(row=diff_row, column=c).fill = PatternFill("solid", fgColor=AMBER)
+
+    ws.freeze_panes = f"A{table_row + 1}"
+
+
+def build_control_account_sheet_formulas(wb: Workbook, client_name: str, current_label: str, ref: str, result: ControlAccountResult, refs: DataRefs):
+    """Same schedule as build_control_account_sheet, but every Dr/Cr cell is
+    a live formula against the DATA sheets. A hidden helper column (F)
+    holds each row's raw signed balance so the Debit/Credit split (and the
+    DIFFERENCE row's own arithmetic) can reference it without repeating the
+    same SUMPRODUCT twice per row."""
+    sheet_name = f"{ref} {result.account_name}"[:31]
+    ws = wb.create_sheet(sheet_name)
+    suffix = "" if "control account" in result.account_name.lower() else " CONTROL ACCOUNT"
+    title = f"{result.account_name.upper()}{suffix} (nominal {result.account_code})"
+    row = _write_title(ws, client_name, current_label, title, ref)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
+    status_cell.font = _status_font(result.status)
+    status_cell.fill = _status_fill(result.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+    ws.row_dimensions[row].height = 30
+
+    code = result.account_code
+    has_movement = refs.nominal_current is not None and len(result.schedule) >= 4
+
+    table_row = row + 2
+    headers = ["Item", "Reference", "Debit £", "Credit £"]
+    for j, h in enumerate(headers):
+        ws.cell(row=table_row, column=1 + j, value=h)
+    _style_header_row(ws, table_row, len(headers))
+
+    def dr_cr_from_helper(r: int):
+        ws.cell(row=r, column=3, value=f"=IF(F{r}>=0,F{r},0)").number_format = CURRENCY_FMT
+        ws.cell(row=r, column=4, value=f"=IF(F{r}<0,-F{r},0)").number_format = CURRENCY_FMT
+
+    r = table_row + 1
+    bfwd_row = r
+    ws.cell(row=r, column=1, value="BALANCE B/FWD").border = BORDER
+    ws.cell(row=r, column=2, value="Comparative year TB").border = BORDER
+    bfwd_formula = sumifs_exact(refs.tb_comparative.col_range("balance"), (refs.tb_comparative.col_range("account_code"), quote(code))) if refs.tb_comparative else "=0"
+    ws.cell(row=r, column=6, value=bfwd_formula)
+    dr_cr_from_helper(r)
+    r += 1
+
+    move_row = None
+    if has_movement:
+        move_row = r
+        ws.cell(row=r, column=1, value="MOVEMENTS DURING YEAR").border = BORDER
+        ws.cell(row=r, column=2, value="Nominal activity detail").border = BORDER
+        ws.cell(row=r, column=3, value=sumifs_exact(refs.nominal_current.col_range("debit"), (refs.nominal_current.col_range("account_code"), quote(code)))).number_format = CURRENCY_FMT
+        ws.cell(row=r, column=4, value=sumifs_exact(refs.nominal_current.col_range("credit"), (refs.nominal_current.col_range("account_code"), quote(code)))).number_format = CURRENCY_FMT
+    else:
+        ws.cell(row=r, column=1, value="MOVEMENTS DURING YEAR").border = BORDER
+        ws.cell(row=r, column=2, value="No nominal activity detail available").border = BORDER
+    r += 1
+
+    cfwd_row = r
+    ws.cell(row=r, column=1, value="BALANCE C/FWD (per TB)").border = BORDER
+    ws.cell(row=r, column=2, value="Current year TB").border = BORDER
+    cfwd_formula = sumifs_exact(refs.tb_current.col_range("balance"), (refs.tb_current.col_range("account_code"), quote(code))) if refs.tb_current else "=0"
+    ws.cell(row=r, column=6, value=cfwd_formula)
+    dr_cr_from_helper(r)
+    r += 1
+
+    if move_row is not None:
+        diff_row = r
+        ws.cell(row=r, column=1, value="DIFFERENCE (computed c/fwd vs per TB)").font = BOLD
+        ws.cell(row=r, column=2, value="").border = BORDER
+        ws.cell(row=r, column=6, value=f"=F{cfwd_row}-(F{bfwd_row}+C{move_row}-D{move_row})")
+        dr_cr_from_helper(r)
+        for c in (1, 2, 3, 4):
+            ws.cell(row=r, column=c).font = BOLD
+            if result.status != "ok":
+                ws.cell(row=r, column=c).fill = PatternFill("solid", fgColor=AMBER)
+        ws.cell(row=r, column=1).border = BORDER
+        r += 1
+
+    ws.column_dimensions["F"].hidden = True
+    next_row = r + 1
+
+    if not result.breakdown.empty:
+        aged_refs = refs.aged_debtors if "debtor" in result.breakdown_label.lower() else refs.aged_creditors
+        party_col = "customer" if "debtor" in result.breakdown_label.lower() else "supplier"
+        if aged_refs is not None:
+            ws.cell(row=next_row, column=1, value=f"BREAKDOWN OF CLOSING BALANCE ({result.breakdown_label})").font = SCHEDULE_FONT
+            b_row = next_row + 1
+            for j, h in enumerate(["Party", "Amount £"]):
+                ws.cell(row=b_row, column=1 + j, value=h)
+            _style_header_row(ws, b_row, 2)
+
+            n_parties = aged_refs.last_row - aged_refs.first_row + 1
+            first_party_row = b_row + 1
+            for i in range(n_parties):
+                src_row = aged_refs.first_row + i
+                dest_row = first_party_row + i
+                ws.cell(row=dest_row, column=1, value="=" + cell_ref(aged_refs.sheet_name, f"{aged_refs.columns[party_col]}{src_row}")).border = BORDER
+                amt_cell = ws.cell(row=dest_row, column=2, value="=" + cell_ref(aged_refs.sheet_name, f"{aged_refs.columns['total']}{src_row}"))
+                amt_cell.number_format = CURRENCY_FMT
+                amt_cell.border = BORDER
+
+            total_row = first_party_row + n_parties
+            ws.cell(row=total_row, column=1, value="TOTAL PER BREAKDOWN").font = BOLD
+            total_cell = ws.cell(row=total_row, column=2, value=f"=SUM(B{first_party_row}:B{total_row - 1})")
+            total_cell.number_format = CURRENCY_FMT
+            total_cell.font = BOLD
+
+            tb_row = total_row + 1
+            ws.cell(row=tb_row, column=1, value="BALANCE PER TB").font = BOLD
+            tb_formula = f"=ABS({sumifs_exact(refs.tb_current.col_range('balance'), (refs.tb_current.col_range('account_code'), quote(code)))[1:]})"
+            tb_cell = ws.cell(row=tb_row, column=2, value=tb_formula)
+            tb_cell.number_format = CURRENCY_FMT
+            tb_cell.font = BOLD
+
+            diff_bd_row = tb_row + 1
+            ws.cell(row=diff_bd_row, column=1, value="UNEXPLAINED DIFFERENCE (for preparer to review)").font = BOLD
+            diff_bd_cell = ws.cell(row=diff_bd_row, column=2, value=f"=B{total_row}-B{tb_row}")
+            diff_bd_cell.number_format = CURRENCY_FMT
+            diff_bd_cell.font = BOLD
+            if result.status != "ok":
+                for c in (1, 2):
+                    ws.cell(row=diff_bd_row, column=c).fill = PatternFill("solid", fgColor=AMBER)
 
     ws.freeze_panes = f"A{table_row + 1}"
 
