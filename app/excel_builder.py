@@ -11,6 +11,7 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.worksheet.worksheet import Worksheet
 
 from app.control_accounts import ControlAccountResult
@@ -77,16 +78,35 @@ def _autosize(ws: Worksheet, df: pd.DataFrame, start_col: int = 1):
         ws.column_dimensions[get_column_letter(start_col + i)].width = width
 
 
-def _write_title(ws: Worksheet, client_name: str, period_label: str, schedule_title: str, ref: str = "") -> int:
-    """House-style header block: CLIENT NAME / PERIOD / SCHEDULE TITLE.
-    Returns the first free row below the header block."""
-    ws["A1"] = client_name.upper()
-    ws["A1"].font = CLIENT_FONT
-    ws["A2"] = period_label.upper()
-    ws["A2"].font = PERIOD_FONT
-    ws["A3"] = f"{ref + '  ' if ref else ''}{schedule_title}"
-    ws["A3"].font = SCHEDULE_FONT
-    return 5
+DEFAULT_HEADER_CELLS = {"client_name_cell": "A1", "period_cell": "A2", "schedule_title_cell": "A3"}
+
+
+def _write_title(
+    ws: Worksheet, client_name: str, period_label: str, schedule_title: str, ref: str = "",
+    header_cells: dict | None = None,
+) -> int:
+    """House-style header block: CLIENT NAME / PERIOD / SCHEDULE TITLE,
+    written into whichever cells a template's config specifies
+    (storage.DEFAULT_TEMPLATE_CONFIG's header_cells) - defaults to A1/A2/A3
+    (the generic-layout convention) when no template config applies.
+    Returns the first free row below the header block, computed from
+    whichever of the three configured cells sits lowest rather than
+    hardcoded, since a template's own convention might not put them on
+    rows 1-3."""
+    cells = header_cells or DEFAULT_HEADER_CELLS
+    client_cell = cells.get("client_name_cell") or DEFAULT_HEADER_CELLS["client_name_cell"]
+    period_cell = cells.get("period_cell") or DEFAULT_HEADER_CELLS["period_cell"]
+    title_cell = cells.get("schedule_title_cell") or DEFAULT_HEADER_CELLS["schedule_title_cell"]
+
+    ws[client_cell] = client_name.upper()
+    ws[client_cell].font = CLIENT_FONT
+    ws[period_cell] = period_label.upper()
+    ws[period_cell].font = PERIOD_FONT
+    ws[title_cell] = f"{ref + '  ' if ref else ''}{schedule_title}"
+    ws[title_cell].font = SCHEDULE_FONT
+
+    last_row = max(coordinate_from_string(c)[1] for c in (client_cell, period_cell, title_cell))
+    return last_row + 2
 
 
 def _status_fill(status: str) -> PatternFill:
@@ -187,9 +207,9 @@ def build_index_sheet(ws: Worksheet, client_name: str, current_label: str, compa
     ws.freeze_panes = "A7"
 
 
-def build_tb_lead_schedule(wb: Workbook, client_name: str, current_label: str, ref: str, variance_detail: pd.DataFrame):
+def build_tb_lead_schedule(wb: Workbook, client_name: str, current_label: str, ref: str, variance_detail: pd.DataFrame, header_cells: dict | None = None):
     ws = wb.create_sheet(f"{ref} TB Lead Schedule"[:31])
-    row = _write_title(ws, client_name, current_label, "TRIAL BALANCE LEAD SCHEDULE", ref)
+    row = _write_title(ws, client_name, current_label, "TRIAL BALANCE LEAD SCHEDULE", ref, header_cells=header_cells)
     if variance_detail is None or variance_detail.empty:
         ws.cell(row=row, column=1, value="No trial balance data available.")
         return
@@ -212,13 +232,13 @@ def build_tb_lead_schedule(wb: Workbook, client_name: str, current_label: str, r
     ws.freeze_panes = f"A{row + 1}"
 
 
-def build_tb_lead_schedule_formulas(wb: Workbook, client_name: str, current_label: str, ref: str, variance_detail: pd.DataFrame, refs: DataRefs):
+def build_tb_lead_schedule_formulas(wb: Workbook, client_name: str, current_label: str, ref: str, variance_detail: pd.DataFrame, refs: DataRefs, header_cells: dict | None = None):
     """Same schedule as build_tb_lead_schedule, but every numeric cell is a
     live formula against the DATA_TB_* sheets instead of a Python-computed
     literal - which accounts appear and their sort order still come from
     variance_detail (a listing question, not a value one)."""
     ws = wb.create_sheet(f"{ref} TB Lead Schedule"[:31])
-    row = _write_title(ws, client_name, current_label, "TRIAL BALANCE LEAD SCHEDULE", ref)
+    row = _write_title(ws, client_name, current_label, "TRIAL BALANCE LEAD SCHEDULE", ref, header_cells=header_cells)
     if variance_detail is None or variance_detail.empty or refs.tb_current is None:
         ws.cell(row=row, column=1, value="No trial balance data available.")
         return
@@ -270,9 +290,9 @@ def build_tb_lead_schedule_formulas(wb: Workbook, client_name: str, current_labe
     ws.freeze_panes = f"A{row + 1}"
 
 
-def build_statement_sheet(wb: Workbook, client_name: str, period_label: str, ref: str, sheet_name: str, title: str, df: pd.DataFrame, statement: StatementResult | None = None):
+def build_statement_sheet(wb: Workbook, client_name: str, period_label: str, ref: str, sheet_name: str, title: str, df: pd.DataFrame, statement: StatementResult | None = None, header_cells: dict | None = None):
     ws = wb.create_sheet(sheet_name[:31])
-    row = _write_title(ws, client_name, period_label, title, ref)
+    row = _write_title(ws, client_name, period_label, title, ref, header_cells=header_cells)
     if df is None or df.empty:
         ws.cell(row=row, column=1, value="No data uploaded for this statement.")
         return
@@ -306,9 +326,9 @@ def build_statement_sheet(wb: Workbook, client_name: str, period_label: str, ref
     ws.freeze_panes = f"A{row + 1}"
 
 
-def build_recon_sheet(wb: Workbook, client_name: str, period_label: str, ref: str, sheet_name: str, result: ReconResult):
+def build_recon_sheet(wb: Workbook, client_name: str, period_label: str, ref: str, sheet_name: str, result: ReconResult, header_cells: dict | None = None):
     ws = wb.create_sheet(sheet_name[:31])
-    row = _write_title(ws, client_name, period_label, result.name, ref)
+    row = _write_title(ws, client_name, period_label, result.name, ref, header_cells=header_cells)
     status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
     status_cell.font = _status_font(result.status)
     status_cell.fill = _status_fill(result.status)
@@ -324,12 +344,12 @@ def build_recon_sheet(wb: Workbook, client_name: str, period_label: str, ref: st
     ws.freeze_panes = f"A{detail_row + 1}"
 
 
-def build_control_account_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: ControlAccountResult):
+def build_control_account_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: ControlAccountResult, header_cells: dict | None = None):
     sheet_name = f"{ref} {result.account_name}"[:31]
     ws = wb.create_sheet(sheet_name)
     suffix = "" if "control account" in result.account_name.lower() else " CONTROL ACCOUNT"
     title = f"{result.account_name.upper()}{suffix} (nominal {result.account_code})"
-    row = _write_title(ws, client_name, current_label, title, ref)
+    row = _write_title(ws, client_name, current_label, title, ref, header_cells=header_cells)
 
     status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
     status_cell.font = _status_font(result.status)
@@ -371,7 +391,7 @@ def build_control_account_sheet(wb: Workbook, client_name: str, current_label: s
     ws.freeze_panes = f"A{table_row + 1}"
 
 
-def build_control_account_sheet_formulas(wb: Workbook, client_name: str, current_label: str, ref: str, result: ControlAccountResult, refs: DataRefs):
+def build_control_account_sheet_formulas(wb: Workbook, client_name: str, current_label: str, ref: str, result: ControlAccountResult, refs: DataRefs, header_cells: dict | None = None):
     """Same schedule as build_control_account_sheet, but every Dr/Cr cell is
     a live formula against the DATA sheets. A hidden helper column (F)
     holds each row's raw signed balance so the Debit/Credit split (and the
@@ -381,7 +401,7 @@ def build_control_account_sheet_formulas(wb: Workbook, client_name: str, current
     ws = wb.create_sheet(sheet_name)
     suffix = "" if "control account" in result.account_name.lower() else " CONTROL ACCOUNT"
     title = f"{result.account_name.upper()}{suffix} (nominal {result.account_code})"
-    row = _write_title(ws, client_name, current_label, title, ref)
+    row = _write_title(ws, client_name, current_label, title, ref, header_cells=header_cells)
 
     status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
     status_cell.font = _status_font(result.status)
@@ -493,7 +513,7 @@ def build_control_account_sheet_formulas(wb: Workbook, client_name: str, current
     ws.freeze_panes = f"A{table_row + 1}"
 
 
-def build_pl_statement_sheet_formulas(wb: Workbook, client_name: str, period_label: str, ref: str, pl_result: StatementResult, refs: DataRefs) -> tuple[str, str | None]:
+def build_pl_statement_sheet_formulas(wb: Workbook, client_name: str, period_label: str, ref: str, pl_result: StatementResult, refs: DataRefs, header_cells: dict | None = None) -> tuple[str, str | None]:
     """Same summary lines as build_statement_sheet's P&L, but every summary
     figure is a live SUMPRODUCT-by-category formula against DATA_PL, and the
     detail table is a row-for-row cell reference into DATA_PL rather than a
@@ -502,7 +522,7 @@ def build_pl_statement_sheet_formulas(wb: Workbook, client_name: str, period_lab
     with a real cross-sheet reference instead of a re-computed literal."""
     sheet_name = f"{ref} Profit and Loss"[:31]
     ws = wb.create_sheet(sheet_name)
-    row = _write_title(ws, client_name, period_label, "PROFIT AND LOSS ACCOUNT", ref)
+    row = _write_title(ws, client_name, period_label, "PROFIT AND LOSS ACCOUNT", ref, header_cells=header_cells)
 
     status_cell = ws.cell(row=row, column=1, value=f"Status: {pl_result.status.upper()} - {pl_result.message}")
     status_cell.font = _status_font(pl_result.status)
@@ -577,7 +597,7 @@ def build_pl_statement_sheet_formulas(wb: Workbook, client_name: str, period_lab
 
 def build_bs_statement_sheet_formulas(
     wb: Workbook, client_name: str, period_label: str, ref: str, bs_result: StatementResult, refs: DataRefs,
-    pl_sheet_name: str | None, pl_net_profit_cell: str | None,
+    pl_sheet_name: str | None, pl_net_profit_cell: str | None, header_cells: dict | None = None,
 ) -> str:
     """Same lines as build_statement_sheet's Balance Sheet, including the
     explicit CHECK row, but computed via live formulas against DATA_BS - and
@@ -589,7 +609,7 @@ def build_bs_statement_sheet_formulas(
     round (credits displayed positive)."""
     sheet_name = f"{ref} Balance Sheet"[:31]
     ws = wb.create_sheet(sheet_name)
-    row = _write_title(ws, client_name, period_label, "BALANCE SHEET", ref)
+    row = _write_title(ws, client_name, period_label, "BALANCE SHEET", ref, header_cells=header_cells)
 
     status_cell = ws.cell(row=row, column=1, value=f"Status: {bs_result.status.upper()} - {bs_result.message}")
     status_cell.font = _status_font(bs_result.status)
@@ -715,7 +735,7 @@ def build_bs_statement_sheet_formulas(
 
 def build_fixed_asset_category_sheet_formulas(
     wb: Workbook, client_name: str, period_label: str, ref: str, result: FixedAssetResult, refs: DataRefs,
-    grouped_codes: dict[str, dict[str, list[str]]],
+    grouped_codes: dict[str, dict[str, list[str]]], header_cells: dict | None = None,
 ):
     """Formula-linked version of the category-level fixed asset rollforward:
     same cost/depreciation/NBV columns as the Python-computed sheet, but
@@ -728,7 +748,7 @@ def build_fixed_asset_category_sheet_formulas(
     number in the rollforward recalculates from the raw data."""
     sheet_name = f"{ref} Fixed Asset Register (Category)"[:31]
     ws = wb.create_sheet(sheet_name)
-    row = _write_title(ws, client_name, period_label, "FIXED ASSET REGISTER (CATEGORY SUMMARY)", ref)
+    row = _write_title(ws, client_name, period_label, "FIXED ASSET REGISTER (CATEGORY SUMMARY)", ref, header_cells=header_cells)
 
     status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
     status_cell.font = _status_font(result.status)
@@ -810,11 +830,11 @@ def build_fixed_asset_category_sheet_formulas(
     return sheet_name
 
 
-def build_matrix_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: MatrixResult):
+def build_matrix_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: MatrixResult, header_cells: dict | None = None):
     sheet_name = f"{ref} {result.account_name} Analysis"[:31]
     ws = wb.create_sheet(sheet_name)
     title = f"NOMINAL ACTIVITY ANALYSIS - {result.account_name} ({result.account_code})"
-    row = _write_title(ws, client_name, current_label, title, ref)
+    row = _write_title(ws, client_name, current_label, title, ref, header_cells=header_cells)
 
     status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
     status_cell.font = _status_font(result.status)
@@ -834,7 +854,7 @@ def build_matrix_sheet(wb: Workbook, client_name: str, current_label: str, ref: 
 
 def build_matrix_sheet_formulas(
     wb: Workbook, client_name: str, current_label: str, ref: str, result: MatrixResult, refs: DataRefs,
-    nominal_current: pd.DataFrame,
+    nominal_current: pd.DataFrame, header_cells: dict | None = None,
 ):
     """Formula-linked version of the nominal activity matrix: same
     (date/reference/description/contact) x contra-account pivot, but every
@@ -849,7 +869,7 @@ def build_matrix_sheet_formulas(
     sheet_name = f"{ref} {result.account_name} Analysis"[:31]
     ws = wb.create_sheet(sheet_name)
     title = f"NOMINAL ACTIVITY ANALYSIS - {result.account_name} ({result.account_code})"
-    row = _write_title(ws, client_name, current_label, title, ref)
+    row = _write_title(ws, client_name, current_label, title, ref, header_cells=header_cells)
 
     status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
     status_cell.font = _status_font(result.status)
@@ -909,9 +929,9 @@ def build_matrix_sheet_formulas(
     return sheet_name
 
 
-def build_asset_register_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: AssetRegisterResult):
+def build_asset_register_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: AssetRegisterResult, header_cells: dict | None = None):
     ws = wb.create_sheet(f"{ref} Fixed Asset Register"[:31])
-    row = _write_title(ws, client_name, current_label, "FIXED ASSET REGISTER (ASSET DETAIL)", ref)
+    row = _write_title(ws, client_name, current_label, "FIXED ASSET REGISTER (ASSET DETAIL)", ref, header_cells=header_cells)
 
     status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
     status_cell.font = _status_font(result.status)
@@ -941,12 +961,12 @@ def build_asset_register_sheet(wb: Workbook, client_name: str, current_label: st
     ws.freeze_panes = f"A{row + 1}"
 
 
-def build_closing_register_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, closing_register: pd.DataFrame):
+def build_closing_register_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, closing_register: pd.DataFrame, header_cells: dict | None = None):
     """Same presentation/column layout as the prior-year register upload,
     so this sheet's contents can be taken straight into next year's job as
     its opening register - no reformatting needed."""
     ws = wb.create_sheet(f"{ref} FA Register (closing)"[:31])
-    row = _write_title(ws, client_name, current_label, "FIXED ASSET REGISTER - CLOSING POSITION (FOR NEXT YEAR'S OPENING UPLOAD)", ref)
+    row = _write_title(ws, client_name, current_label, "FIXED ASSET REGISTER - CLOSING POSITION (FOR NEXT YEAR'S OPENING UPLOAD)", ref, header_cells=header_cells)
     if closing_register.empty:
         ws.cell(row=row, column=1, value="No data available.")
         return
@@ -954,9 +974,9 @@ def build_closing_register_sheet(wb: Workbook, client_name: str, current_label: 
     ws.freeze_panes = f"A{row + 1}"
 
 
-def build_corporation_tax_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, ct: CTComputation):
+def build_corporation_tax_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, ct: CTComputation, header_cells: dict | None = None):
     ws = wb.create_sheet(f"{ref} Corporation Tax"[:31])
-    row = _write_title(ws, client_name, current_label, "CORPORATION TAX COMPUTATION", ref)
+    row = _write_title(ws, client_name, current_label, "CORPORATION TAX COMPUTATION", ref, header_cells=header_cells)
 
     status_cell = ws.cell(row=row, column=1, value=f"Status: {ct.status.upper()} - {ct.message}")
     status_cell.font = _status_font(ct.status)
@@ -1010,7 +1030,7 @@ PERCENT_FMT = "0.00%"
 
 def build_corporation_tax_sheet_formulas(
     wb: Workbook, client_name: str, current_label: str, ref: str, ct: CTComputation,
-    pl_sheet_name: str | None = None, pl_net_profit_cell: str | None = None,
+    pl_sheet_name: str | None = None, pl_net_profit_cell: str | None = None, header_cells: dict | None = None,
 ) -> str:
     """Same proforma as build_corporation_tax_sheet, but every computed line
     (taxable profit, the scaled thresholds, the rate band, marginal relief,
@@ -1033,7 +1053,7 @@ def build_corporation_tax_sheet_formulas(
     as an independent formula-editable cell here."""
     sheet_name = f"{ref} Corporation Tax"[:31]
     ws = wb.create_sheet(sheet_name)
-    row = _write_title(ws, client_name, current_label, "CORPORATION TAX COMPUTATION", ref)
+    row = _write_title(ws, client_name, current_label, "CORPORATION TAX COMPUTATION", ref, header_cells=header_cells)
 
     status_cell = ws.cell(row=row, column=1, value=f"Status: {ct.status.upper()} - {ct.message}")
     status_cell.font = _status_font(ct.status)
@@ -1212,9 +1232,9 @@ def build_corporation_tax_sheet_formulas(
     return sheet_name
 
 
-def build_points_forward_sheet(wb: Workbook, client_name: str, period_label: str, ref: str):
+def build_points_forward_sheet(wb: Workbook, client_name: str, period_label: str, ref: str, header_cells: dict | None = None):
     ws = wb.create_sheet(f"{ref} Points Forward"[:31])
-    row = _write_title(ws, client_name, period_label, "POINTS FORWARD / OPEN QUERIES", ref)
+    row = _write_title(ws, client_name, period_label, "POINTS FORWARD / OPEN QUERIES", ref, header_cells=header_cells)
     headers = ["#", "Area", "Query", "Raised by", "Date raised", "Response / Resolution", "Status"]
     for j, h in enumerate(headers):
         ws.cell(row=row, column=1 + j, value=h)
@@ -1269,14 +1289,14 @@ COMPLIANCE_CHECKLIST_ITEMS = [
 ]
 
 
-def build_compliance_checklist_sheet(wb: Workbook, client_name: str, period_label: str, ref: str):
+def build_compliance_checklist_sheet(wb: Workbook, client_name: str, period_label: str, ref: str, header_cells: dict | None = None):
     """A static, editable pro-forma of the confirmation-only checklist
     items - not computed from data (there's nothing in a TB or nominal
     activity export that answers "was the HP agreement received?"), so
     this is a structured place for the preparer to work through and tick
     off, the same role the real firm's own manual-job checklist plays."""
     ws = wb.create_sheet(f"{ref} Compliance Checklist"[:31])
-    row = _write_title(ws, client_name, period_label, "COMPLIANCE CHECKLIST (MANUAL REVIEW POINTS)", ref)
+    row = _write_title(ws, client_name, period_label, "COMPLIANCE CHECKLIST (MANUAL REVIEW POINTS)", ref, header_cells=header_cells)
     ws.cell(row=row, column=1, value=(
         "Confirmation-only items that need a document, statement, or external check rather than something "
         "the uploaded data can answer on its own. Data-driven checks for DLA/S455, dividends vs reserves, "
@@ -1324,6 +1344,7 @@ def _generate_schedules(
     asset_register_result: AssetRegisterResult | None,
     enabled=lambda key: True,
     place=lambda key, call: call(),
+    header_cells: dict | None = None,
 ) -> Workbook:
     """The shared core both build_workbook (generic layout, a fresh
     workbook) and build_workbook_into_template (a practice's real
@@ -1441,31 +1462,31 @@ def _generate_schedules(
     variance_result = next((r for r in results if r.name == "Current vs comparative variance analysis"), None)
     if tb_on:
         if refs.tb_current is not None:
-            place("tb_lead_schedule", lambda: build_tb_lead_schedule_formulas(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame(), refs))
+            place("tb_lead_schedule", lambda: build_tb_lead_schedule_formulas(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame(), refs, header_cells=header_cells))
         else:
-            place("tb_lead_schedule", lambda: build_tb_lead_schedule(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame()))
+            place("tb_lead_schedule", lambda: build_tb_lead_schedule(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame(), header_cells=header_cells))
 
     pl_sheet_name, pl_net_profit_cell = (None, None)
     if pl_on:
-        pl_sheet_name, pl_net_profit_cell = place("profit_and_loss", lambda: build_pl_statement_sheet_formulas(wb, client_name, current_label, pl_ref, pl_statement, refs))
+        pl_sheet_name, pl_net_profit_cell = place("profit_and_loss", lambda: build_pl_statement_sheet_formulas(wb, client_name, current_label, pl_ref, pl_statement, refs, header_cells=header_cells))
     if bs_on:
-        place("balance_sheet", lambda: build_bs_statement_sheet_formulas(wb, client_name, current_label, bs_ref, bs_statement, refs, pl_sheet_name, pl_net_profit_cell))
+        place("balance_sheet", lambda: build_bs_statement_sheet_formulas(wb, client_name, current_label, bs_ref, bs_statement, refs, pl_sheet_name, pl_net_profit_cell, header_cells=header_cells))
 
     if ct_ref is not None:
-        place("corporation_tax", lambda: build_corporation_tax_sheet_formulas(wb, client_name, current_label, ct_ref, ct_computation, pl_sheet_name, pl_net_profit_cell))
+        place("corporation_tax", lambda: build_corporation_tax_sheet_formulas(wb, client_name, current_label, ct_ref, ct_computation, pl_sheet_name, pl_net_profit_cell, header_cells=header_cells))
 
     if fa_ref is not None:
         grouped_codes = group_fixed_asset_codes(data.get("tb_current"))
         if grouped_codes and refs.tb_current is not None:
-            place("fixed_asset_category", lambda: build_fixed_asset_category_sheet_formulas(wb, client_name, current_label, fa_ref, fixed_asset_result, refs, grouped_codes))
+            place("fixed_asset_category", lambda: build_fixed_asset_category_sheet_formulas(wb, client_name, current_label, fa_ref, fixed_asset_result, refs, grouped_codes, header_cells=header_cells))
         else:
-            place("fixed_asset_category", lambda: build_recon_sheet(wb, client_name, current_label, fa_ref, f"{fa_ref} Fixed Assets", fixed_asset_result))
+            place("fixed_asset_category", lambda: build_recon_sheet(wb, client_name, current_label, fa_ref, f"{fa_ref} Fixed Assets", fixed_asset_result, header_cells=header_cells))
 
     if ar_ref is not None:
-        place("fixed_asset_register", lambda: build_asset_register_sheet(wb, client_name, current_label, ar_ref, asset_register_result))
+        place("fixed_asset_register", lambda: build_asset_register_sheet(wb, client_name, current_label, ar_ref, asset_register_result, header_cells=header_cells))
 
     if cr_ref is not None:
-        place("fixed_asset_register", lambda: build_closing_register_sheet(wb, client_name, current_label, cr_ref, asset_register_result.closing_register))
+        place("fixed_asset_register", lambda: build_closing_register_sheet(wb, client_name, current_label, cr_ref, asset_register_result.closing_register, header_cells=header_cells))
 
     for res in results:
         if res.name not in recon_refs:
@@ -1473,27 +1494,27 @@ def _generate_schedules(
         config_key, _ = RESULT_SCHEDULE_INFO.get(res.name, (res.name, res.name[:31]))
         r = recon_refs[res.name]
         sheet_title = recon_sheet_names[res.name]
-        place(config_key, lambda r=r, sheet_title=sheet_title, res=res: build_recon_sheet(wb, client_name, current_label, r, f"{r} {sheet_title}", res))
+        place(config_key, lambda r=r, sheet_title=sheet_title, res=res: build_recon_sheet(wb, client_name, current_label, r, f"{r} {sheet_title}", res, header_cells=header_cells))
 
     if ca_on:
         for r in control_account_results:
             if refs.tb_current is not None:
-                place("control_account_rollforward", lambda r=r: build_control_account_sheet_formulas(wb, client_name, current_label, ca_refs[r.account_code], r, refs))
+                place("control_account_rollforward", lambda r=r: build_control_account_sheet_formulas(wb, client_name, current_label, ca_refs[r.account_code], r, refs, header_cells=header_cells))
             else:
-                place("control_account_rollforward", lambda r=r: build_control_account_sheet(wb, client_name, current_label, ca_refs[r.account_code], r))
+                place("control_account_rollforward", lambda r=r: build_control_account_sheet(wb, client_name, current_label, ca_refs[r.account_code], r, header_cells=header_cells))
 
     if mx_on:
         for r in matrix_results:
             if refs.nominal_current is not None:
-                place("nominal_matrix", lambda r=r: build_matrix_sheet_formulas(wb, client_name, current_label, mx_refs[r.account_code], r, refs, data.get("nominal_current")))
+                place("nominal_matrix", lambda r=r: build_matrix_sheet_formulas(wb, client_name, current_label, mx_refs[r.account_code], r, refs, data.get("nominal_current"), header_cells=header_cells))
             else:
-                place("nominal_matrix", lambda r=r: build_matrix_sheet(wb, client_name, current_label, mx_refs[r.account_code], r))
+                place("nominal_matrix", lambda r=r: build_matrix_sheet(wb, client_name, current_label, mx_refs[r.account_code], r, header_cells=header_cells))
 
     if cl_on:
-        place("compliance_checklist", lambda: build_compliance_checklist_sheet(wb, client_name, current_label, cl_ref))
+        place("compliance_checklist", lambda: build_compliance_checklist_sheet(wb, client_name, current_label, cl_ref, header_cells=header_cells))
 
     if pf_on:
-        place("points_forward", lambda: build_points_forward_sheet(wb, client_name, current_label, pf_ref))
+        place("points_forward", lambda: build_points_forward_sheet(wb, client_name, current_label, pf_ref, header_cells=header_cells))
 
     return wb
 
@@ -1509,9 +1530,11 @@ def build_workbook(
     ct_computation: CTComputation | None = None,
     fixed_asset_result: FixedAssetResult | None = None,
     asset_register_result: AssetRegisterResult | None = None,
+    header_cells: dict | None = None,
 ) -> Workbook:
     """Builds the working paper pack in this system's own generic layout -
-    a fresh workbook, sequential numbering from 1, everything enabled.
+    a fresh workbook, sequential numbering from 1, everything enabled, the
+    house-style A1/A2/A3 header convention unless header_cells overrides it.
     See build_workbook_into_template for generating into a practice's real
     uploaded template instead."""
     wb = Workbook()
@@ -1521,6 +1544,7 @@ def build_workbook(
         client_name, current_label, comparative_label, data, results,
         control_account_results or [], matrix_results or [],
         ct_computation, fixed_asset_result, asset_register_result,
+        header_cells=header_cells,
     )
 
 
@@ -1541,9 +1565,15 @@ def build_workbook_into_template(
     """Same schedules as build_workbook, generated into a copy of a
     practice's real uploaded template file instead of a fresh workbook -
     which schedules get generated, where each one is inserted relative to
-    the template's own sheets, and where numbering starts, are all driven
-    by the template's customisation config (storage.DEFAULT_TEMPLATE_CONFIG
-    documents every key).
+    the template's own sheets, where numbering starts, and which cells the
+    CLIENT NAME/PERIOD/SCHEDULE TITLE header block lands in on every
+    generated sheet, are all driven by the template's customisation config
+    (storage.DEFAULT_TEMPLATE_CONFIG documents every key) - real templates
+    studied against this system use at least three different header-cell
+    conventions (a simple A1/A2/A3 block; a "Client"/"Year End"/"Subject"
+    labelled row layout with a separate Ref cell; a "Name of company:"/
+    "Start period:"/"End period:" key-value block), so this can't be
+    hardcoded the way the generic layout's A1/A2/A3 default is.
 
     The template's own sheets are never modified or overwritten - every
     generated schedule is a brand new sheet (openpyxl auto-suffixes a name
@@ -1551,15 +1581,14 @@ def build_workbook_into_template(
     "Index1", rather than erroring or overwriting), positioned via
     insert_after_sheet and otherwise left wherever it's created.
 
-    Not yet wired to the config: header_cells (every schedule still uses
-    the fixed A1/A2/A3 CLIENT NAME/PERIOD/TITLE convention regardless of
-    what's configured) and materiality (recon.MATERIALITY_AMOUNT and
+    Not yet wired to the config: materiality (recon.MATERIALITY_AMOUNT and
     equivalents in the other computation modules are still fixed
     module-level constants) - see README known limitations.
     """
     wb = openpyxl.load_workbook(template_path)
     schedules_cfg = template_config.get("schedules", {})
     numbering_cfg = template_config.get("numbering", {})
+    header_cells = template_config.get("header_cells")
 
     def enabled(key: str) -> bool:
         return schedules_cfg.get(key, {}).get("enabled", True)
@@ -1597,5 +1626,5 @@ def build_workbook_into_template(
         client_name, current_label, comparative_label, data, results,
         control_account_results or [], matrix_results or [],
         ct_computation, fixed_asset_result, asset_register_result,
-        enabled=enabled, place=place,
+        enabled=enabled, place=place, header_cells=header_cells,
     )

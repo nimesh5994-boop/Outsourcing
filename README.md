@@ -66,9 +66,20 @@ collides with one already in the template (e.g. the template already has
 its own "Index"), openpyxl auto-suffixes the new one rather than erroring
 or overwriting anything.
 
-**Not yet wired to the config**: `header_cells` (every schedule still uses
-the fixed A1/A2/A3 CLIENT NAME/PERIOD/TITLE convention regardless of what a
-template configures) and `materiality` (the materiality/variance
+`header_cells` controls which cell each generated schedule's CLIENT NAME/
+PERIOD/SCHEDULE TITLE header block lands in - defaults to A1/A2/A3 (the
+generic layout's convention) but is overridable per template, since real
+templates vary: studying three of the practice's own real working paper
+formats (Xero Ltd, Sage/QBO/FreeAgent Ltd, Manual Job Partnership/Sole
+Trader) found a shared "Client"/"Year End"/"Subject" labelled-row
+convention with values in a different column, and a newer template found
+since uses yet another convention ("Name of company:"/"Start period:"/
+"End period:" key-value pairs). `header_cells` configures *where the
+value goes* (a cell reference per field); it doesn't write label text of
+its own - a template's own surrounding labels, if any, are part of the
+template's untouched sheets, not something a generated schedule adds.
+
+**Not yet wired to the config**: `materiality` (the materiality/variance
 thresholds used across recon.py, control_accounts.py, financial_statements
 .py, fixed_assets.py, and corporation_tax.py are still fixed module-level
 constants, not read from a template's config) - see Known limitations.
@@ -362,17 +373,15 @@ pytest tests/ -v
 ## Known limitations / roadmap
 
 - **The template config doesn't fully drive generation yet.** Schedule
-  enable/disable, `insert_after_sheet` positioning, and `numbering.start_at`
-  are all wired in and generate into a copy of the practice's real
-  uploaded template file (see "Practices, templates, and clients" above).
-  `header_cells` (a template's CLIENT NAME/PERIOD/TITLE cell convention)
-  and `materiality` (per-template variance/materiality thresholds) aren't
-  read yet - every schedule still uses the fixed A1/A2/A3 header
-  convention and the fixed £500/10% thresholds regardless of what a
-  template configures. Both are a bigger change than insertion was: cell
-  convention touches every schedule builder's `_write_title` call, and
-  materiality is currently a module-level constant in five different
-  computation modules (recon.py, control_accounts.py,
+  enable/disable, `insert_after_sheet` positioning, `numbering.start_at`,
+  and `header_cells` (which cell each schedule's CLIENT NAME/PERIOD/TITLE
+  block lands in) are all wired in and generate into a copy of the
+  practice's real uploaded template file (see "Practices, templates, and
+  clients" above). `materiality` (per-template variance/materiality
+  thresholds) isn't read yet - every check still uses the fixed £500/10%
+  thresholds regardless of what a template configures. That's a bigger
+  change than the others: it's currently a module-level constant in five
+  different computation modules (recon.py, control_accounts.py,
   financial_statements.py, fixed_assets.py, corporation_tax.py), not a
   parameter any of them accept.
 - **Formula-linked output covers the core schedules, not everything yet.**

@@ -8,7 +8,7 @@ import openpyxl
 import pytest
 
 from app import control_accounts, corporation_tax, fixed_assets, nominal_matrix, recon
-from app.excel_builder import build_workbook_into_template
+from app.excel_builder import _write_title, build_workbook_into_template
 from app.storage import DEFAULT_TEMPLATE_CONFIG
 
 
@@ -150,3 +150,54 @@ def test_formula_linked_schedules_still_reference_data_sheets_in_template_mode(t
     ws = wb[tb_sheet_name]
     formula_cells = [c.value for row in ws.iter_rows() for c in row if isinstance(c.value, str) and c.value.startswith("=")]
     assert formula_cells, "expected live formulas on the TB Lead Schedule sheet even in template mode"
+
+
+def test_write_title_default_uses_a1_a2_a3():
+    ws = openpyxl.Workbook().active
+    next_row = _write_title(ws, "Acme Ltd", "Year ended 31 December 2025", "TB LEAD SCHEDULE", ref="1")
+    assert ws["A1"].value == "ACME LTD"
+    assert ws["A2"].value == "YEAR ENDED 31 DECEMBER 2025"
+    assert ws["A3"].value == "1  TB LEAD SCHEDULE"
+    assert next_row == 5  # unchanged from the pre-header_cells default
+
+
+def test_write_title_honours_custom_header_cells_and_computes_content_row():
+    # mirrors the "Client"/"Year End"/"Subject" row-1-3 convention found in
+    # the real Xero Ltd / Sage-QBO-FreeAgent / Manual Job templates - values
+    # in column B rather than column A
+    ws = openpyxl.Workbook().active
+    header_cells = {"client_name_cell": "B1", "period_cell": "B2", "schedule_title_cell": "B3"}
+    next_row = _write_title(ws, "Acme Ltd", "Year ended 31 December 2025", "TB LEAD SCHEDULE", ref="1", header_cells=header_cells)
+    assert ws["B1"].value == "ACME LTD"
+    assert ws["B2"].value == "YEAR ENDED 31 DECEMBER 2025"
+    assert ws["B3"].value == "1  TB LEAD SCHEDULE"
+    assert ws["A1"].value is None  # nothing leaks into the default cells
+    assert next_row == 5
+
+
+def test_write_title_content_row_follows_the_lowest_configured_header_cell():
+    # a convention where the header block spans further down than rows 1-3
+    # (e.g. the "Name of company:"/"Start period:"/"End period:" block seen
+    # in a newer real template) needs schedule content pushed down further
+    ws = openpyxl.Workbook().active
+    header_cells = {"client_name_cell": "B1", "period_cell": "B2", "schedule_title_cell": "A5"}
+    next_row = _write_title(ws, "Acme Ltd", "Year ended 31 December 2025", "TB LEAD SCHEDULE", header_cells=header_cells)
+    assert next_row == 7  # max row (5) + 2
+
+
+def test_template_config_header_cells_applies_to_generated_schedules(tmp_path, generation_inputs):
+    template_path = _make_template(tmp_path, ["Cover Page"])
+    config = copy.deepcopy(DEFAULT_TEMPLATE_CONFIG)
+    config["header_cells"] = {"client_name_cell": "B1", "period_cell": "B2", "schedule_title_cell": "B3"}
+
+    wb = build_workbook_into_template(
+        template_path, config, "Brightwell Landscaping Supplies Limited",
+        "Year ended 31 December 2025", "Year ended 31 December 2024", **generation_inputs,
+    )
+
+    tb_sheet_name = next(n for n in wb.sheetnames if "TB Lead Schedule" in n)
+    ws = wb[tb_sheet_name]
+    assert ws["B1"].value == "BRIGHTWELL LANDSCAPING SUPPLIES LIMITED"
+    assert ws["B2"].value == "YEAR ENDED 31 DECEMBER 2025"
+    assert "TRIAL BALANCE LEAD SCHEDULE" in ws["B3"].value
+    assert ws["A1"].value is None
