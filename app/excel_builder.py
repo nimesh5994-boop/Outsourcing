@@ -923,6 +923,213 @@ def build_corporation_tax_sheet(wb: Workbook, client_name: str, current_label: s
     ws.column_dimensions["B"].width = 20
 
 
+PERCENT_FMT = "0.00%"
+
+
+def build_corporation_tax_sheet_formulas(
+    wb: Workbook, client_name: str, current_label: str, ref: str, ct: CTComputation,
+    pl_sheet_name: str | None = None, pl_net_profit_cell: str | None = None,
+) -> str:
+    """Same proforma as build_corporation_tax_sheet, but every computed line
+    (taxable profit, the scaled thresholds, the rate band, marginal relief,
+    the tax charge, the variance) is a live formula, and the rates that
+    drive them (small profits rate, main rate, thresholds, marginal relief
+    fraction) are written as their own cells lower on the sheet and
+    referenced by formula rather than baked into the computation as
+    literals - so re-pointing this sheet at next year's rates is a matter
+    of editing those cells, not regenerating the workbook.
+
+    "Profit per accounts" is a live cross-sheet reference to the P&L
+    formula sheet's own NET PROFIT cell when one is supplied, continuing
+    the same cross-sheet linking used for the Balance Sheet.
+
+    Simplification: "Augmented profits" always formula-links to the taxable
+    profit cell on this sheet (the common case - no associated companies'
+    profits to add in). Overriding augmented profits separately from
+    taxable profit is a rarely-used HMRC provision not yet surfaced in the
+    app's inputs (see README known limitations), so it isn't represented
+    as an independent formula-editable cell here."""
+    sheet_name = f"{ref} Corporation Tax"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, current_label, "CORPORATION TAX COMPUTATION", ref)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {ct.status.upper()} - {ct.message}")
+    status_cell.font = _status_font(ct.status)
+    status_cell.fill = _status_fill(ct.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+    ws.row_dimensions[row].height = 30
+
+    rates = ct.rates_used
+    r = row + 2
+
+    profit_row = r
+    ws.cell(row=r, column=1, value="Profit per accounts").border = BORDER
+    if pl_sheet_name and pl_net_profit_cell:
+        profit_cell = ws.cell(row=r, column=2, value="=" + cell_ref(pl_sheet_name, pl_net_profit_cell))
+    else:
+        profit_cell = ws.cell(row=r, column=2, value=ct.accounting_profit)
+    profit_cell.number_format = CURRENCY_FMT
+    profit_cell.border = BORDER
+    r += 1
+
+    disallow_row = r
+    ws.cell(row=r, column=1, value="Add: disallowable expenses (preparer input)").border = BORDER
+    disallow_cell = ws.cell(row=r, column=2, value=ct.disallowable_additions)
+    disallow_cell.number_format = CURRENCY_FMT
+    disallow_cell.border = BORDER
+    r += 1
+
+    capex_row = r
+    ws.cell(row=r, column=1, value="Less: capital allowances (preparer input)").border = BORDER
+    ws.cell(row=r, column=6, value=ct.capital_allowances)  # hidden raw (positive) figure
+    capex_cell = ws.cell(row=r, column=2, value=f"=-F{r}")
+    capex_cell.number_format = CURRENCY_FMT
+    capex_cell.border = BORDER
+    r += 1
+
+    taxable_row = r
+    ws.cell(row=r, column=1, value="TAXABLE TOTAL PROFITS").font = BOLD
+    taxable_cell = ws.cell(row=r, column=2, value=f"=B{profit_row}+B{disallow_row}+B{capex_row}")
+    taxable_cell.number_format = CURRENCY_FMT
+    taxable_cell.font = BOLD
+    r += 1
+
+    augmented_row = r
+    ws.cell(row=r, column=1, value="Augmented profits (for rate banding)").border = BORDER
+    augmented_cell = ws.cell(row=r, column=2, value=f"=B{taxable_row}")
+    augmented_cell.number_format = CURRENCY_FMT
+    augmented_cell.border = BORDER
+    r += 1
+
+    assoc_row = r
+    ws.cell(row=r, column=1, value="Associated companies").border = BORDER
+    ws.cell(row=r, column=2, value=ct.associated_companies).border = BORDER
+    r += 1
+
+    period_row = r
+    ws.cell(row=r, column=1, value="Accounting period (days)").border = BORDER
+    ws.cell(row=r, column=2, value=ct.period_days).border = BORDER
+    r += 1
+
+    lower_row = r
+    ws.cell(row=r, column=1, value="Small profits rate threshold (scaled)").border = BORDER
+    r += 1
+
+    upper_row = r
+    ws.cell(row=r, column=1, value="Main rate threshold (scaled)").border = BORDER
+    r += 1
+
+    band_row = r
+    ws.cell(row=r, column=1, value="Rate band applied").border = BORDER
+    r += 1
+
+    relief_row = r
+    ws.cell(row=r, column=1, value="Marginal relief").border = BORDER
+    r += 1
+
+    charge_row = r
+    ws.cell(row=r, column=1, value="CORPORATION TAX CHARGE (computed)").font = BOLD
+    r += 1
+
+    booked_row = r
+    ws.cell(row=r, column=1, value="Tax charge per accounts (TB)").border = BORDER
+    if ct.booked_tax_charge is not None:
+        booked_cell = ws.cell(row=r, column=2, value=ct.booked_tax_charge)
+        booked_cell.number_format = CURRENCY_FMT
+    else:
+        ws.cell(row=r, column=2, value="not found in TB")
+    ws.cell(row=r, column=2).border = BORDER
+    r += 1
+
+    variance_row = r
+    ws.cell(row=r, column=1, value="Variance").border = BORDER
+    r += 2
+
+    ws.cell(row=r, column=1, value="RATES USED (edit here to re-point this sheet at a future year's rates)").font = SCHEDULE_FONT
+    r += 1
+    small_rate_row = r
+    ws.cell(row=r, column=1, value="Small profits rate").border = BORDER
+    small_rate_cell = ws.cell(row=r, column=2, value=rates.small_profits_rate)
+    small_rate_cell.number_format = PERCENT_FMT
+    small_rate_cell.border = BORDER
+    r += 1
+    main_rate_row = r
+    ws.cell(row=r, column=1, value="Main rate").border = BORDER
+    main_rate_cell = ws.cell(row=r, column=2, value=rates.main_rate)
+    main_rate_cell.number_format = PERCENT_FMT
+    main_rate_cell.border = BORDER
+    r += 1
+    lower_const_row = r
+    ws.cell(row=r, column=1, value="Small profits rate threshold (unscaled)").border = BORDER
+    lower_const_cell = ws.cell(row=r, column=2, value=rates.lower_limit)
+    lower_const_cell.number_format = CURRENCY_FMT
+    lower_const_cell.border = BORDER
+    r += 1
+    upper_const_row = r
+    ws.cell(row=r, column=1, value="Main rate threshold (unscaled)").border = BORDER
+    upper_const_cell = ws.cell(row=r, column=2, value=rates.upper_limit)
+    upper_const_cell.number_format = CURRENCY_FMT
+    upper_const_cell.border = BORDER
+    r += 1
+    fraction_row = r
+    ws.cell(row=r, column=1, value="Marginal relief fraction").border = BORDER
+    fraction_cell = ws.cell(row=r, column=2, value=rates.marginal_relief_fraction)
+    fraction_cell.border = BORDER
+    r += 1
+    ws.cell(row=r, column=1, value=f"Rates last verified {rates.as_at} against {rates.source} - confirm current before relying on this for a filing.").font = SUBTITLE_FONT
+
+    scale = f"(1+B{assoc_row})"
+    period_fraction = f"MIN(1,MAX(0,B{period_row}/365))"
+    lower_cell = ws.cell(row=lower_row, column=2, value=f"=ROUND(B{lower_const_row}/{scale}*{period_fraction},2)")
+    lower_cell.number_format = CURRENCY_FMT
+    lower_cell.border = BORDER
+    upper_cell = ws.cell(row=upper_row, column=2, value=f"=ROUND(B{upper_const_row}/{scale}*{period_fraction},2)")
+    upper_cell.number_format = CURRENCY_FMT
+    upper_cell.border = BORDER
+
+    taxable, augmented, lower, upper = f"B{taxable_row}", f"B{augmented_row}", f"B{lower_row}", f"B{upper_row}"
+    small_rate, main_rate, fraction = f"B{small_rate_row}", f"B{main_rate_row}", f"B{fraction_row}"
+
+    band_cell = ws.cell(row=band_row, column=2, value=(
+        f'=IF({taxable}<=0,"no tax due (loss/nil profit)",'
+        f'IF({augmented}<={lower},"small profits rate",'
+        f'IF({augmented}>={upper},"main rate","marginal relief")))'
+    ))
+    band_cell.border = BORDER
+
+    relief_cell = ws.cell(row=relief_row, column=2, value=(
+        f'=IF(AND({taxable}>0,{augmented}>{lower},{augmented}<{upper}),'
+        f'({upper}-{augmented})*({taxable}/{augmented})*{fraction},0)'
+    ))
+    relief_cell.number_format = CURRENCY_FMT
+    relief_cell.border = BORDER
+
+    charge_cell = ws.cell(row=charge_row, column=2, value=(
+        f'=ROUND(IF({taxable}<=0,0,'
+        f'IF({augmented}<={lower},{taxable}*{small_rate},'
+        f'IF({augmented}>={upper},{taxable}*{main_rate},'
+        f'{taxable}*{main_rate}-B{relief_row}))),2)'
+    ))
+    charge_cell.number_format = CURRENCY_FMT
+    charge_cell.font = BOLD
+
+    if ct.booked_tax_charge is not None:
+        variance_cell = ws.cell(row=variance_row, column=2, value=f"=B{charge_row}-B{booked_row}")
+        variance_cell.number_format = CURRENCY_FMT
+        variance_cell.border = BORDER
+        if ct.status != "ok":
+            for c in (1, 2):
+                ws.cell(row=variance_row, column=c).fill = PatternFill("solid", fgColor=AMBER)
+    else:
+        ws.cell(row=variance_row, column=2, value="").border = BORDER
+
+    ws.column_dimensions["A"].width = 55
+    ws.column_dimensions["B"].width = 20
+    ws.column_dimensions["F"].hidden = True
+    return sheet_name
+
+
 def build_points_forward_sheet(wb: Workbook, client_name: str, period_label: str, ref: str):
     ws = wb.create_sheet(f"{ref} Points Forward"[:31])
     row = _write_title(ws, client_name, period_label, "POINTS FORWARD / OPEN QUERIES", ref)

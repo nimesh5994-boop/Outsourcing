@@ -18,6 +18,7 @@ pytest.importorskip("formulas")
 import formulas  # noqa: E402
 
 from app import control_accounts as ca  # noqa: E402
+from app import corporation_tax as ct_mod  # noqa: E402
 from app import financial_statements as fs  # noqa: E402
 from app import fixed_assets as fa  # noqa: E402
 from app import recon, xero_reports as xr  # noqa: E402
@@ -25,6 +26,7 @@ from app.data_sheets import write_data_sheets  # noqa: E402
 from app.excel_builder import (  # noqa: E402
     build_bs_statement_sheet_formulas,
     build_control_account_sheet_formulas,
+    build_corporation_tax_sheet_formulas,
     build_fixed_asset_category_sheet_formulas,
     build_pl_statement_sheet_formulas,
     build_tb_lead_schedule_formulas,
@@ -227,3 +229,37 @@ def test_fixed_asset_category_formulas_match_python_ground_truth(tmp_path):
             assert _cell(sol, out.name, sheet_name, f"{letter}{r}") == row0[col]
         else:
             assert _cell(sol, out.name, sheet_name, f"{letter}{r}") == pytest.approx(row0[col], abs=0.01)
+
+
+@pytest.mark.parametrize("accounting_profit,booked_tax_charge", [
+    (30_000, 5_600.00),   # small profits rate band
+    (150_000, 36_000.00),  # marginal relief band (the known 24% reference point)
+    (300_000, 74_990.00),  # main rate band
+])
+def test_corporation_tax_formulas_match_python_ground_truth(tmp_path, accounting_profit, booked_tax_charge):
+    ct = ct_mod.compute(accounting_profit=accounting_profit, booked_tax_charge=booked_tax_charge)
+
+    wb = Workbook()
+    sheet_name = build_corporation_tax_sheet_formulas(wb, "Brightwell Landscaping Supplies Limited", "Year ended 31 December 2025", "1", ct)
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / f"ct_formula_{accounting_profit}.xlsx"
+    wb.save(out)
+
+    sol = _evaluate(out)
+
+    errors = [k for k, v in sol.items() if f"[{out.name}]{sheet_name.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value))]
+    assert not errors, f"formula errors: {errors}"
+
+    rows = {
+        "profit": 7, "disallow": 8, "capex": 9, "taxable": 10, "augmented": 11,
+        "assoc": 12, "period": 13, "lower": 14, "upper": 15, "band": 16,
+        "relief": 17, "charge": 18, "booked": 19, "variance": 20,
+    }
+    assert _cell(sol, out.name, sheet_name, f"B{rows['taxable']}") == pytest.approx(ct.taxable_profit, abs=0.01)
+    assert _cell(sol, out.name, sheet_name, f"B{rows['lower']}") == pytest.approx(ct.lower_limit, abs=0.01)
+    assert _cell(sol, out.name, sheet_name, f"B{rows['upper']}") == pytest.approx(ct.upper_limit, abs=0.01)
+    assert str(_cell(sol, out.name, sheet_name, f"B{rows['band']}")) == ct.band
+    assert _cell(sol, out.name, sheet_name, f"B{rows['relief']}") == pytest.approx(ct.marginal_relief, abs=0.01)
+    assert _cell(sol, out.name, sheet_name, f"B{rows['charge']}") == pytest.approx(ct.tax_charge, abs=0.01)
+    assert _cell(sol, out.name, sheet_name, f"B{rows['variance']}") == pytest.approx(ct.variance, abs=0.01)
