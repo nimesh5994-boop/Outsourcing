@@ -18,9 +18,15 @@ pytest.importorskip("formulas")
 import formulas  # noqa: E402
 
 from app import control_accounts as ca  # noqa: E402
+from app import financial_statements as fs  # noqa: E402
 from app import recon, xero_reports as xr  # noqa: E402
 from app.data_sheets import write_data_sheets  # noqa: E402
-from app.excel_builder import build_control_account_sheet_formulas, build_tb_lead_schedule_formulas  # noqa: E402
+from app.excel_builder import (  # noqa: E402
+    build_bs_statement_sheet_formulas,
+    build_control_account_sheet_formulas,
+    build_pl_statement_sheet_formulas,
+    build_tb_lead_schedule_formulas,
+)
 from app.parsers import FileDataSource  # noqa: E402
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
@@ -123,3 +129,42 @@ def test_control_account_formulas_match_python_ground_truth(tmp_path, canonical_
             break
     else:
         pytest.fail("did not find the UNEXPLAINED DIFFERENCE row")
+
+
+def test_pl_bs_formulas_match_python_ground_truth_and_tie_out(tmp_path, canonical_data):
+    pl_result = fs.build_pl_statement(canonical_data["pl_current"])
+    bs_result = fs.build_bs_statement(canonical_data["bs_current"], pl_result.net_profit)
+    assert bs_result.status == "ok"  # sample data is built to tie to £0.00 - see test_pipeline.py
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, canonical_data)
+    pl_sheet_name, pl_net_profit_cell = build_pl_statement_sheet_formulas(
+        wb, "Brightwell Landscaping Supplies Limited", "Year ended 31 December 2025", "1", pl_result, refs
+    )
+    bs_sheet_name = build_bs_statement_sheet_formulas(
+        wb, "Brightwell Landscaping Supplies Limited", "Year ended 31 December 2025", "2", bs_result, refs,
+        pl_sheet_name, pl_net_profit_cell,
+    )
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / "pl_bs_formula.xlsx"
+    wb.save(out)
+
+    sol = _evaluate(out)
+
+    for sheet in (pl_sheet_name, bs_sheet_name):
+        errors = [k for k, v in sol.items() if f"[{out.name}]{sheet.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value))]
+        assert not errors, f"formula errors on {sheet}: {errors}"
+
+    pl_line_to_row = {line: 8 + i for i, line in enumerate(pl_result.statement["Line"])}
+    for line, amount in zip(pl_result.statement["Line"], pl_result.statement["Amount"]):
+        r = pl_line_to_row[line]
+        assert _cell(sol, out.name, pl_sheet_name, f"B{r}") == pytest.approx(amount, abs=0.01)
+
+    bs_line_to_row = {line: 8 + i for i, line in enumerate(bs_result.statement["Line"])}
+    for line, amount in zip(bs_result.statement["Line"], bs_result.statement["Amount"]):
+        r = bs_line_to_row[line]
+        assert _cell(sol, out.name, bs_sheet_name, f"B{r}") == pytest.approx(amount, abs=0.01)
+
+    check_row = bs_line_to_row["CHECK: Net Assets - Total Equity (should be £0)"]
+    assert _cell(sol, out.name, bs_sheet_name, f"B{check_row}") == pytest.approx(0.0, abs=0.01)

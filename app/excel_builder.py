@@ -14,11 +14,22 @@ from openpyxl.worksheet.worksheet import Worksheet
 from app.control_accounts import ControlAccountResult
 from app.corporation_tax import CTComputation
 from app.data_sheets import DataRefs
-from app.financial_statements import StatementResult, build_bs_statement, build_pl_statement
+from app.financial_statements import (
+    _BS_CURRENT_ASSETS,
+    _BS_CURRENT_LIABILITIES,
+    _BS_EQUITY,
+    _BS_FIXED_ASSETS,
+    _BS_LONG_TERM_LIABILITIES,
+    _PL_DIRECT_COSTS,
+    _PL_TURNOVER,
+    StatementResult,
+    build_bs_statement,
+    build_pl_statement,
+)
 from app.fixed_assets import AssetRegisterResult, FixedAssetResult
 from app.nominal_matrix import MatrixResult
 from app.recon import MATERIALITY_AMOUNT, VARIANCE_PCT_THRESHOLD, ReconResult
-from app.xlformulas import cell_ref, quote, sumifs_exact
+from app.xlformulas import cell_ref, quote, sum_of_values, sumifs_exact
 
 NAVY = "1F3864"
 GREEN = "C6EFCE"
@@ -475,6 +486,226 @@ def build_control_account_sheet_formulas(wb: Workbook, client_name: str, current
                     ws.cell(row=diff_bd_row, column=c).fill = PatternFill("solid", fgColor=AMBER)
 
     ws.freeze_panes = f"A{table_row + 1}"
+
+
+def build_pl_statement_sheet_formulas(wb: Workbook, client_name: str, period_label: str, ref: str, pl_result: StatementResult, refs: DataRefs) -> tuple[str, str | None]:
+    """Same summary lines as build_statement_sheet's P&L, but every summary
+    figure is a live SUMPRODUCT-by-category formula against DATA_PL, and the
+    detail table is a row-for-row cell reference into DATA_PL rather than a
+    duplicated literal table. Returns (sheet_name, net-profit cell ref) so
+    the Balance Sheet formula sheet can bridge the current year's profit in
+    with a real cross-sheet reference instead of a re-computed literal."""
+    sheet_name = f"{ref} Profit and Loss"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, period_label, "PROFIT AND LOSS ACCOUNT", ref)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {pl_result.status.upper()} - {pl_result.message}")
+    status_cell.font = _status_font(pl_result.status)
+    status_cell.fill = _status_fill(pl_result.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+    ws.row_dimensions[row].height = 30
+
+    if refs.pl_current is None or refs.pl_current.is_empty():
+        ws.cell(row=row + 2, column=1, value="No P&L data uploaded.")
+        return sheet_name, None
+
+    table_row = row + 2
+    for j, h in enumerate(["Line", "Amount"]):
+        ws.cell(row=table_row, column=1 + j, value=h)
+    _style_header_row(ws, table_row, 2)
+
+    amount_range = refs.pl_current.col_range("amount")
+    category_range = refs.pl_current.col_range("category")
+
+    r = table_row + 1
+    turnover_row = r
+    ws.cell(row=r, column=1, value="Turnover").border = BORDER
+    ws.cell(row=r, column=2, value=sum_of_values(amount_range, category_range, [quote(v) for v in sorted(_PL_TURNOVER)])).number_format = CURRENCY_FMT
+    r += 1
+
+    direct_row = r
+    ws.cell(row=r, column=1, value="Direct costs").border = BORDER
+    ws.cell(row=r, column=2, value=sum_of_values(amount_range, category_range, [quote(v) for v in sorted(_PL_DIRECT_COSTS)])).number_format = CURRENCY_FMT
+    r += 1
+
+    gross_row = r
+    ws.cell(row=r, column=1, value="GROSS PROFIT").font = BOLD
+    gp_cell = ws.cell(row=r, column=2, value=f"=B{turnover_row}+B{direct_row}")
+    gp_cell.number_format = CURRENCY_FMT
+    gp_cell.font = BOLD
+    r += 1
+
+    overheads_row = r
+    ws.cell(row=r, column=1, value="Overheads & other expenses").border = BORDER
+    oh_cell = ws.cell(row=r, column=2, value=f"=SUM({amount_range})-B{turnover_row}-B{direct_row}")
+    oh_cell.number_format = CURRENCY_FMT
+    r += 1
+
+    net_row = r
+    ws.cell(row=r, column=1, value="NET PROFIT / (LOSS) FOR THE YEAR").font = BOLD
+    net_cell = ws.cell(row=r, column=2, value=f"=B{gross_row}+B{overheads_row}")
+    net_cell.number_format = CURRENCY_FMT
+    net_cell.font = BOLD
+    r += 2
+
+    ws.cell(row=r, column=1, value="DETAIL BY ACCOUNT").font = SCHEDULE_FONT
+    r += 1
+    detail_headers = ["Account Code", "Account Name", "Category", "Amount"]
+    for j, h in enumerate(detail_headers):
+        ws.cell(row=r, column=1 + j, value=h)
+    _style_header_row(ws, r, len(detail_headers))
+    first_detail = r + 1
+    n = refs.pl_current.last_row - refs.pl_current.first_row + 1
+    for i in range(n):
+        src = refs.pl_current.first_row + i
+        dest = first_detail + i
+        for col_idx, field in enumerate(["account_code", "account_name", "category"]):
+            ws.cell(row=dest, column=1 + col_idx, value="=" + cell_ref(refs.pl_current.sheet_name, f"{refs.pl_current.columns[field]}{src}")).border = BORDER
+        amt_cell = ws.cell(row=dest, column=4, value="=" + cell_ref(refs.pl_current.sheet_name, f"{refs.pl_current.columns['amount']}{src}"))
+        amt_cell.number_format = CURRENCY_FMT
+        amt_cell.border = BORDER
+
+    ws.freeze_panes = f"A{table_row + 1}"
+    return sheet_name, f"B{net_row}"
+
+
+def build_bs_statement_sheet_formulas(
+    wb: Workbook, client_name: str, period_label: str, ref: str, bs_result: StatementResult, refs: DataRefs,
+    pl_sheet_name: str | None, pl_net_profit_cell: str | None,
+) -> str:
+    """Same lines as build_statement_sheet's Balance Sheet, including the
+    explicit CHECK row, but computed via live formulas against DATA_BS - and
+    the current year's profit is bridged in via a real cross-sheet reference
+    to the P&L formula sheet's own NET PROFIT cell, not a re-typed number.
+    Hidden column F holds each row's raw (unflipped) signed value, since the
+    net-assets/total-equity/CHECK arithmetic needs the raw figures while the
+    visible Amount column shows liabilities/equity the conventional way
+    round (credits displayed positive)."""
+    sheet_name = f"{ref} Balance Sheet"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, period_label, "BALANCE SHEET", ref)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {bs_result.status.upper()} - {bs_result.message}")
+    status_cell.font = _status_font(bs_result.status)
+    status_cell.fill = _status_fill(bs_result.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+    ws.row_dimensions[row].height = 30
+
+    if refs.bs_current is None or refs.bs_current.is_empty():
+        ws.cell(row=row + 2, column=1, value="No Balance Sheet data uploaded.")
+        return sheet_name
+
+    table_row = row + 2
+    for j, h in enumerate(["Line", "Amount"]):
+        ws.cell(row=table_row, column=1 + j, value=h)
+    _style_header_row(ws, table_row, 2)
+    ws.column_dimensions["F"].hidden = True
+
+    amount_range = refs.bs_current.col_range("amount")
+    category_range = refs.bs_current.col_range("category")
+
+    def raw_sum(values: set[str]) -> str:
+        return sum_of_values(amount_range, category_range, [quote(v) for v in sorted(values)])
+
+    r = table_row + 1
+    fixed_row = r
+    ws.cell(row=r, column=1, value="Fixed assets").border = BORDER
+    ws.cell(row=r, column=6, value=raw_sum(_BS_FIXED_ASSETS))
+    ws.cell(row=r, column=2, value=f"=F{r}").number_format = CURRENCY_FMT
+    r += 1
+
+    current_assets_row = r
+    ws.cell(row=r, column=1, value="Current assets").border = BORDER
+    ws.cell(row=r, column=6, value=raw_sum(_BS_CURRENT_ASSETS))
+    ws.cell(row=r, column=2, value=f"=F{r}").number_format = CURRENCY_FMT
+    r += 1
+
+    total_assets_row = r
+    ws.cell(row=r, column=1, value="TOTAL ASSETS").font = BOLD
+    ta_cell = ws.cell(row=r, column=2, value=f"=B{fixed_row}+B{current_assets_row}")
+    ta_cell.number_format = CURRENCY_FMT
+    ta_cell.font = BOLD
+    r += 1
+
+    current_liab_row = r
+    ws.cell(row=r, column=1, value="Current liabilities").border = BORDER
+    ws.cell(row=r, column=6, value=raw_sum(_BS_CURRENT_LIABILITIES))
+    ws.cell(row=r, column=2, value=f"=-F{r}").number_format = CURRENCY_FMT
+    r += 1
+
+    long_term_row = r
+    ws.cell(row=r, column=1, value="Long-term liabilities").border = BORDER
+    ws.cell(row=r, column=6, value=raw_sum(_BS_LONG_TERM_LIABILITIES))
+    ws.cell(row=r, column=2, value=f"=-F{r}").number_format = CURRENCY_FMT
+    r += 1
+
+    total_liab_row = r
+    ws.cell(row=r, column=1, value="TOTAL LIABILITIES").font = BOLD
+    tl_cell = ws.cell(row=r, column=2, value=f"=-(F{current_liab_row}+F{long_term_row})")
+    tl_cell.number_format = CURRENCY_FMT
+    tl_cell.font = BOLD
+    r += 1
+
+    net_assets_row = r
+    ws.cell(row=r, column=1, value="NET ASSETS").font = BOLD
+    na_cell = ws.cell(row=r, column=2, value=f"=B{total_assets_row}+F{current_liab_row}+F{long_term_row}")
+    na_cell.number_format = CURRENCY_FMT
+    na_cell.font = BOLD
+    r += 1
+
+    equity_bfwd_row = r
+    ws.cell(row=r, column=1, value="Equity brought forward").border = BORDER
+    ws.cell(row=r, column=6, value=raw_sum(_BS_EQUITY))
+    ws.cell(row=r, column=2, value=f"=-F{r}").number_format = CURRENCY_FMT
+    r += 1
+
+    profit_row = r
+    ws.cell(row=r, column=1, value="Profit/(loss) for the year (per P&L, not yet closed in the TB)").border = BORDER
+    net_profit_ref = ("=" + cell_ref(pl_sheet_name, pl_net_profit_cell)) if (pl_sheet_name and pl_net_profit_cell) else "=0"
+    ws.cell(row=r, column=6, value=f"=-({net_profit_ref[1:]})")  # raw equity_current_year: a profit increases (credit) equity, negative in this convention
+    profit_cell = ws.cell(row=r, column=2, value=net_profit_ref)
+    profit_cell.number_format = CURRENCY_FMT
+    r += 1
+
+    total_equity_row = r
+    ws.cell(row=r, column=1, value="TOTAL EQUITY").font = BOLD
+    ws.cell(row=r, column=6, value=f"=F{equity_bfwd_row}+F{profit_row}")
+    te_cell = ws.cell(row=r, column=2, value=f"=-F{r}")
+    te_cell.number_format = CURRENCY_FMT
+    te_cell.font = BOLD
+    r += 1
+
+    check_row = r
+    ws.cell(row=r, column=1, value="CHECK: Net Assets - Total Equity (should be £0)").font = BOLD
+    check_cell = ws.cell(row=r, column=2, value=f"=B{net_assets_row}+F{total_equity_row}")
+    check_cell.number_format = CURRENCY_FMT
+    check_cell.font = BOLD
+    if bs_result.status != "ok":
+        for c in (1, 2):
+            ws.cell(row=r, column=c).fill = PatternFill("solid", fgColor=AMBER)
+
+    r += 2
+    ws.cell(row=r, column=1, value="DETAIL BY ACCOUNT").font = SCHEDULE_FONT
+    r += 1
+    detail_headers = ["Account Code", "Account Name", "Category", "Amount"]
+    for j, h in enumerate(detail_headers):
+        ws.cell(row=r, column=1 + j, value=h)
+    _style_header_row(ws, r, len(detail_headers))
+    first_detail = r + 1
+    n = refs.bs_current.last_row - refs.bs_current.first_row + 1
+    for i in range(n):
+        src = refs.bs_current.first_row + i
+        dest = first_detail + i
+        for col_idx, field in enumerate(["account_code", "account_name", "category"]):
+            ws.cell(row=dest, column=1 + col_idx, value="=" + cell_ref(refs.bs_current.sheet_name, f"{refs.bs_current.columns[field]}{src}")).border = BORDER
+        amt_cell = ws.cell(row=dest, column=4, value="=" + cell_ref(refs.bs_current.sheet_name, f"{refs.bs_current.columns['amount']}{src}"))
+        amt_cell.number_format = CURRENCY_FMT
+        amt_cell.border = BORDER
+
+    ws.freeze_panes = f"A{table_row + 1}"
+    return sheet_name
 
 
 def build_matrix_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: MatrixResult):

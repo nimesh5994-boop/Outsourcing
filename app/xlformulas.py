@@ -46,11 +46,22 @@ def sum_of_values(sum_range: str, criteria_range: str, values: list[str]) -> str
     """Sum where criteria_range matches ANY of several discrete values (e.g.
     every account code belonging to one fixed-asset category) - a single
     exact-match test can't OR across values, so this ORs a list of
-    equality tests inside one SUMPRODUCT instead."""
+    equality tests inside one SUMPRODUCT instead.
+
+    Deliberately does NOT wrap the OR'd booleans in >0 before multiplying
+    (`((cond1)+(cond2)>0)*range`) even though that reads as the more
+    "correct" way to collapse a 0/1/2+ count back to a clean 0-or-1 match
+    flag: found via testing that the `formulas` verification library
+    mis-evaluates that >0 comparison and returns all-TRUE regardless of the
+    underlying condition, silently summing the entire range instead of the
+    matched subset (reproduced in isolation - see tests/test_formulas.py).
+    Plain (cond1+cond2)*range is safe here because callers only ever pass
+    mutually-exclusive category values, so at most one term is ever TRUE
+    per row and the sum can't double-count."""
     if not values:
         return "=0"
     ors = "+".join(f"({criteria_range}={v})" for v in values)
-    return f"=SUMPRODUCT((({ors})>0)*{sum_range})"
+    return f"=SUMPRODUCT(({ors})*{sum_range})"
 
 
 def quote(value: str) -> str:
