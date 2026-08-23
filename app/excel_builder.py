@@ -45,10 +45,17 @@ def _style_header_row(ws: Worksheet, row: int, ncols: int):
         cell.border = BORDER
 
 
+def _column_widths(df: pd.DataFrame) -> list[int]:
+    widths = []
+    for col in df.columns:
+        content_max = int(df[col].astype(str).str.len().max()) if len(df) else 0
+        width = max(content_max, len(str(col))) + 2
+        widths.append(max(12, min(60, width)))
+    return widths
+
+
 def _autosize(ws: Worksheet, df: pd.DataFrame, start_col: int = 1):
-    for i, col in enumerate(df.columns):
-        width = max(12, min(45, int(df[col].astype(str).str.len().max() if len(df) else 0), len(str(col)) + 2))
-        width = max(width, len(str(col)) + 2)
+    for i, width in enumerate(_column_widths(df)):
         ws.column_dimensions[get_column_letter(start_col + i)].width = width
 
 
@@ -79,22 +86,35 @@ def _status_font(status: str) -> Font:
 
 
 def _write_dataframe(ws: Worksheet, df: pd.DataFrame, start_row: int, start_col: int = 1) -> int:
-    """Writes header + rows starting at start_row, returns the next free row."""
+    """Writes header + rows starting at start_row, returns the next free row.
+    Columns are sized to their content (capped at 60 - wider than that reads
+    worse than wrapping), and any cell whose text still doesn't fit is
+    wrapped with the row height grown to fit rather than left to truncate."""
+    widths = _column_widths(df)
+    for i, width in enumerate(widths):
+        ws.column_dimensions[get_column_letter(start_col + i)].width = width
+
     for j, col in enumerate(df.columns):
         ws.cell(row=start_row, column=start_col + j, value=str(col))
     _style_header_row(ws, start_row, len(df.columns))
+
     r = start_row + 1
     for _, row in df.iterrows():
+        max_lines = 1
         for j, col in enumerate(df.columns):
             val = row[col]
             if isinstance(val, pd.Timestamp):
                 val = val.date() if not pd.isna(val) else ""
             cell = ws.cell(row=r, column=start_col + j, value=val)
             cell.border = BORDER
-            if isinstance(val, (int, float)):
+            if isinstance(val, (int, float)) and not isinstance(val, bool):
                 cell.number_format = CURRENCY_FMT
+            elif isinstance(val, str) and len(val) > widths[j]:
+                cell.alignment = Alignment(wrap_text=True, vertical="top")
+                max_lines = max(max_lines, -(-len(val) // widths[j]))  # ceil division
+        if max_lines > 1:
+            ws.row_dimensions[r].height = min(120, 15 * max_lines)
         r += 1
-    _autosize(ws, df, start_col)
     return r + 1
 
 
@@ -140,9 +160,9 @@ def build_index_sheet(wb: Workbook, client_name: str, current_label: str, compar
         r += 1
 
     ws.column_dimensions["A"].width = 8
-    ws.column_dimensions["B"].width = 42
+    ws.column_dimensions["B"].width = 55
     ws.column_dimensions["C"].width = 14
-    ws.column_dimensions["D"].width = 90
+    ws.column_dimensions["D"].width = 130
     ws.freeze_panes = "A7"
 
 
