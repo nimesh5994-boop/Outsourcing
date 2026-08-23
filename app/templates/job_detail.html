@@ -66,6 +66,28 @@
 </div>
 
 <div class="card">
+  <h2>Corporation tax computation inputs</h2>
+  <p class="muted">Optional &mdash; only used if a P&amp;L is available (uploaded or derived from a Xero TB). Leave at defaults for a first-pass computation on unadjusted accounting profit; refine once capital allowances/disallowable expenses are reviewed.</p>
+  <form method="post" action="/jobs/{{ job.id }}/tax-inputs">
+    <div class="row">
+      <div>
+        <label>Associated companies</label>
+        <input type="text" name="ct_associated_companies" value="{{ job.ct_associated_companies or 0 }}">
+      </div>
+      <div>
+        <label>Disallowable expenses to add back (&pound;)</label>
+        <input type="text" name="ct_disallowable_additions" value="{{ job.ct_disallowable_additions or 0 }}">
+      </div>
+      <div>
+        <label>Capital allowances to deduct (&pound;)</label>
+        <input type="text" name="ct_capital_allowances" value="{{ job.ct_capital_allowances or 0 }}">
+      </div>
+    </div>
+    <div style="margin-top:16px"><button type="submit">Save tax inputs</button></div>
+  </form>
+</div>
+
+<div class="card">
   <h2>Upload a report</h2>
   <form method="post" action="/jobs/{{ job.id }}/uploads" enctype="multipart/form-data">
     <div class="row">

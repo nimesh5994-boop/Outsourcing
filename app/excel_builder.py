@@ -12,6 +12,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
 from app.control_accounts import ControlAccountResult
+from app.corporation_tax import CTComputation
 from app.nominal_matrix import MatrixResult
 from app.recon import ReconResult
 
@@ -289,6 +290,57 @@ def build_matrix_sheet(wb: Workbook, client_name: str, current_label: str, ref: 
     ws.freeze_panes = f"A{table_row + 1}"
 
 
+def build_corporation_tax_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, ct: CTComputation):
+    ws = wb.create_sheet(f"{ref} Corporation Tax"[:31])
+    row = _write_title(ws, client_name, current_label, "CORPORATION TAX COMPUTATION", ref)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {ct.status.upper()} - {ct.message}")
+    status_cell.font = _status_font(ct.status)
+    status_cell.fill = _status_fill(ct.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=4)
+    ws.row_dimensions[row].height = 30
+
+    r = row + 2
+    rates = ct.rates_used
+    lines = [
+        ("Profit per accounts", ct.accounting_profit, False),
+        ("Add: disallowable expenses (preparer input)", ct.disallowable_additions, False),
+        ("Less: capital allowances (preparer input)", -ct.capital_allowances, False),
+        ("TAXABLE TOTAL PROFITS", ct.taxable_profit, True),
+        ("Augmented profits (for rate banding)", ct.augmented_profits, False),
+        ("Associated companies", ct.associated_companies, False),
+        ("Accounting period (days)", ct.period_days, False),
+        ("Small profits rate threshold (scaled)", ct.lower_limit, False),
+        ("Main rate threshold (scaled)", ct.upper_limit, False),
+        ("Rate band applied", ct.band, False),
+        ("Marginal relief", ct.marginal_relief, False),
+        ("CORPORATION TAX CHARGE (computed)", ct.tax_charge, True),
+        ("Tax charge per accounts (TB)", ct.booked_tax_charge if ct.booked_tax_charge is not None else "not found in TB", False),
+        ("Variance", ct.variance if ct.variance is not None else "", False),
+    ]
+    for label, value, bold in lines:
+        c1 = ws.cell(row=r, column=1, value=label)
+        c2 = ws.cell(row=r, column=2, value=value)
+        c1.border = BORDER
+        c2.border = BORDER
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            c2.number_format = CURRENCY_FMT
+        if bold:
+            c1.font = BOLD
+            c2.font = BOLD
+        r += 1
+
+    r += 1
+    ws.cell(row=r, column=1, value=f"Rates used: small profits {rates.small_profits_rate:.0%}, main rate {rates.main_rate:.0%}, "
+                                    f"thresholds £{rates.lower_limit:,.0f}/£{rates.upper_limit:,.0f}, marginal relief fraction {rates.marginal_relief_fraction:.4f}").font = SUBTITLE_FONT
+    r += 1
+    ws.cell(row=r, column=1, value=f"Rates last verified {rates.as_at} against {rates.source} - confirm current before relying on this for a filing.").font = SUBTITLE_FONT
+
+    ws.column_dimensions["A"].width = 42
+    ws.column_dimensions["B"].width = 20
+
+
 def build_points_forward_sheet(wb: Workbook, client_name: str, period_label: str, ref: str):
     ws = wb.create_sheet(f"{ref} Points Forward"[:31])
     row = _write_title(ws, client_name, period_label, "POINTS FORWARD / OPEN QUERIES", ref)
@@ -314,6 +366,7 @@ def build_workbook(
     results: list[ReconResult],
     control_account_results: list[ControlAccountResult] | None = None,
     matrix_results: list[MatrixResult] | None = None,
+    ct_computation: CTComputation | None = None,
 ) -> Workbook:
     control_account_results = control_account_results or []
     matrix_results = matrix_results or []
@@ -328,6 +381,11 @@ def build_workbook(
     pl_ref, bs_ref = ref.next(), ref.next()
     entries.append({"ref": pl_ref, "title": "Profit & Loss", "status": "ok" if data.get("pl_current") is not None and not data["pl_current"].empty else "n/a", "message": ""})
     entries.append({"ref": bs_ref, "title": "Balance Sheet", "status": "ok" if data.get("bs_current") is not None and not data["bs_current"].empty else "n/a", "message": ""})
+
+    ct_ref = None
+    if ct_computation is not None:
+        ct_ref = ref.next()
+        entries.append({"ref": ct_ref, "title": "Corporation Tax Computation", "status": ct_computation.status, "message": ct_computation.message})
 
     name_map = {
         "TB self-balance check": "TB Balance Check",
@@ -367,6 +425,9 @@ def build_workbook(
 
     build_statement_sheet(wb, client_name, current_label, pl_ref, f"{pl_ref} P&L", "PROFIT & LOSS", data.get("pl_current"))
     build_statement_sheet(wb, client_name, current_label, bs_ref, f"{bs_ref} Balance Sheet", "BALANCE SHEET", data.get("bs_current"))
+
+    if ct_computation is not None:
+        build_corporation_tax_sheet(wb, client_name, current_label, ct_ref, ct_computation)
 
     for res in results:
         sheet_name = name_map.get(res.name, res.name[:31])

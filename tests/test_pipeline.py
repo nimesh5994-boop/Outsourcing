@@ -5,7 +5,7 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from app import control_accounts, mapping, nominal_matrix, parsers, recon, xero_reports
+from app import control_accounts, corporation_tax, mapping, nominal_matrix, parsers, recon, xero_reports
 from app.excel_builder import build_workbook
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
@@ -117,6 +117,22 @@ def test_nominal_matrix_flags_multi_code_splits(canonical_data):
     assert "multi-code split" in trade_creditors.message
 
 
+def test_corporation_tax_marginal_relief_matches_known_reference_point():
+    # £150,000 at FY2023+ rates is the standard textbook reference: exactly
+    # 24% effective rate, right in the middle of the marginal relief band
+    result = corporation_tax.compute(accounting_profit=150_000)
+    assert result.band == "marginal relief"
+    assert result.tax_charge == pytest.approx(36_000.00)
+    assert result.rate_applied == pytest.approx(0.24)
+
+
+def test_corporation_tax_flags_variance_against_booked_charge(canonical_data):
+    accounting_profit = float(canonical_data["pl_current"]["amount"].sum())
+    result = corporation_tax.compute(accounting_profit=accounting_profit, booked_tax_charge=0.01)
+    assert result.status == "review"
+    assert result.variance == pytest.approx(result.tax_charge - 0.01)
+
+
 def test_full_workbook_builds_and_saves(tmp_path, canonical_data):
     results = recon.run_all_recons(canonical_data)
     ca_results = control_accounts.build_all_rollforwards(
@@ -124,17 +140,20 @@ def test_full_workbook_builds_and_saves(tmp_path, canonical_data):
         canonical_data["aged_debtors"], canonical_data["aged_creditors"],
     )
     mx_results = nominal_matrix.build_all_matrices(canonical_data["tb_current"], canonical_data["nominal_current"])
+    ct_computation = corporation_tax.compute(accounting_profit=float(canonical_data["pl_current"]["amount"].sum()))
 
     wb = build_workbook(
         "Brightwell Landscaping Supplies Limited",
         "Year ended 31 December 2025", "Year ended 31 December 2024",
         canonical_data, results, control_account_results=ca_results, matrix_results=mx_results,
+        ct_computation=ct_computation,
     )
     out = tmp_path / "working_paper.xlsx"
     wb.save(out)
 
     assert out.exists()
     reopened = openpyxl.load_workbook(out)
+    assert any("Corporation Tax" in s for s in reopened.sheetnames)
     assert "Index" in reopened.sheetnames
     assert any("TB Lead Schedule" in s for s in reopened.sheetnames)
     assert len(reopened.sheetnames) > 10

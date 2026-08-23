@@ -5,7 +5,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import control_accounts, mapping, nominal_matrix, parsers, recon, storage, xero_reports
+from app import control_accounts, corporation_tax, mapping, nominal_matrix, parsers, recon, storage, xero_reports
 from app.excel_builder import build_workbook
 from app.models import PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS
 
@@ -81,6 +81,21 @@ def job_detail(request: Request, job_id: str):
         "report_types": REPORT_TYPES, "report_labels": REPORT_LABELS,
         "platforms": PLATFORMS, "periods": PERIODS,
     })
+
+
+@app.post("/jobs/{job_id}/tax-inputs")
+def save_tax_inputs(
+    job_id: str,
+    ct_associated_companies: int = Form(0),
+    ct_disallowable_additions: float = Form(0.0),
+    ct_capital_allowances: float = Form(0.0),
+):
+    job = storage.get_job(job_id)
+    job["ct_associated_companies"] = ct_associated_companies
+    job["ct_disallowable_additions"] = ct_disallowable_additions
+    job["ct_capital_allowances"] = ct_capital_allowances
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
 @app.post("/jobs/{job_id}/uploads")
@@ -243,6 +258,35 @@ def _load_canonical_data(job: dict) -> dict:
     return data
 
 
+def _build_ct_computation(job: dict, data: dict) -> corporation_tax.CTComputation | None:
+    pl = data.get("pl_current")
+    if pl is None or pl.empty:
+        return None
+    accounting_profit = float(pl["amount"].sum())
+
+    booked_tax_charge = None
+    tb = data.get("tb_current")
+    if tb is not None and not tb.empty:
+        mask = tb["account_name"].str.lower().str.contains("corporation tax", na=False)
+        if mask.any():
+            booked_tax_charge = abs(float(tb.loc[mask, "balance"].sum()))
+
+    period_days = 365
+    start, end = job.get("current_period_start"), job.get("current_period_end")
+    if start and end:
+        from datetime import date
+        period_days = (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
+
+    return corporation_tax.compute(
+        accounting_profit=accounting_profit,
+        disallowable_additions=float(job.get("ct_disallowable_additions", 0.0)),
+        capital_allowances=float(job.get("ct_capital_allowances", 0.0)),
+        associated_companies=int(job.get("ct_associated_companies", 0)),
+        period_days=period_days,
+        booked_tax_charge=booked_tax_charge,
+    )
+
+
 @app.post("/jobs/{job_id}/generate")
 def generate(job_id: str):
     job = storage.get_job(job_id)
@@ -254,10 +298,11 @@ def generate(job_id: str):
         data.get("aged_debtors"), data.get("aged_creditors"),
     )
     mx_results = nominal_matrix.build_all_matrices(data.get("tb_current"), data.get("nominal_current"))
+    ct_computation = _build_ct_computation(job, data)
 
     wb = build_workbook(
         job["client_name"], job["current_label"], job["comparative_label"], data, results,
-        control_account_results=ca_results, matrix_results=mx_results,
+        control_account_results=ca_results, matrix_results=mx_results, ct_computation=ct_computation,
     )
 
     out_path = storage.output_dir(job_id) / "working_paper.xlsx"
