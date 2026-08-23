@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1>Confirm column mapping</h1>
+  <p class="muted">{{ report_label }} &mdash; {{ upload.filename }} ({{ upload.platform }}, {{ upload.period }} period)</p>
+  <p class="muted">Expected period: {{ job.current_period_start if upload.period == 'current' else job.comparative_period_start }} to {{ job.current_period_end if upload.period == 'current' else job.comparative_period_end }} &mdash; this file's own layout can't be auto-checked against that, so please confirm it covers the right dates before continuing.</p>
+  {% if upload.validation_note %}<p style="color:#b42318; font-size:13px;">&#9888; {{ upload.validation_note }}</p>{% endif %}
+  <p class="muted">We've matched columns from your export to the fields the working paper needs. Review and adjust any that look wrong, then confirm.</p>
+
+  <form method="post" action="/jobs/{{ job.id }}/uploads/{{ upload.id }}/mapping">
+    <div class="mapping-row" style="font-weight:700; color:#6b7280; font-size:12px; text-transform:uppercase;">
+      <div class="src">Column in your file</div>
+      <div style="flex:1">Maps to</div>
+    </div>
+    {% for col in upload.columns %}
+    <div class="mapping-row">
+      <div class="src">{{ col }}</div>
+      <select name="col__{{ col }}">
+        <option value="">-- ignore this column --</option>
+        {% for field, label in canonical_fields.items() %}
+        <option value="{{ field }}" {% if upload.mapping and upload.mapping.get(col) == field %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </div>
+    {% endfor %}
+
+    <label style="margin-top:20px"><input type="checkbox" name="save_profile" value="1" checked style="width:auto; display:inline-block; margin-right:6px;">
+      Remember this mapping for {{ job.client_name }}'s future {{ report_label }} uploads from {{ upload.platform }}
+    </label>
+
+    <div style="margin-top:16px">
+      <button type="submit">Confirm mapping</button>
+      <a class="button secondary" href="/jobs/{{ job.id }}">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

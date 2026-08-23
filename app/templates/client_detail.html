@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1>{{ client.name }}</h1>
+  <p class="muted">Working paper jobs for this client</p>
+  {% if jobs %}
+  <table>
+    <tr><th>Period</th><th>Comparative</th><th>Status</th><th>Created</th><th></th></tr>
+    {% for j in jobs %}
+    <tr>
+      <td>{{ j.current_label }}</td>
+      <td class="muted">{{ j.comparative_label or "-" }}</td>
+      <td><span class="badge {{ 'ok' if j.status == 'generated' else 'pending' }}">{{ j.status }}</span></td>
+      <td class="muted">{{ j.created_at[:10] }}</td>
+      <td><a class="button secondary" href="/jobs/{{ j.id }}">Open</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No jobs yet for this client.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Start a new working paper job</h2>
+  <form method="post" action="/clients/{{ client.id }}/jobs">
+    <div class="row">
+      <div>
+        <label>Current period start date</label>
+        <input type="date" name="current_period_start" required>
+      </div>
+      <div>
+        <label>Current period end date</label>
+        <input type="date" name="current_period_end" required>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>Comparative period start date (optional)</label>
+        <input type="date" name="comparative_period_start">
+      </div>
+      <div>
+        <label>Comparative period end date (optional)</label>
+        <input type="date" name="comparative_period_end">
+      </div>
+    </div>
+    <p class="muted">These dates are checked against every file you upload, so a report for the wrong period gets flagged instead of silently used.</p>
+    <div style="margin-top:16px"><button type="submit">Create job</button></div>
+  </form>
+</div>
+{% endblock %}

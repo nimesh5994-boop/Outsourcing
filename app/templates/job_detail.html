@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1>{{ job.client_name }} &mdash; {{ job.current_label }}</h1>
+  <p class="muted">Current period: {{ job.current_period_start }} to {{ job.current_period_end }}
+    {% if job.comparative_period_end %} | Comparative period: {{ job.comparative_period_start }} to {{ job.comparative_period_end }}{% else %} | No comparative period set{% endif %}
+  </p>
+
+  {% if job.status == "generated" %}
+  <h2>Recon summary</h2>
+  <table>
+    <tr><th>Check</th><th>Status</th><th>Comment</th></tr>
+    {% for s in job.summary %}
+    <tr>
+      <td>{{ s.name }}</td>
+      <td><span class="badge {{ s.status }}">{{ s.status }}</span></td>
+      <td class="muted">{{ s.message }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <div style="margin-top:16px">
+    <a class="button" href="/jobs/{{ job.id }}/download">Download working paper (.xlsx)</a>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Uploaded reports</h2>
+  {% if job.uploads %}
+  <table>
+    <tr><th>Report</th><th>Period</th><th>Platform</th><th>File</th><th>Mapping</th><th>Period check</th><th></th></tr>
+    {% for u in job.uploads.values() %}
+    <tr>
+      <td>{{ report_labels[u.report_type] }}</td>
+      <td>{{ u.period }}</td>
+      <td>{{ u.platform }}</td>
+      <td class="muted">{{ u.filename }}</td>
+      <td><span class="badge {{ 'confirmed' if u.confirmed else 'pending' }}">{{ 'confirmed' if u.confirmed else 'needs review' }}</span></td>
+      <td>
+        {% if u.period_check and u.period_check.status == 'mismatch' %}
+          <span class="badge error" title="{{ u.period_check.message }}">mismatch</span>
+        {% elif u.period_check and u.period_check.status == 'ok' %}
+          <span class="badge ok">matches</span>
+        {% else %}
+          <span class="badge na">unchecked</span>
+        {% endif %}
+      </td>
+      <td><a class="button secondary" href="/jobs/{{ job.id }}/uploads/{{ u.id }}/mapping">{{ 'Edit mapping' if u.confirmed else 'Confirm mapping' }}</a></td>
+    </tr>
+    {% if u.validation_note %}
+    <tr><td colspan="7" style="color:#b42318; font-size:13px; padding-top:0;">&#9888; {{ u.validation_note }}</td></tr>
+    {% endif %}
+    {% if u.period_check and u.period_check.status == 'mismatch' %}
+    <tr><td colspan="7" style="color:#b42318; font-size:13px; padding-top:0;">&#9888; {{ u.period_check.message }}</td></tr>
+    {% endif %}
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No files uploaded yet.</p>
+  {% endif %}
+
+  <form method="post" action="/jobs/{{ job.id }}/generate" style="margin-top:16px">
+    <button type="submit">Generate working paper</button>
+  </form>
+  <p class="muted">You can generate at any time &mdash; unconfirmed uploads are skipped, so any report type you haven't provided just shows as "no data" on its schedule.</p>
+</div>
+
+<div class="card">
+  <h2>Upload a report</h2>
+  <form method="post" action="/jobs/{{ job.id }}/uploads" enctype="multipart/form-data">
+    <div class="row">
+      <div>
+        <label>Report type</label>
+        <select name="report_type" required>
+          {% for rt in report_types %}
+          <option value="{{ rt }}">{{ report_labels[rt] }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Period</label>
+        <select name="period" required>
+          {% for p in periods %}
+          <option value="{{ p }}">{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Source platform</label>
+        <select name="platform" required>
+          {% for p in platforms %}
+          <option value="{{ p }}">{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <label>File (CSV or XLSX export)</label>
+    <input type="file" name="file" required accept=".csv,.xlsx,.xls">
+    <div style="margin-top:16px"><button type="submit">Upload</button></div>
+  </form>
+</div>
+{% endblock %}

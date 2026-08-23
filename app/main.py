@@ -1,0 +1,279 @@
+from pathlib import Path
+
+from fastapi import FastAPI, Form, Request, UploadFile
+from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.templating import Jinja2Templates
+
+from app import control_accounts, mapping, nominal_matrix, parsers, recon, storage, xero_reports
+from app.excel_builder import build_workbook
+from app.models import PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS
+
+# report types with a dedicated Xero report parser (no manual column mapping needed)
+XERO_NATIVE_REPORT_TYPES = {"trial_balance", "nominal_activity", "aged_debtors", "aged_creditors"}
+
+BASE_DIR = Path(__file__).resolve().parent
+app = FastAPI(title="Working Paper Automation")
+app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
+templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+# Canonical field(s) a given (report_type, period) upload feeds into the recon engine under.
+DATA_KEY = {
+    ("trial_balance", "current"): "tb_current",
+    ("trial_balance", "comparative"): "tb_comparative",
+    ("nominal_activity", "current"): "nominal_current",
+    ("nominal_activity", "comparative"): "nominal_comparative",
+    ("aged_debtors", "current"): "aged_debtors",
+    ("aged_creditors", "current"): "aged_creditors",
+    ("vat_return", "current"): "vat_return",
+    ("bank_statement", "current"): "bank_statement",
+    ("profit_and_loss", "current"): "pl_current",
+    ("profit_and_loss", "comparative"): "pl_comparative",
+    ("balance_sheet", "current"): "bs_current",
+    ("balance_sheet", "comparative"): "bs_comparative",
+}
+
+
+@app.get("/")
+def home():
+    return RedirectResponse("/clients")
+
+
+@app.get("/clients")
+def list_clients(request: Request):
+    clients = storage.list_clients()
+    return templates.TemplateResponse("clients.html", {"request": request, "clients": clients})
+
+
+@app.post("/clients")
+def create_client(name: str = Form(...)):
+    client = storage.create_client(name.strip())
+    return RedirectResponse(f"/clients/{client['id']}", status_code=303)
+
+
+@app.get("/clients/{client_id}")
+def client_detail(request: Request, client_id: str):
+    client = storage.get_client(client_id)
+    jobs = storage.list_jobs(client_id)
+    return templates.TemplateResponse("client_detail.html", {"request": request, "client": client, "jobs": jobs})
+
+
+@app.post("/clients/{client_id}/jobs")
+def create_job(
+    client_id: str,
+    current_period_start: str = Form(...), current_period_end: str = Form(...),
+    comparative_period_start: str = Form(""), comparative_period_end: str = Form(""),
+):
+    client = storage.get_client(client_id)
+    job = storage.create_job(
+        client_id, client["name"],
+        current_period_start, current_period_end,
+        comparative_period_start or None, comparative_period_end or None,
+    )
+    return RedirectResponse(f"/jobs/{job['id']}", status_code=303)
+
+
+@app.get("/jobs/{job_id}")
+def job_detail(request: Request, job_id: str):
+    job = storage.get_job(job_id)
+    return templates.TemplateResponse("job_detail.html", {
+        "request": request, "job": job,
+        "report_types": REPORT_TYPES, "report_labels": REPORT_LABELS,
+        "platforms": PLATFORMS, "periods": PERIODS,
+    })
+
+
+@app.post("/jobs/{job_id}/uploads")
+async def upload_file(job_id: str, report_type: str = Form(...), period: str = Form(...),
+                       platform: str = Form(...), file: UploadFile = None):
+    job = storage.get_job(job_id)
+    dest_dir = storage.uploads_dir(job_id)
+    saved_path = dest_dir / f"{report_type}__{period}__{file.filename}"
+    content = await file.read()
+    saved_path.write_bytes(content)
+
+    source = parsers.FileDataSource(saved_path)
+    expected_end = _expected_period_end(job, period)
+
+    # Xero exports have a known, specific layout (grouped reports, embedded
+    # comparative TB) that a dedicated parser handles directly - no manual
+    # column mapping step needed. Falls back to generic mapping if the file
+    # doesn't actually match the expected Xero layout (a real signal that
+    # either the wrong report type was picked, or it isn't a Xero export).
+    validation_note = ""
+    period_check = {"status": "unknown", "message": ""}
+    if platform == "xero" and report_type in XERO_NATIVE_REPORT_TYPES:
+        try:
+            _validate_xero_parse(report_type, source)
+        except Exception as exc:
+            validation_note = (
+                f"This file doesn't look like a standard Xero {REPORT_LABELS[report_type]} export "
+                f"({exc}) - check you selected the right report type, or map its columns manually below."
+            )
+        else:
+            period_check = xero_reports.check_period(xero_reports.extract_period_info(source), expected_end)
+            columns = source.raw_columns()
+            upload_id = storage.add_upload(job, report_type, period, platform, file.filename, str(saved_path), columns)
+            job = storage.get_job(job_id)
+            job["uploads"][upload_id]["mapping"] = {}
+            job["uploads"][upload_id]["confirmed"] = True
+            job["uploads"][upload_id]["xero_native"] = True
+            job["uploads"][upload_id]["period_check"] = period_check
+            storage.save_job(job)
+            return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+    columns = source.raw_columns()
+    upload_id = storage.add_upload(job, report_type, period, platform, file.filename, str(saved_path), columns)
+
+    # try a saved profile first, fall back to alias-based suggestion
+    profile = mapping.load_profile(job["client_id"], report_type, platform)
+    if profile:
+        suggestion = {col: profile.get(col) for col in columns}
+    else:
+        suggestion = mapping.suggest_mapping(report_type, columns)
+
+    # simple category check: did we manage to guess a mapping for the fields
+    # this report type actually needs? If none matched at all, the file is
+    # probably not what was selected in the report-type dropdown.
+    required = REQUIRED_FIELDS.get(report_type, [])
+    matched_required = {v for v in suggestion.values() if v} & set(required)
+    if not validation_note and required and not matched_required:
+        validation_note = (
+            f"None of this file's columns look like a {REPORT_LABELS[report_type]} - "
+            f"double check you selected the right report type before mapping columns."
+        )
+
+    job = storage.get_job(job_id)
+    job["uploads"][upload_id]["mapping"] = suggestion
+    job["uploads"][upload_id]["validation_note"] = validation_note
+    storage.save_job(job)
+
+    return RedirectResponse(f"/jobs/{job_id}/uploads/{upload_id}/mapping", status_code=303)
+
+
+def _expected_period_end(job: dict, period: str):
+    from datetime import date
+    key = "current_period_end" if period == "current" else "comparative_period_end"
+    value = job.get(key)
+    return date.fromisoformat(value) if value else None
+
+
+def _validate_xero_parse(report_type: str, source: parsers.DataSource) -> None:
+    if report_type == "trial_balance":
+        xero_reports.parse_trial_balance(source)
+    elif report_type == "nominal_activity":
+        xero_reports.parse_account_transactions(source)
+    elif report_type == "aged_debtors":
+        xero_reports.parse_aged_report(source, "customer")
+    elif report_type == "aged_creditors":
+        xero_reports.parse_aged_report(source, "supplier")
+
+
+@app.get("/jobs/{job_id}/uploads/{upload_id}/mapping")
+def mapping_form(request: Request, job_id: str, upload_id: str):
+    job = storage.get_job(job_id)
+    upload = job["uploads"][upload_id]
+    canonical_fields = REPORT_SCHEMAS[upload["report_type"]]
+    return templates.TemplateResponse("mapping.html", {
+        "request": request, "job": job, "upload": upload,
+        "canonical_fields": canonical_fields, "report_label": REPORT_LABELS[upload["report_type"]],
+    })
+
+
+@app.post("/jobs/{job_id}/uploads/{upload_id}/mapping")
+async def save_mapping(request: Request, job_id: str, upload_id: str):
+    form = await request.form()
+    job = storage.get_job(job_id)
+    upload = job["uploads"][upload_id]
+
+    new_mapping = {}
+    for col in upload["columns"]:
+        key = f"col__{col}"
+        val = form.get(key)
+        new_mapping[col] = val if val else None
+
+    upload["mapping"] = new_mapping
+    upload["confirmed"] = True
+    storage.save_job(job)
+
+    if form.get("save_profile"):
+        mapping.save_profile(job["client_id"], upload["report_type"], upload["platform"], new_mapping)
+
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+def _load_canonical_data(job: dict) -> dict:
+    data = {}
+    for upload in job["uploads"].values():
+        if not upload["confirmed"]:
+            continue
+        source = parsers.FileDataSource(upload["path"])
+        report_type = upload["report_type"]
+
+        if upload.get("xero_native"):
+            if report_type == "trial_balance":
+                tb_current, tb_comparative = xero_reports.parse_trial_balance(source)
+                data["tb_current"] = tb_current
+                if not tb_comparative.empty:
+                    data["tb_comparative"] = tb_comparative
+            elif report_type == "nominal_activity":
+                key = "nominal_current" if upload["period"] == "current" else "nominal_comparative"
+                data[key] = xero_reports.parse_account_transactions(source)
+            elif report_type == "aged_debtors":
+                data["aged_debtors"] = xero_reports.parse_aged_report(source, "customer")
+            elif report_type == "aged_creditors":
+                data["aged_creditors"] = xero_reports.parse_aged_report(source, "supplier")
+            continue
+
+        key = DATA_KEY.get((report_type, upload["period"]))
+        if not key:
+            continue
+        df = parsers.apply_mapping(source, report_type, upload["mapping"] or {})
+        data[key] = df
+
+    # Xero's TB already categorises every account (Sales/Direct Costs/Overhead
+    # = P&L, Bank/Current Asset/Current Liability/Equity/etc. = B/S), so P&L
+    # and B/S can be derived when they weren't uploaded separately.
+    if data.get("tb_current") is not None and not data["tb_current"].empty:
+        if data.get("pl_current") is None or data.get("bs_current") is None:
+            pl, bs = xero_reports.derive_pl_bs_from_tb(data["tb_current"])
+            data.setdefault("pl_current", pl)
+            data.setdefault("bs_current", bs)
+
+    return data
+
+
+@app.post("/jobs/{job_id}/generate")
+def generate(job_id: str):
+    job = storage.get_job(job_id)
+    data = _load_canonical_data(job)
+    results = recon.run_all_recons(data)
+
+    ca_results = control_accounts.build_all_rollforwards(
+        data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
+        data.get("aged_debtors"), data.get("aged_creditors"),
+    )
+    mx_results = nominal_matrix.build_all_matrices(data.get("tb_current"), data.get("nominal_current"))
+
+    wb = build_workbook(
+        job["client_name"], job["current_label"], job["comparative_label"], data, results,
+        control_account_results=ca_results, matrix_results=mx_results,
+    )
+
+    out_path = storage.output_dir(job_id) / "working_paper.xlsx"
+    wb.save(out_path)
+
+    job["status"] = "generated"
+    job["summary"] = [{"name": r.name, "status": r.status, "message": r.message} for r in results]
+    storage.save_job(job)
+
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+@app.get("/jobs/{job_id}/download")
+def download(job_id: str):
+    job = storage.get_job(job_id)
+    out_path = storage.output_dir(job_id) / "working_paper.xlsx"
+    filename = f"{job['client_name']} - Working Papers - {job['current_label']}.xlsx"
+    return FileResponse(out_path, filename=filename,
+                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
