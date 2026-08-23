@@ -15,6 +15,7 @@ REPORT_TYPES = [
     "bank_statement",
     "profit_and_loss",
     "balance_sheet",
+    "fixed_asset_register",
 ]
 
 REPORT_LABELS = {
@@ -26,6 +27,7 @@ REPORT_LABELS = {
     "bank_statement": "Bank Closing Statement",
     "profit_and_loss": "Profit & Loss",
     "balance_sheet": "Balance Sheet",
+    "fixed_asset_register": "Fixed Asset Register (prior year closing)",
 }
 
 # canonical column -> friendly label, used to drive the mapping UI
@@ -97,6 +99,17 @@ REPORT_SCHEMAS = {
         "category": "B/S Category (Fixed Assets/Current Assets/Current Liabilities/etc.)",
         "amount": "Amount",
     },
+    "fixed_asset_register": {
+        "asset_id": "Asset ID / Reference",
+        "description": "Description",
+        "category": "Category (Motor Vehicles/Fixtures & Fittings/Computer Equipment/etc.)",
+        "date_acquired": "Date Acquired",
+        "cost": "Cost",
+        "depreciation_method": "Depreciation Method (Straight Line/Reducing Balance)",
+        "depreciation_rate": "Depreciation Rate (% per annum)",
+        "accumulated_depreciation_b_fwd": "Accumulated Depreciation Brought Forward",
+        "disposed": "Disposed? (Yes/No)",
+    },
 }
 
 # Fields required for a period upload to be usable in reconciliation.
@@ -109,6 +122,7 @@ REQUIRED_FIELDS = {
     "bank_statement": ["account_name", "closing_balance"],
     "profit_and_loss": ["account_name", "amount"],
     "balance_sheet": ["account_name", "amount"],
+    "fixed_asset_register": ["description", "cost"],
 }
 
 PLATFORMS = ["xero", "qbo", "sage", "other"]

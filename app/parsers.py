@@ -48,10 +48,12 @@ class FileDataSource(DataSource):
 
 
 NUMERIC_FIELDS = {
-    "debit", "credit", "current", "d1_30", "d31_60", "d61_90", "d90_plus", "total",
+    "debit", "credit", "current", "bucket_1", "bucket_2", "bucket_3", "bucket_4", "older", "total",
     "box1", "box2", "box3", "box4", "box5", "box6", "box7", "box8", "box9",
-    "closing_balance", "amount",
+    "closing_balance", "amount", "cost", "depreciation_rate", "accumulated_depreciation_b_fwd",
 }
+
+DATE_FIELDS = {"date", "date_acquired"}
 
 
 def _to_numeric(series: pd.Series) -> pd.Series:
@@ -90,10 +92,13 @@ def apply_mapping(source: DataSource, report_type: str, mapping: dict) -> pd.Dat
         else:
             out[field] = out[field].astype(str).replace("nan", "").str.strip()
 
+    for field in canonical_fields:
+        if field in DATE_FIELDS:
+            out[field] = pd.to_datetime(out[field], errors="coerce", dayfirst=True)
+
     if report_type == "trial_balance":
         out["balance"] = out["debit"] - out["credit"]
     if report_type == "nominal_activity":
-        out["date"] = pd.to_datetime(out["date"], errors="coerce", dayfirst=True)
         out["net"] = out["debit"] - out["credit"]
 
     return out[[c for c in out.columns]]

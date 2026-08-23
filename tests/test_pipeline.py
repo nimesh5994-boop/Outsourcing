@@ -3,9 +3,10 @@ structures), run every reconciliation, and build the final workbook."""
 from pathlib import Path
 
 import openpyxl
+import pandas as pd
 import pytest
 
-from app import control_accounts, corporation_tax, mapping, nominal_matrix, parsers, recon, xero_reports
+from app import control_accounts, corporation_tax, fixed_assets, mapping, nominal_matrix, parsers, recon, xero_reports
 from app.excel_builder import build_workbook
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
@@ -133,6 +134,66 @@ def test_corporation_tax_flags_variance_against_booked_charge(canonical_data):
     assert result.variance == pytest.approx(result.tax_charge - 0.01)
 
 
+def _fa_tb_row(code, name, account_type, debit, credit):
+    return {"account_code": code, "account_name": name, "account_type": account_type,
+            "debit": debit, "credit": credit, "balance": debit - credit}
+
+
+def test_fixed_asset_category_grouping_handles_unpunctuated_names():
+    # real Xero data uses no separator at all ("IT EQUIPMENT COST BROUGHT
+    # FORWARD" rather than "IT EQUIPMENT - COST") - this is a regression
+    # test for that, and for the NBV sign convention (accumulated
+    # depreciation is a credit balance, so it must reduce NBV, not inflate it)
+    tb_current = pd.DataFrame([
+        _fa_tb_row("6350", "IT EQUIPMENT COST BROUGHT FORWARD", "Fixed Asset", 1612.19, 0),
+        _fa_tb_row("6351", "IT EQUIPMENT COST OF ADDITIONS", "Fixed Asset", 1514.15, 0),
+        _fa_tb_row("6360", "IT EQUIPMENT ACCUMULATED DEPRECIATION BROUGHT FORWARD", "Fixed Asset", 0, 89.57),
+    ])
+    tb_comparative = pd.DataFrame([
+        _fa_tb_row("6350", "IT EQUIPMENT COST BROUGHT FORWARD", "Fixed Asset", 1612.19, 0),
+        _fa_tb_row("6360", "IT EQUIPMENT ACCUMULATED DEPRECIATION BROUGHT FORWARD", "Fixed Asset", 0, 89.57),
+    ])
+    result = fixed_assets.category_level_rollforward(tb_current, tb_comparative, pd.DataFrame())
+
+    assert len(result.detail) == 1  # all three rows grouped into one category
+    row = result.detail.iloc[0]
+    assert row["Category"] == "IT EQUIPMENT"
+    assert row["Cost c/fwd (per TB)"] == pytest.approx(3126.34)
+    assert row["Acc. depreciation c/fwd (per TB)"] == pytest.approx(89.57)  # positive, not -89.57
+    assert row["NBV c/fwd"] == pytest.approx(3126.34 - 89.57)
+
+
+def test_asset_register_depreciation_straight_line_and_reducing_balance():
+    prior_register = pd.DataFrame([
+        {"asset_id": "FA-1", "description": "Van", "category": "Motor Vehicles", "date_acquired": pd.Timestamp("2022-01-01"),
+         "cost": 18000.0, "depreciation_method": "reducing_balance", "depreciation_rate": 25.0,
+         "accumulated_depreciation_b_fwd": 10195.31, "disposed": False},
+        {"asset_id": "FA-2", "description": "Laptops", "category": "Computer Equipment", "date_acquired": pd.Timestamp("2023-09-01"),
+         "cost": 2400.0, "depreciation_method": "straight_line", "depreciation_rate": 33.33,
+         "accumulated_depreciation_b_fwd": 799.20, "disposed": False},
+    ])
+    result = fixed_assets.asset_level_rollforward(prior_register, None, None, period_days=365)
+
+    van = result.asset_schedule.set_index("Asset ID").loc["FA-1"]
+    laptops = result.asset_schedule.set_index("Asset ID").loc["FA-2"]
+    # reducing balance: (cost - acc dep b/fwd) * rate
+    assert van["Depreciation Charge"] == pytest.approx((18000.0 - 10195.31) * 0.25, abs=0.01)
+    # straight line: cost * rate
+    assert laptops["Depreciation Charge"] == pytest.approx(2400.0 * 0.3333, abs=0.01)
+
+
+def test_fixed_asset_register_generic_mapping():
+    source = parsers.FileDataSource(SAMPLE_DIR / "fixed_asset_register_prior_year.csv")
+    suggestion = mapping.suggest_mapping("fixed_asset_register", source.raw_columns())
+    df = parsers.apply_mapping(source, "fixed_asset_register", suggestion)
+
+    assert len(df) == 3
+    assert df["cost"].sum() == pytest.approx(18000.0 + 2400.0 + 6000.0)
+    van = df[df["asset_id"] == "FA-001"].iloc[0]
+    assert van["depreciation_method"].strip().lower() == "reducing balance"
+    assert pd.notna(van["date_acquired"])
+
+
 def test_full_workbook_builds_and_saves(tmp_path, canonical_data):
     results = recon.run_all_recons(canonical_data)
     ca_results = control_accounts.build_all_rollforwards(
@@ -141,12 +202,15 @@ def test_full_workbook_builds_and_saves(tmp_path, canonical_data):
     )
     mx_results = nominal_matrix.build_all_matrices(canonical_data["tb_current"], canonical_data["nominal_current"])
     ct_computation = corporation_tax.compute(accounting_profit=float(canonical_data["pl_current"]["amount"].sum()))
+    fixed_asset_result = fixed_assets.category_level_rollforward(
+        canonical_data["tb_current"], canonical_data["tb_comparative"], canonical_data["nominal_current"]
+    )
 
     wb = build_workbook(
         "Brightwell Landscaping Supplies Limited",
         "Year ended 31 December 2025", "Year ended 31 December 2024",
         canonical_data, results, control_account_results=ca_results, matrix_results=mx_results,
-        ct_computation=ct_computation,
+        ct_computation=ct_computation, fixed_asset_result=fixed_asset_result,
     )
     out = tmp_path / "working_paper.xlsx"
     wb.save(out)

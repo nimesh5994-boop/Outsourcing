@@ -1,0 +1,4 @@
+Asset ID,Description,Category,Date Acquired,Cost,Depreciation Method,Depreciation Rate,Accumulated Depreciation Brought Forward,Disposed?
+FA-001,Ford Transit van,Motor Vehicles,15/03/2022,18000.00,Reducing Balance,25,10195.31,No
+FA-002,Dell Latitude laptop x3,Computer Equipment,01/09/2023,2400.00,Straight Line,33.33,799.20,No
+FA-003,Warehouse racking,Fixtures & Fittings,10/01/2021,6000.00,Straight Line,10,2400.00,No

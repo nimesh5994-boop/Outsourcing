@@ -88,6 +88,17 @@ ALIASES = {
         "category": {"category", "group", "section", "accountgroup"},
         "amount": {"amount", "total", "value", "currentyear", "ytd", "balance"},
     },
+    "fixed_asset_register": {
+        "asset_id": {"assetid", "assetref", "assetreference", "id", "ref", "reference", "assetnumber"},
+        "description": {"description", "asset", "assetdescription", "item", "name"},
+        "category": {"category", "assetcategory", "assettype", "group", "class"},
+        "date_acquired": {"dateacquired", "acquisitiondate", "purchasedate", "dateofpurchase", "date"},
+        "cost": {"cost", "originalcost", "grosscost", "purchaseprice"},
+        "depreciation_method": {"depreciationmethod", "method"},
+        "depreciation_rate": {"depreciationrate", "rate", "raterate", "annualrate"},
+        "accumulated_depreciation_b_fwd": {"accumulateddepreciation", "accumulateddepreciationbfwd", "depreciationbfwd", "accdepbfwd", "nbvbfwd", "wdvbfwd"},
+        "disposed": {"disposed", "disposal", "soldwrittenoff"},
+    },
 }
 
 

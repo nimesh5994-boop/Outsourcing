@@ -9,9 +9,13 @@ creditors control account reconciliation (with the full aged listing as a
 breakdown of the closing balance), bank and VAT cross-checks, control account
 rollforwards (balance b/fwd + movements = balance c/fwd), a nominal
 activity analysis matrix that allocates transactions to their contra nominal
-code and flags anything that needs manual reallocation, and a UK Corporation
+code and flags anything that needs manual reallocation, a UK Corporation
 Tax computation (current rates, marginal relief applied automatically,
-checked against whatever's booked as the tax charge).
+checked against whatever's booked as the tax charge), and a fixed asset
+register (a category-level cost/depreciation rollforward derived entirely
+from TB + nominal activity, plus an asset-level version that rolls a
+prior-year register forward, depreciates each asset, and flags new
+additions/possible disposals from nominal activity).
 
 A small internal web app: staff upload a client's export files for a job,
 confirm (or correct) how columns map to the working paper's fields, and
@@ -69,6 +73,8 @@ quirks each one works around.
 | Bank reconciliation | Statement closing balance vs TB |
 | VAT cross-check | VAT return boxes vs P&L turnover and VAT control account |
 | Corporation Tax computation | Current UK rates (small profits/marginal relief/main rate) applied to accounting profit, checked against the booked tax charge |
+| Fixed asset register (category) | Cost/depreciation rollforward per asset category, derived from TB + nominal activity, checked against the TB |
+| Fixed asset register (asset detail) | Prior-year register rolled forward asset-by-asset, new additions/possible disposals flagged from nominal activity, totals checked against TB |
 
 Every check produces a status (`ok` / `review` / `error` / `n/a`) and a
 plain-English message, shown on the workbook's Index sheet and again on
@@ -96,6 +102,30 @@ repo, so a real change gets a human decision before it reaches `tax_rates.py`.
 Every generated CT schedule also states the rates used and when they were
 last verified, so a stale config is visible on the workbook itself even
 between routine checks.
+
+## Fixed asset register
+
+Built from `app/fixed_assets.py`, in two parts that work independently:
+
+**Category-level** (always available, no upload needed): real charts of
+accounts commonly split each fixed asset category into a cost/additions
+code and a depreciation code (naming varies a lot in practice - some use
+"COMPUTER EQUIPMENT - COST", others run words together with no separator
+at all, e.g. "IT EQUIPMENT COST BROUGHT FORWARD" - both are handled by
+stripping structural words like cost/additions/depreciation/brought/
+forward wherever they appear, rather than matching a fixed suffix
+pattern). Paired-up cost and depreciation accounts become a cost /
+accumulated depreciation / NBV rollforward per category, cross-checked
+against the TB.
+
+**Asset-level** (needs a prior-year register upload - report type "Fixed
+Asset Register", generic column mapping since there's no standard
+software export for this): rolls each asset forward using its own
+depreciation method (straight line or reducing balance) and rate,
+flags nominal-activity transactions against fixed asset cost codes that
+aren't yet in the register as candidate new additions, flags credit
+movements on those codes as possible disposals to match and remove, and
+reconciles the register's total NBV to the TB.
 
 ## Upload safety
 
@@ -193,3 +223,12 @@ subtotals) for a fictional client - no real client data is in this repo.
   that differ from taxable profits (dividends received from non-51%-group
   companies) - defaults to treating them as equal, which is correct for the
   common case but not universal.
+- **Fixed asset register** can't distinguish a genuine in-year purchase
+  from an opening-balance data-migration journal when flagging "new
+  additions" from nominal activity (both look like a debit to a fixed
+  asset cost code) - real data showed this: entries in an "Opening
+  Balance" section got flagged as additions needing review, which is the
+  right call (they do need reviewing) but not always for the reason the
+  label implies. It also doesn't try to match a specific flagged disposal
+  to a specific register line automatically - that needs the asset
+  description reviewed by a preparer.

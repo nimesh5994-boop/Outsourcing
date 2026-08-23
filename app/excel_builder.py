@@ -13,6 +13,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from app.control_accounts import ControlAccountResult
 from app.corporation_tax import CTComputation
+from app.fixed_assets import AssetRegisterResult, FixedAssetResult
 from app.nominal_matrix import MatrixResult
 from app.recon import ReconResult
 
@@ -290,6 +291,38 @@ def build_matrix_sheet(wb: Workbook, client_name: str, current_label: str, ref: 
     ws.freeze_panes = f"A{table_row + 1}"
 
 
+def build_asset_register_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: AssetRegisterResult):
+    ws = wb.create_sheet(f"{ref} Fixed Asset Register"[:31])
+    row = _write_title(ws, client_name, current_label, "FIXED ASSET REGISTER (ASSET DETAIL)", ref)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
+    status_cell.font = _status_font(result.status)
+    status_cell.fill = _status_fill(result.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=8)
+    ws.row_dimensions[row].height = 30
+
+    r = row + 2
+    if not result.summary.empty:
+        r = _write_dataframe(ws, result.summary, start_row=r)
+
+    if not result.asset_schedule.empty:
+        ws.cell(row=r, column=1, value="ASSET SCHEDULE").font = SCHEDULE_FONT
+        r = _write_dataframe(ws, result.asset_schedule, start_row=r + 1)
+
+    if not result.new_additions.empty:
+        ws.cell(row=r, column=1, value="NEW ADDITIONS FOUND IN NOMINAL ACTIVITY - NOT YET IN REGISTER").font = SCHEDULE_FONT
+        r = _write_dataframe(ws, result.new_additions, start_row=r + 1)
+
+    if not result.possible_disposals.empty:
+        ws.cell(row=r, column=1, value="POSSIBLE DISPOSALS (CREDIT MOVEMENTS ON FIXED ASSET COST CODES)").font = SCHEDULE_FONT
+        r = _write_dataframe(ws, result.possible_disposals, start_row=r + 1)
+
+    if result.summary.empty and result.asset_schedule.empty:
+        ws.cell(row=r, column=1, value="No data available.")
+    ws.freeze_panes = f"A{row + 1}"
+
+
 def build_corporation_tax_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, ct: CTComputation):
     ws = wb.create_sheet(f"{ref} Corporation Tax"[:31])
     row = _write_title(ws, client_name, current_label, "CORPORATION TAX COMPUTATION", ref)
@@ -367,6 +400,8 @@ def build_workbook(
     control_account_results: list[ControlAccountResult] | None = None,
     matrix_results: list[MatrixResult] | None = None,
     ct_computation: CTComputation | None = None,
+    fixed_asset_result: FixedAssetResult | None = None,
+    asset_register_result: AssetRegisterResult | None = None,
 ) -> Workbook:
     control_account_results = control_account_results or []
     matrix_results = matrix_results or []
@@ -386,6 +421,16 @@ def build_workbook(
     if ct_computation is not None:
         ct_ref = ref.next()
         entries.append({"ref": ct_ref, "title": "Corporation Tax Computation", "status": ct_computation.status, "message": ct_computation.message})
+
+    fa_ref = None
+    if fixed_asset_result is not None and fixed_asset_result.status != "n/a":
+        fa_ref = ref.next()
+        entries.append({"ref": fa_ref, "title": fixed_asset_result.name, "status": fixed_asset_result.status, "message": fixed_asset_result.message})
+
+    ar_ref = None
+    if asset_register_result is not None and asset_register_result.status != "n/a":
+        ar_ref = ref.next()
+        entries.append({"ref": ar_ref, "title": "Fixed asset register (asset detail)", "status": asset_register_result.status, "message": asset_register_result.message})
 
     name_map = {
         "TB self-balance check": "TB Balance Check",
@@ -428,6 +473,12 @@ def build_workbook(
 
     if ct_computation is not None:
         build_corporation_tax_sheet(wb, client_name, current_label, ct_ref, ct_computation)
+
+    if fa_ref is not None:
+        build_recon_sheet(wb, client_name, current_label, fa_ref, f"{fa_ref} Fixed Assets", fixed_asset_result)
+
+    if ar_ref is not None:
+        build_asset_register_sheet(wb, client_name, current_label, ar_ref, asset_register_result)
 
     for res in results:
         sheet_name = name_map.get(res.name, res.name[:31])
