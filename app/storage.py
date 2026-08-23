@@ -23,7 +23,9 @@ JOBS_DIR = DATA_DIR / "jobs"
 # new code.
 DEFAULT_TEMPLATE_CONFIG = {
     "schedules": {
+        "index": {"enabled": True, "insert_after_sheet": None},  # None = ahead of the template's own sheets
         "tb_lead_schedule": {"enabled": True, "insert_after_sheet": None},
+        "tb_balance_check": {"enabled": True, "insert_after_sheet": None},
         "profit_and_loss": {"enabled": True, "insert_after_sheet": None},
         "balance_sheet": {"enabled": True, "insert_after_sheet": None},
         "corporation_tax": {"enabled": True, "insert_after_sheet": None},
@@ -36,6 +38,9 @@ DEFAULT_TEMPLATE_CONFIG = {
         "bank_recon": {"enabled": True, "insert_after_sheet": None},
         "vat_recon": {"enabled": True, "insert_after_sheet": None},
         "nominal_review": {"enabled": True, "insert_after_sheet": None},
+        "contact_coding_consistency": {"enabled": True, "insert_after_sheet": None},
+        "duplicate_check": {"enabled": True, "insert_after_sheet": None},
+        "unusual_posting_dates": {"enabled": True, "insert_after_sheet": None},
         "points_forward": {"enabled": True, "insert_after_sheet": None},
     },
     "header_cells": {"client_name_cell": "A1", "period_cell": "A2", "schedule_title_cell": "A3"},

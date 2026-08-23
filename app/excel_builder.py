@@ -4,7 +4,9 @@ a CLIENT NAME / PERIOD / SCHEDULE TITLE header block on every sheet, and a
 numbered index of schedules with their status and any queries raised.
 """
 from datetime import datetime
+from pathlib import Path
 
+import openpyxl
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -135,17 +137,20 @@ def _write_dataframe(ws: Worksheet, df: pd.DataFrame, start_row: int, start_col:
 
 
 class _RefCounter:
-    def __init__(self):
-        self.n = 0
+    def __init__(self, start: int = 1):
+        self.n = start - 1
 
     def next(self) -> str:
         self.n += 1
         return str(self.n)
 
 
-def build_index_sheet(wb: Workbook, client_name: str, current_label: str, comparative_label: str, entries: list[dict]):
-    ws = wb.active
-    ws.title = "Index"
+def build_index_sheet(ws: Worksheet, client_name: str, current_label: str, comparative_label: str, entries: list[dict]):
+    """Writes the index onto whatever worksheet the caller hands it -
+    build_workbook passes wb.active (a fresh workbook's only sheet, so
+    reusing it as "Index" is free), template-based generation passes a
+    freshly created sheet instead, since wb.active there is the practice's
+    own real first sheet and must not be overwritten."""
     ws["A1"] = client_name.upper()
     ws["A1"].font = CLIENT_FONT
     ws["A2"] = f"WORKING PAPERS - {current_label.upper()}"
@@ -1224,6 +1229,184 @@ def build_points_forward_sheet(wb: Workbook, client_name: str, period_label: str
     ws.freeze_panes = f"A{row + 1}"
 
 
+def _generate_schedules(
+    wb: Workbook,
+    ref: _RefCounter,
+    index_ws: Worksheet,
+    client_name: str,
+    current_label: str,
+    comparative_label: str,
+    data: dict,
+    results: list[ReconResult],
+    control_account_results: list[ControlAccountResult],
+    matrix_results: list[MatrixResult],
+    ct_computation: CTComputation | None,
+    fixed_asset_result: FixedAssetResult | None,
+    asset_register_result: AssetRegisterResult | None,
+    enabled=lambda key: True,
+    place=lambda key, call: call(),
+) -> Workbook:
+    """The shared core both build_workbook (generic layout, a fresh
+    workbook) and build_workbook_into_template (a practice's real
+    uploaded template as the base) drive - every schedule this system
+    knows how to build, in one place, so the two paths can't quietly drift
+    apart on what gets generated.
+
+    `enabled(key)` gates whether a schedule is generated at all (always
+    True for the generic path; template config-driven for the template
+    path). `place(key, call)` invokes a builder call and hands back its
+    return value unchanged - the template path additionally repositions
+    whichever new sheet the call created, per that schedule's
+    insert_after_sheet config; the generic path just calls straight
+    through, since a freshly generated workbook has no fixed layout to
+    respect."""
+    entries = []
+
+    tb_on = enabled("tb_lead_schedule")
+    tb_ref = ref.next() if tb_on else None
+    if tb_on:
+        entries.append({"ref": tb_ref, "title": "TB Lead Schedule", "status": "ok" if data.get("tb_current") is not None and not data["tb_current"].empty else "n/a", "message": "Current vs comparative, variance flagged"})
+
+    pl_statement = build_pl_statement(data.get("pl_current"))
+    bs_statement = build_bs_statement(data.get("bs_current"), pl_statement.net_profit)
+
+    pl_on, bs_on = enabled("profit_and_loss"), enabled("balance_sheet")
+    pl_ref = ref.next() if pl_on else None
+    bs_ref = ref.next() if bs_on else None
+    if pl_on:
+        entries.append({"ref": pl_ref, "title": "Profit & Loss", "status": pl_statement.status, "message": pl_statement.message if pl_statement.status != "ok" else ""})
+    if bs_on:
+        entries.append({"ref": bs_ref, "title": "Balance Sheet", "status": bs_statement.status, "message": bs_statement.message if bs_statement.status != "n/a" else ""})
+
+    ct_ref = None
+    if ct_computation is not None and enabled("corporation_tax"):
+        ct_ref = ref.next()
+        entries.append({"ref": ct_ref, "title": "Corporation Tax Computation", "status": ct_computation.status, "message": ct_computation.message})
+
+    fa_ref = None
+    if fixed_asset_result is not None and fixed_asset_result.status != "n/a" and enabled("fixed_asset_category"):
+        fa_ref = ref.next()
+        entries.append({"ref": fa_ref, "title": fixed_asset_result.name, "status": fixed_asset_result.status, "message": fixed_asset_result.message})
+
+    ar_ref = None
+    cr_ref = None
+    if asset_register_result is not None and asset_register_result.status != "n/a" and enabled("fixed_asset_register"):
+        ar_ref = ref.next()
+        entries.append({"ref": ar_ref, "title": "Fixed asset register (asset detail)", "status": asset_register_result.status, "message": asset_register_result.message})
+        if not asset_register_result.closing_register.empty:
+            cr_ref = ref.next()
+            entries.append({"ref": cr_ref, "title": "Fixed asset register (closing - for next year)", "status": "n/a", "message": "Same layout as the prior-year upload - carry this straight into next year's job."})
+
+    # (config key, sheet title) per recon/anomaly result name - None title
+    # means "feeds another schedule, no separate tab of its own" (unrelated
+    # to enabled()); a name absent from this map falls back to using its
+    # own name as both the config key and (truncated) sheet title, so a
+    # future new check works out of the box without a config change
+    RESULT_SCHEDULE_INFO = {
+        "TB self-balance check": ("tb_balance_check", "TB Balance Check"),
+        "Current vs comparative variance analysis": (None, None),
+        "Debtors control account reconciliation": ("debtors_recon", "Debtors Recon"),
+        "Creditors control account reconciliation": ("creditors_recon", "Creditors Recon"),
+        "Bank reconciliation": ("bank_recon", "Bank Recon"),
+        "VAT return cross-check": ("vat_recon", "VAT Recon"),
+        "Nominal activity review (reallocation candidates)": ("nominal_review", "Nominal Review"),
+        "Contact coding consistency (possible miscoding)": ("contact_coding_consistency", "Contact Coding Check"),
+        "Duplicate transaction check": ("duplicate_check", "Duplicate Check"),
+        "Unusual posting date check (weekend manual journals)": ("unusual_posting_dates", "Weekend Journals"),
+    }
+    recon_refs = {}
+    recon_sheet_names = {}
+    for res in results:
+        config_key, sheet_title = RESULT_SCHEDULE_INFO.get(res.name, (res.name, res.name[:31]))
+        if sheet_title is None or not enabled(config_key):
+            continue
+        recon_refs[res.name] = ref.next()
+        recon_sheet_names[res.name] = sheet_title
+        entries.append({"ref": recon_refs[res.name], "title": res.name, "status": res.status, "message": res.message})
+
+    ca_on = enabled("control_account_rollforward")
+    ca_refs = {}
+    if ca_on:
+        for r in control_account_results:
+            ca_refs[r.account_code] = ref.next()
+            entries.append({"ref": ca_refs[r.account_code], "title": f"{r.account_name} control account", "status": r.status, "message": r.message})
+
+    mx_on = enabled("nominal_matrix")
+    mx_refs = {}
+    if mx_on:
+        for r in matrix_results:
+            mx_refs[r.account_code] = ref.next()
+            entries.append({"ref": mx_refs[r.account_code], "title": f"{r.account_name} nominal analysis", "status": r.status, "message": r.message})
+
+    pf_on = enabled("points_forward")
+    pf_ref = ref.next() if pf_on else None
+    if pf_on:
+        entries.append({"ref": pf_ref, "title": "Points Forward / Open Queries", "status": "n/a", "message": "To be completed by preparer/reviewer"})
+
+    build_index_sheet(index_ws, client_name, current_label, comparative_label, entries)
+
+    # raw-data sheets every formula-linked schedule below references, so the
+    # workbook recalculates like a manually-built working paper rather than
+    # holding Python-computed literals - see data_sheets.py / xlformulas.py
+    refs = write_data_sheets(wb, data)
+
+    variance_result = next((r for r in results if r.name == "Current vs comparative variance analysis"), None)
+    if tb_on:
+        if refs.tb_current is not None:
+            place("tb_lead_schedule", lambda: build_tb_lead_schedule_formulas(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame(), refs))
+        else:
+            place("tb_lead_schedule", lambda: build_tb_lead_schedule(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame()))
+
+    pl_sheet_name, pl_net_profit_cell = (None, None)
+    if pl_on:
+        pl_sheet_name, pl_net_profit_cell = place("profit_and_loss", lambda: build_pl_statement_sheet_formulas(wb, client_name, current_label, pl_ref, pl_statement, refs))
+    if bs_on:
+        place("balance_sheet", lambda: build_bs_statement_sheet_formulas(wb, client_name, current_label, bs_ref, bs_statement, refs, pl_sheet_name, pl_net_profit_cell))
+
+    if ct_ref is not None:
+        place("corporation_tax", lambda: build_corporation_tax_sheet_formulas(wb, client_name, current_label, ct_ref, ct_computation, pl_sheet_name, pl_net_profit_cell))
+
+    if fa_ref is not None:
+        grouped_codes = group_fixed_asset_codes(data.get("tb_current"))
+        if grouped_codes and refs.tb_current is not None:
+            place("fixed_asset_category", lambda: build_fixed_asset_category_sheet_formulas(wb, client_name, current_label, fa_ref, fixed_asset_result, refs, grouped_codes))
+        else:
+            place("fixed_asset_category", lambda: build_recon_sheet(wb, client_name, current_label, fa_ref, f"{fa_ref} Fixed Assets", fixed_asset_result))
+
+    if ar_ref is not None:
+        place("fixed_asset_register", lambda: build_asset_register_sheet(wb, client_name, current_label, ar_ref, asset_register_result))
+
+    if cr_ref is not None:
+        place("fixed_asset_register", lambda: build_closing_register_sheet(wb, client_name, current_label, cr_ref, asset_register_result.closing_register))
+
+    for res in results:
+        if res.name not in recon_refs:
+            continue
+        config_key, _ = RESULT_SCHEDULE_INFO.get(res.name, (res.name, res.name[:31]))
+        r = recon_refs[res.name]
+        sheet_title = recon_sheet_names[res.name]
+        place(config_key, lambda r=r, sheet_title=sheet_title, res=res: build_recon_sheet(wb, client_name, current_label, r, f"{r} {sheet_title}", res))
+
+    if ca_on:
+        for r in control_account_results:
+            if refs.tb_current is not None:
+                place("control_account_rollforward", lambda r=r: build_control_account_sheet_formulas(wb, client_name, current_label, ca_refs[r.account_code], r, refs))
+            else:
+                place("control_account_rollforward", lambda r=r: build_control_account_sheet(wb, client_name, current_label, ca_refs[r.account_code], r))
+
+    if mx_on:
+        for r in matrix_results:
+            if refs.nominal_current is not None:
+                place("nominal_matrix", lambda r=r: build_matrix_sheet_formulas(wb, client_name, current_label, mx_refs[r.account_code], r, refs, data.get("nominal_current")))
+            else:
+                place("nominal_matrix", lambda r=r: build_matrix_sheet(wb, client_name, current_label, mx_refs[r.account_code], r))
+
+    if pf_on:
+        place("points_forward", lambda: build_points_forward_sheet(wb, client_name, current_label, pf_ref))
+
+    return wb
+
+
 def build_workbook(
     client_name: str,
     current_label: str,
@@ -1236,125 +1419,92 @@ def build_workbook(
     fixed_asset_result: FixedAssetResult | None = None,
     asset_register_result: AssetRegisterResult | None = None,
 ) -> Workbook:
-    control_account_results = control_account_results or []
-    matrix_results = matrix_results or []
-
-    ref = _RefCounter()
-    entries = []
+    """Builds the working paper pack in this system's own generic layout -
+    a fresh workbook, sequential numbering from 1, everything enabled.
+    See build_workbook_into_template for generating into a practice's real
+    uploaded template instead."""
     wb = Workbook()
+    wb.active.title = "Index"
+    return _generate_schedules(
+        wb, _RefCounter(), wb.active,
+        client_name, current_label, comparative_label, data, results,
+        control_account_results or [], matrix_results or [],
+        ct_computation, fixed_asset_result, asset_register_result,
+    )
 
-    tb_ref = ref.next()
-    entries.append({"ref": tb_ref, "title": "TB Lead Schedule", "status": "ok" if data.get("tb_current") is not None and not data["tb_current"].empty else "n/a", "message": "Current vs comparative, variance flagged"})
 
-    pl_statement = build_pl_statement(data.get("pl_current"))
-    bs_statement = build_bs_statement(data.get("bs_current"), pl_statement.net_profit)
+def build_workbook_into_template(
+    template_path: str | Path,
+    template_config: dict,
+    client_name: str,
+    current_label: str,
+    comparative_label: str,
+    data: dict,
+    results: list[ReconResult],
+    control_account_results: list[ControlAccountResult] | None = None,
+    matrix_results: list[MatrixResult] | None = None,
+    ct_computation: CTComputation | None = None,
+    fixed_asset_result: FixedAssetResult | None = None,
+    asset_register_result: AssetRegisterResult | None = None,
+) -> Workbook:
+    """Same schedules as build_workbook, generated into a copy of a
+    practice's real uploaded template file instead of a fresh workbook -
+    which schedules get generated, where each one is inserted relative to
+    the template's own sheets, and where numbering starts, are all driven
+    by the template's customisation config (storage.DEFAULT_TEMPLATE_CONFIG
+    documents every key).
 
-    pl_ref, bs_ref = ref.next(), ref.next()
-    entries.append({"ref": pl_ref, "title": "Profit & Loss", "status": pl_statement.status, "message": pl_statement.message if pl_statement.status != "ok" else ""})
-    entries.append({"ref": bs_ref, "title": "Balance Sheet", "status": bs_statement.status, "message": bs_statement.message if bs_statement.status != "n/a" else ""})
+    The template's own sheets are never modified or overwritten - every
+    generated schedule is a brand new sheet (openpyxl auto-suffixes a name
+    that collides with one already in the template, e.g. "Index" ->
+    "Index1", rather than erroring or overwriting), positioned via
+    insert_after_sheet and otherwise left wherever it's created.
 
-    ct_ref = None
-    if ct_computation is not None:
-        ct_ref = ref.next()
-        entries.append({"ref": ct_ref, "title": "Corporation Tax Computation", "status": ct_computation.status, "message": ct_computation.message})
+    Not yet wired to the config: header_cells (every schedule still uses
+    the fixed A1/A2/A3 CLIENT NAME/PERIOD/TITLE convention regardless of
+    what's configured) and materiality (recon.MATERIALITY_AMOUNT and
+    equivalents in the other computation modules are still fixed
+    module-level constants) - see README known limitations.
+    """
+    wb = openpyxl.load_workbook(template_path)
+    schedules_cfg = template_config.get("schedules", {})
+    numbering_cfg = template_config.get("numbering", {})
 
-    fa_ref = None
-    if fixed_asset_result is not None and fixed_asset_result.status != "n/a":
-        fa_ref = ref.next()
-        entries.append({"ref": fa_ref, "title": fixed_asset_result.name, "status": fixed_asset_result.status, "message": fixed_asset_result.message})
+    def enabled(key: str) -> bool:
+        return schedules_cfg.get(key, {}).get("enabled", True)
 
-    ar_ref = None
-    cr_ref = None
-    if asset_register_result is not None and asset_register_result.status != "n/a":
-        ar_ref = ref.next()
-        entries.append({"ref": ar_ref, "title": "Fixed asset register (asset detail)", "status": asset_register_result.status, "message": asset_register_result.message})
-        if not asset_register_result.closing_register.empty:
-            cr_ref = ref.next()
-            entries.append({"ref": cr_ref, "title": "Fixed asset register (closing - for next year)", "status": "n/a", "message": "Same layout as the prior-year upload - carry this straight into next year's job."})
+    def reposition(sheet_name: str, key: str):
+        target = schedules_cfg.get(key, {}).get("insert_after_sheet")
+        if not target or target not in wb.sheetnames:
+            return
+        target_idx = wb.sheetnames.index(target)
+        current_idx = wb.sheetnames.index(sheet_name)
+        wb.move_sheet(sheet_name, offset=(target_idx + 1) - current_idx)
 
-    name_map = {
-        "TB self-balance check": "TB Balance Check",
-        "Current vs comparative variance analysis": None,  # feeds the lead schedule, no separate tab
-        "Debtors control account reconciliation": "Debtors Recon",
-        "Creditors control account reconciliation": "Creditors Recon",
-        "Bank reconciliation": "Bank Recon",
-        "VAT return cross-check": "VAT Recon",
-        "Nominal activity review (reallocation candidates)": "Nominal Review",
-        "Contact coding consistency (possible miscoding)": "Contact Coding Check",
-        "Duplicate transaction check": "Duplicate Check",
-        "Unusual posting date check (weekend manual journals)": "Weekend Journals",
-    }
-    recon_refs = {}
-    for res in results:
-        sheet_name = name_map.get(res.name, res.name[:31])
-        if sheet_name is None:
-            continue
-        recon_refs[res.name] = ref.next()
-        entries.append({"ref": recon_refs[res.name], "title": res.name, "status": res.status, "message": res.message})
+    def place(key: str, call):
+        before = list(wb.sheetnames)
+        result = call()
+        new_names = [n for n in wb.sheetnames if n not in before]
+        if new_names:
+            reposition(new_names[-1], key)
+        return result
 
-    ca_refs = {}
-    for r in control_account_results:
-        ca_refs[r.account_code] = ref.next()
-        entries.append({"ref": ca_refs[r.account_code], "title": f"{r.account_name} control account", "status": r.status, "message": r.message})
-
-    mx_refs = {}
-    for r in matrix_results:
-        mx_refs[r.account_code] = ref.next()
-        entries.append({"ref": mx_refs[r.account_code], "title": f"{r.account_name} nominal analysis", "status": r.status, "message": r.message})
-
-    pf_ref = ref.next()
-    entries.append({"ref": pf_ref, "title": "Points Forward / Open Queries", "status": "n/a", "message": "To be completed by preparer/reviewer"})
-
-    build_index_sheet(wb, client_name, current_label, comparative_label, entries)
-
-    # raw-data sheets every formula-linked schedule below references, so the
-    # workbook recalculates like a manually-built working paper rather than
-    # holding Python-computed literals - see data_sheets.py / xlformulas.py
-    refs = write_data_sheets(wb, data)
-
-    variance_result = next((r for r in results if r.name == "Current vs comparative variance analysis"), None)
-    if refs.tb_current is not None:
-        build_tb_lead_schedule_formulas(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame(), refs)
+    index_ws = wb.create_sheet("Index")
+    index_target = schedules_cfg.get("index", {}).get("insert_after_sheet")
+    if index_target and index_target in wb.sheetnames:
+        reposition(index_ws.title, "index")
     else:
-        build_tb_lead_schedule(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame())
+        # no configured position: the index goes first, ahead of every one
+        # of the template's own sheets (never destructive - this only
+        # shifts the template's existing sheets later, it can't drop them)
+        current_idx = wb.sheetnames.index(index_ws.title)
+        wb.move_sheet(index_ws.title, offset=-current_idx)
 
-    pl_sheet_name, pl_net_profit_cell = build_pl_statement_sheet_formulas(wb, client_name, current_label, pl_ref, pl_statement, refs)
-    build_bs_statement_sheet_formulas(wb, client_name, current_label, bs_ref, bs_statement, refs, pl_sheet_name, pl_net_profit_cell)
-
-    if ct_computation is not None:
-        build_corporation_tax_sheet_formulas(wb, client_name, current_label, ct_ref, ct_computation, pl_sheet_name, pl_net_profit_cell)
-
-    if fa_ref is not None:
-        grouped_codes = group_fixed_asset_codes(data.get("tb_current"))
-        if grouped_codes and refs.tb_current is not None:
-            build_fixed_asset_category_sheet_formulas(wb, client_name, current_label, fa_ref, fixed_asset_result, refs, grouped_codes)
-        else:
-            build_recon_sheet(wb, client_name, current_label, fa_ref, f"{fa_ref} Fixed Assets", fixed_asset_result)
-
-    if ar_ref is not None:
-        build_asset_register_sheet(wb, client_name, current_label, ar_ref, asset_register_result)
-
-    if cr_ref is not None:
-        build_closing_register_sheet(wb, client_name, current_label, cr_ref, asset_register_result.closing_register)
-
-    for res in results:
-        sheet_name = name_map.get(res.name, res.name[:31])
-        if sheet_name is None:
-            continue
-        r = recon_refs[res.name]
-        build_recon_sheet(wb, client_name, current_label, r, f"{r} {sheet_name}", res)
-
-    for r in control_account_results:
-        if refs.tb_current is not None:
-            build_control_account_sheet_formulas(wb, client_name, current_label, ca_refs[r.account_code], r, refs)
-        else:
-            build_control_account_sheet(wb, client_name, current_label, ca_refs[r.account_code], r)
-
-    for r in matrix_results:
-        if refs.nominal_current is not None:
-            build_matrix_sheet_formulas(wb, client_name, current_label, mx_refs[r.account_code], r, refs, data.get("nominal_current"))
-        else:
-            build_matrix_sheet(wb, client_name, current_label, mx_refs[r.account_code], r)
-
-    build_points_forward_sheet(wb, client_name, current_label, pf_ref)
-    return wb
+    ref = _RefCounter(start=int(numbering_cfg.get("start_at", 1)))
+    return _generate_schedules(
+        wb, ref, index_ws,
+        client_name, current_label, comparative_label, data, results,
+        control_account_results or [], matrix_results or [],
+        ct_computation, fixed_asset_result, asset_register_result,
+        enabled=enabled, place=place,
+    )

@@ -48,9 +48,30 @@ detail page) controlling which schedules get generated for that template,
 where each one should be inserted, the header-cell convention used for the
 CLIENT NAME/PERIOD/SCHEDULE TITLE block, and materiality thresholds. This
 is the seam for supporting more than one template format without new code -
-adding a second template is configuration, not a rebuild. **Not yet wired
-up**: `generate` doesn't read this config yet (schedules always run, always
-land in the system's own generic layout) - see Roadmap.
+adding a second template is configuration, not a rebuild.
+
+**Generating into the real template file.** When a client has a template
+set, `generate` builds the working paper pack as new sheets inserted
+directly into a copy of that practice's actual uploaded `.xlsx`
+(`app/excel_builder.py: build_workbook_into_template`) - not the system's
+own generic layout. The template's own sheets (cover page, firm notes,
+whatever else is already in the file) are never modified: every generated
+schedule is a brand new sheet, positioned per that schedule's
+`insert_after_sheet` config (or left wherever it's created if unset), with
+numbering starting from `numbering.start_at`. A schedule with
+`"enabled": false` is skipped entirely - no sheet, no index entry. A
+client with no template configured still gets the system's own generic
+layout (`build_workbook`) exactly as before. If a generated sheet's name
+collides with one already in the template (e.g. the template already has
+its own "Index"), openpyxl auto-suffixes the new one rather than erroring
+or overwriting anything.
+
+**Not yet wired to the config**: `header_cells` (every schedule still uses
+the fixed A1/A2/A3 CLIENT NAME/PERIOD/TITLE convention regardless of what a
+template configures) and `materiality` (the materiality/variance
+thresholds used across recon.py, control_accounts.py, financial_statements
+.py, fixed_assets.py, and corporation_tax.py are still fixed module-level
+constants, not read from a template's config) - see Known limitations.
 
 ## Formula-linked schedules
 
@@ -312,24 +333,28 @@ pytest tests/ -v
 
 ## Known limitations / roadmap
 
-- **The template config doesn't drive generation yet.** A practice can
-  upload a template and edit its schedule/insertion/materiality config, but
-  `generate` still always runs every schedule into the system's own generic
-  layout regardless of what's configured. Wiring the config in, and then
-  actually inserting the generated schedules into a copy of the uploaded
-  template file, is the next phase of work.
+- **The template config doesn't fully drive generation yet.** Schedule
+  enable/disable, `insert_after_sheet` positioning, and `numbering.start_at`
+  are all wired in and generate into a copy of the practice's real
+  uploaded template file (see "Practices, templates, and clients" above).
+  `header_cells` (a template's CLIENT NAME/PERIOD/TITLE cell convention)
+  and `materiality` (per-template variance/materiality thresholds) aren't
+  read yet - every schedule still uses the fixed A1/A2/A3 header
+  convention and the fixed £500/10% thresholds regardless of what a
+  template configures. Both are a bigger change than insertion was: cell
+  convention touches every schedule builder's `_write_title` call, and
+  materiality is currently a module-level constant in five different
+  computation modules (recon.py, control_accounts.py,
+  financial_statements.py, fixed_assets.py, corporation_tax.py), not a
+  parameter any of them accept.
 - **Formula-linked output covers the core schedules, not everything yet.**
   TB Lead Schedule, control accounts, P&L/B&S, category-level fixed assets,
   Corporation Tax, and the nominal matrix are all live-formula (see
-  "Formula-linked schedules" above). The recon check sheets, the
-  asset-level fixed asset register, and the closing register still write
-  Python-computed values - converting those is the remaining piece.
-- **The formula engine isn't wired into template-based insertion yet.**
-  It drives the system's own generic layout (`build_workbook`). Once
-  schedules are inserted into a copy of a practice's real uploaded template
-  (see the point above on template config), the formula-writing functions
-  need to target wherever that template's own layout puts each schedule,
-  not a fixed row/column scheme.
+  "Formula-linked schedules" above), and this now works identically
+  whether the base workbook is a fresh one or a loaded practice template.
+  The recon check sheets, the asset-level fixed asset register, and the
+  closing register still write Python-computed values - converting those
+  is the remaining piece.
 - **Inserting into a real template file has a known fidelity cost.**
   Round-tripping a real client's `.xlsx` through openpyxl (load, add sheets,
   save) strips embedded images (e.g. a firm's logo) and dropdown data

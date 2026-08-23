@@ -6,7 +6,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from app import anomaly_detection, control_accounts, corporation_tax, fixed_assets, mapping, nominal_matrix, parsers, recon, storage, xero_reports
-from app.excel_builder import build_workbook
+from app.excel_builder import build_workbook, build_workbook_into_template
 from app.models import PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS
 
 # report types with a dedicated Xero report parser (no manual column mapping needed)
@@ -382,11 +382,22 @@ def generate(job_id: str):
         period_days=_period_days(job),
     )
 
-    wb = build_workbook(
-        job["client_name"], job["current_label"], job["comparative_label"], data, results,
-        control_account_results=ca_results, matrix_results=mx_results, ct_computation=ct_computation,
-        fixed_asset_result=fixed_asset_result, asset_register_result=asset_register_result,
-    )
+    client = storage.get_client(job["client_id"])
+    template = storage.get_template(client["practice_id"], client["template_id"]) if client and client.get("template_id") else None
+
+    if template and Path(template["file_path"]).exists():
+        wb = build_workbook_into_template(
+            template["file_path"], template["config"],
+            job["client_name"], job["current_label"], job["comparative_label"], data, results,
+            control_account_results=ca_results, matrix_results=mx_results, ct_computation=ct_computation,
+            fixed_asset_result=fixed_asset_result, asset_register_result=asset_register_result,
+        )
+    else:
+        wb = build_workbook(
+            job["client_name"], job["current_label"], job["comparative_label"], data, results,
+            control_account_results=ca_results, matrix_results=mx_results, ct_computation=ct_computation,
+            fixed_asset_result=fixed_asset_result, asset_register_result=asset_register_result,
+        )
 
     out_path = storage.output_dir(job_id) / "working_paper.xlsx"
     wb.save(out_path)
