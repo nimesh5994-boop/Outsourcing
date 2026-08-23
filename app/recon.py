@@ -40,27 +40,6 @@ def check_tb_self_balances(tb_current: pd.DataFrame, tb_comparative: pd.DataFram
     return ReconResult("TB self-balance check", "ok", "Trial balance debits equal credits for all periods uploaded.", detail)
 
 
-def tb_to_pl_bs_tie(tb: pd.DataFrame, pl: pd.DataFrame, bs: pd.DataFrame, period_label: str) -> ReconResult:
-    if tb is None or tb.empty or (pl is None or pl.empty) and (bs is None or bs.empty):
-        return ReconResult(f"TB to P&L/B&S tie-out ({period_label})", "n/a", "Insufficient data uploaded for this check.")
-
-    pl_total = float(pl["amount"].sum()) if pl is not None and not pl.empty else 0.0
-    bs_total = float(bs["amount"].sum()) if bs is not None and not bs.empty else 0.0
-    tb_total = float(tb["balance"].sum())  # should be ~0 if TB includes both P&L and B/S codes
-
-    variance = round(tb_total - (pl_total + bs_total), 2)
-    detail = pd.DataFrame([{
-        "TB net balance": tb_total,
-        "P&L total": pl_total,
-        "B/S total": bs_total,
-        "P&L + B/S": pl_total + bs_total,
-        "Variance": variance,
-    }])
-    status = "ok" if abs(variance) <= 1.0 else "review"
-    msg = "TB ties to P&L + B/S." if status == "ok" else f"TB does not tie to P&L + B/S by {variance:,.2f} - check for accounts missing from one report or a sign convention mismatch."
-    return ReconResult(f"TB to P&L/B&S tie-out ({period_label})", status, msg, detail)
-
-
 def variance_analysis(tb_current: pd.DataFrame, tb_comparative: pd.DataFrame) -> ReconResult:
     if tb_current is None or tb_current.empty:
         return ReconResult("Current vs comparative variance analysis", "n/a", "No current-year trial balance uploaded.")
@@ -209,7 +188,6 @@ def run_all_recons(data: dict) -> list[ReconResult]:
     aged_creditors, vat_return, bank_statement, pl_current, bs_current."""
     results = [
         check_tb_self_balances(data.get("tb_current"), data.get("tb_comparative")),
-        tb_to_pl_bs_tie(data.get("tb_current"), data.get("pl_current"), data.get("bs_current"), "current year"),
         variance_analysis(data.get("tb_current"), data.get("tb_comparative")),
         nominal_activity_review(data.get("nominal_current")),
         debtors_creditors_control_recon(

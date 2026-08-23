@@ -65,6 +65,7 @@ class AssetRegisterResult:
     asset_schedule: pd.DataFrame = field(default_factory=pd.DataFrame)
     new_additions: pd.DataFrame = field(default_factory=pd.DataFrame)
     possible_disposals: pd.DataFrame = field(default_factory=pd.DataFrame)
+    closing_register: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def _category_and_kind(account_name: str) -> tuple[str, str]:
@@ -227,6 +228,37 @@ def asset_level_rollforward(
                 )
                 possible_disposals["Matched to asset ID (to complete)"] = ""
 
+    # Closing register: same canonical shape as the prior-year upload, so
+    # next year's job can take this sheet's contents straight back in as
+    # its opening register. Existing assets carry forward with this year's
+    # closing accumulated depreciation as next year's brought-forward
+    # figure; new additions are appended with cost known but category/
+    # method/rate left for the preparer to complete before the next roll.
+    closing_existing = still_held[["asset_id", "description", "category", "date_acquired", "cost", "depreciation_method", "depreciation_rate"]].copy()
+    closing_existing["accumulated_depreciation_b_fwd"] = still_held["accumulated_depreciation_c_fwd"]
+    closing_existing["disposed"] = False
+
+    closing_new = pd.DataFrame()
+    if not new_additions.empty:
+        closing_new = pd.DataFrame({
+            "asset_id": [f"NEW-{i + 1} (assign a proper ID)" for i in range(len(new_additions))],
+            "description": new_additions["Description"].values,
+            "category": "",
+            "date_acquired": new_additions["Date"].values,
+            "cost": new_additions["Cost"].values,
+            "depreciation_method": "",
+            "depreciation_rate": "",
+            "accumulated_depreciation_b_fwd": 0.0,
+            "disposed": False,
+        })
+    closing_register = pd.concat([closing_existing, closing_new], ignore_index=True).rename(columns={
+        "asset_id": "Asset ID", "description": "Description", "category": "Category (complete for new additions)",
+        "date_acquired": "Date Acquired", "cost": "Cost", "depreciation_method": "Depreciation Method (complete for new additions)",
+        "depreciation_rate": "Depreciation Rate % (complete for new additions)",
+        "accumulated_depreciation_b_fwd": "Accumulated Depreciation b/fwd (for next year's opening register)",
+        "disposed": "Disposed?",
+    })
+
     total_cost = float(still_held["cost"].sum()) + float(new_additions["Cost"].sum() if not new_additions.empty else 0)
     total_acc_dep = float(still_held["accumulated_depreciation_c_fwd"].sum())
     total_nbv = total_cost - total_acc_dep
@@ -259,4 +291,4 @@ def asset_level_rollforward(
         "Variance": variance if variance is not None else "",
     }])
 
-    return AssetRegisterResult(status, message, summary, asset_schedule, new_additions, possible_disposals)
+    return AssetRegisterResult(status, message, summary, asset_schedule, new_additions, possible_disposals, closing_register)

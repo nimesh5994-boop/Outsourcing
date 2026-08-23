@@ -6,7 +6,7 @@ import openpyxl
 import pandas as pd
 import pytest
 
-from app import control_accounts, corporation_tax, fixed_assets, mapping, nominal_matrix, parsers, recon, xero_reports
+from app import control_accounts, corporation_tax, financial_statements, fixed_assets, mapping, nominal_matrix, parsers, recon, xero_reports
 from app.excel_builder import build_workbook
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
@@ -132,6 +132,30 @@ def test_corporation_tax_flags_variance_against_booked_charge(canonical_data):
     result = corporation_tax.compute(accounting_profit=accounting_profit, booked_tax_charge=0.01)
     assert result.status == "review"
     assert result.variance == pytest.approx(result.tax_charge - 0.01)
+
+
+def test_balance_sheet_check_ties_once_current_year_profit_bridged_in(canonical_data):
+    pl_result = financial_statements.build_pl_statement(canonical_data["pl_current"])
+    bs_result = financial_statements.build_bs_statement(canonical_data["bs_current"], pl_result.net_profit)
+
+    net_assets = bs_result.statement.set_index("Line").loc["NET ASSETS", "Amount"]
+    total_equity = bs_result.statement.set_index("Line").loc["TOTAL EQUITY", "Amount"]
+    check = bs_result.statement.set_index("Line").loc["CHECK: Net Assets - Total Equity (should be £0)", "Amount"]
+
+    assert check == pytest.approx(net_assets - total_equity, abs=0.01)
+    assert bs_result.status == "ok"
+    assert abs(check) <= financial_statements.MATERIALITY_AMOUNT
+
+
+def test_balance_sheet_check_flags_a_genuine_gap():
+    bs = pd.DataFrame([
+        {"account_code": "1", "account_name": "Bank", "category": "Current Asset", "amount": 10000.0},
+        {"account_code": "2", "account_name": "Share Capital", "category": "Equity", "amount": -100.0},
+        # no retained earnings account at all - deliberately unbalanced
+    ])
+    result = financial_statements.build_bs_statement(bs, net_profit=0.0)
+    assert result.status == "review"
+    assert "does not balance" in result.message
 
 
 def _fa_tb_row(code, name, account_type, debit, credit):

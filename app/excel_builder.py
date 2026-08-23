@@ -13,6 +13,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from app.control_accounts import ControlAccountResult
 from app.corporation_tax import CTComputation
+from app.financial_statements import StatementResult, build_bs_statement, build_pl_statement
 from app.fixed_assets import AssetRegisterResult, FixedAssetResult
 from app.nominal_matrix import MatrixResult
 from app.recon import ReconResult
@@ -193,12 +194,37 @@ def build_tb_lead_schedule(wb: Workbook, client_name: str, current_label: str, r
     ws.freeze_panes = f"A{row + 1}"
 
 
-def build_statement_sheet(wb: Workbook, client_name: str, period_label: str, ref: str, sheet_name: str, title: str, df: pd.DataFrame):
+def build_statement_sheet(wb: Workbook, client_name: str, period_label: str, ref: str, sheet_name: str, title: str, df: pd.DataFrame, statement: StatementResult | None = None):
     ws = wb.create_sheet(sheet_name[:31])
     row = _write_title(ws, client_name, period_label, title, ref)
     if df is None or df.empty:
         ws.cell(row=row, column=1, value="No data uploaded for this statement.")
         return
+
+    if statement is not None and not statement.statement.empty:
+        if statement.status in ("ok", "review"):
+            status_cell = ws.cell(row=row, column=1, value=f"Status: {statement.status.upper()} - {statement.message}")
+            status_cell.font = _status_font(statement.status)
+            status_cell.fill = _status_fill(statement.status)
+            status_cell.alignment = Alignment(wrap_text=True)
+            ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=6)
+            ws.row_dimensions[row].height = 30
+            row += 2
+        summary = statement.statement.copy()
+        bold_lines = {"GROSS PROFIT", "NET PROFIT / (LOSS) FOR THE YEAR", "TOTAL ASSETS", "TOTAL LIABILITIES", "NET ASSETS", "TOTAL EQUITY"}
+        next_row = _write_dataframe(ws, summary, start_row=row)
+        for r_offset, line in enumerate(summary["Line"]):
+            r = row + 1 + r_offset
+            if line in bold_lines or line.startswith("CHECK") or line.startswith("NET PROFIT"):
+                for c in (1, 2):
+                    ws.cell(row=r, column=c).font = BOLD
+            if line.startswith("CHECK") and statement.status != "ok":
+                for c in (1, 2):
+                    ws.cell(row=r, column=c).fill = PatternFill("solid", fgColor=AMBER)
+        row = next_row + 1
+        ws.cell(row=row, column=1, value="DETAIL BY ACCOUNT").font = SCHEDULE_FONT
+        row += 1
+
     display = df.rename(columns={"account_code": "Account Code", "account_name": "Account Name", "category": "Category", "amount": "Amount"})
     _write_dataframe(ws, display, start_row=row)
     ws.freeze_panes = f"A{row + 1}"
@@ -323,6 +349,19 @@ def build_asset_register_sheet(wb: Workbook, client_name: str, current_label: st
     ws.freeze_panes = f"A{row + 1}"
 
 
+def build_closing_register_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, closing_register: pd.DataFrame):
+    """Same presentation/column layout as the prior-year register upload,
+    so this sheet's contents can be taken straight into next year's job as
+    its opening register - no reformatting needed."""
+    ws = wb.create_sheet(f"{ref} FA Register (closing)"[:31])
+    row = _write_title(ws, client_name, current_label, "FIXED ASSET REGISTER - CLOSING POSITION (FOR NEXT YEAR'S OPENING UPLOAD)", ref)
+    if closing_register.empty:
+        ws.cell(row=row, column=1, value="No data available.")
+        return
+    _write_dataframe(ws, closing_register, start_row=row)
+    ws.freeze_panes = f"A{row + 1}"
+
+
 def build_corporation_tax_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, ct: CTComputation):
     ws = wb.create_sheet(f"{ref} Corporation Tax"[:31])
     row = _write_title(ws, client_name, current_label, "CORPORATION TAX COMPUTATION", ref)
@@ -413,9 +452,12 @@ def build_workbook(
     tb_ref = ref.next()
     entries.append({"ref": tb_ref, "title": "TB Lead Schedule", "status": "ok" if data.get("tb_current") is not None and not data["tb_current"].empty else "n/a", "message": "Current vs comparative, variance flagged"})
 
+    pl_statement = build_pl_statement(data.get("pl_current"))
+    bs_statement = build_bs_statement(data.get("bs_current"), pl_statement.net_profit)
+
     pl_ref, bs_ref = ref.next(), ref.next()
-    entries.append({"ref": pl_ref, "title": "Profit & Loss", "status": "ok" if data.get("pl_current") is not None and not data["pl_current"].empty else "n/a", "message": ""})
-    entries.append({"ref": bs_ref, "title": "Balance Sheet", "status": "ok" if data.get("bs_current") is not None and not data["bs_current"].empty else "n/a", "message": ""})
+    entries.append({"ref": pl_ref, "title": "Profit & Loss", "status": pl_statement.status, "message": pl_statement.message if pl_statement.status != "ok" else ""})
+    entries.append({"ref": bs_ref, "title": "Balance Sheet", "status": bs_statement.status, "message": bs_statement.message if bs_statement.status != "n/a" else ""})
 
     ct_ref = None
     if ct_computation is not None:
@@ -428,13 +470,16 @@ def build_workbook(
         entries.append({"ref": fa_ref, "title": fixed_asset_result.name, "status": fixed_asset_result.status, "message": fixed_asset_result.message})
 
     ar_ref = None
+    cr_ref = None
     if asset_register_result is not None and asset_register_result.status != "n/a":
         ar_ref = ref.next()
         entries.append({"ref": ar_ref, "title": "Fixed asset register (asset detail)", "status": asset_register_result.status, "message": asset_register_result.message})
+        if not asset_register_result.closing_register.empty:
+            cr_ref = ref.next()
+            entries.append({"ref": cr_ref, "title": "Fixed asset register (closing - for next year)", "status": "n/a", "message": "Same layout as the prior-year upload - carry this straight into next year's job."})
 
     name_map = {
         "TB self-balance check": "TB Balance Check",
-        "TB to P&L/B&S tie-out (current year)": "TB to P&L-BS Tie",
         "Current vs comparative variance analysis": None,  # feeds the lead schedule, no separate tab
         "Debtors control account reconciliation": "Debtors Recon",
         "Creditors control account reconciliation": "Creditors Recon",
@@ -468,8 +513,8 @@ def build_workbook(
     variance_result = next((r for r in results if r.name == "Current vs comparative variance analysis"), None)
     build_tb_lead_schedule(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame())
 
-    build_statement_sheet(wb, client_name, current_label, pl_ref, f"{pl_ref} P&L", "PROFIT & LOSS", data.get("pl_current"))
-    build_statement_sheet(wb, client_name, current_label, bs_ref, f"{bs_ref} Balance Sheet", "BALANCE SHEET", data.get("bs_current"))
+    build_statement_sheet(wb, client_name, current_label, pl_ref, f"{pl_ref} P&L", "PROFIT & LOSS", data.get("pl_current"), pl_statement)
+    build_statement_sheet(wb, client_name, current_label, bs_ref, f"{bs_ref} Balance Sheet", "BALANCE SHEET", data.get("bs_current"), bs_statement)
 
     if ct_computation is not None:
         build_corporation_tax_sheet(wb, client_name, current_label, ct_ref, ct_computation)
@@ -479,6 +524,9 @@ def build_workbook(
 
     if ar_ref is not None:
         build_asset_register_sheet(wb, client_name, current_label, ar_ref, asset_register_result)
+
+    if cr_ref is not None:
+        build_closing_register_sheet(wb, client_name, current_label, cr_ref, asset_register_result.closing_register)
 
     for res in results:
         sheet_name = name_map.get(res.name, res.name[:31])

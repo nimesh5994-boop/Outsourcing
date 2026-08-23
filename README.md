@@ -64,7 +64,7 @@ quirks each one works around.
 | Check | What it does |
 |---|---|
 | TB self-balance | Debits = credits for both years |
-| TB → P&L/B&S tie-out | Rough top-level sanity check (see Limitations) |
+| Balance Sheet balance check | Net Assets vs Total Equity, with the current year's profit/(loss) explicitly bridged in (it isn't closed to retained earnings in the TB itself) - shown on the B/S sheet, not just the Index |
 | Variance analysis | Every nominal code, current vs comparative, flagged if it moves >10% and >£500 |
 | Nominal activity review | Flags suspense postings, round-sum manual journals, and descriptions that read like pending corrections |
 | Debtors/creditors control recon | Aged listing total vs TB control account balance |
@@ -197,10 +197,12 @@ subtotals) for a fictional client - no real client data is in this repo.
 
 ## Known limitations / roadmap
 
-- **TB → P&L/B&S tie-out** is a rough top-level check today, not a true
-  per-account tie-out (P&L and B/S use different sign conventions than the
-  raw TB debit/credit). Worth tightening once there's a second real
-  client's data to validate against.
+- **Balance Sheet balance check** assumes the standard account-type
+  categorisation (Fixed Asset/Current Asset/Bank/Current Liability/
+  Liability/Equity) holds for every account - a genuinely miscategorised
+  account in the source TB will show up as an unexplained gap in the
+  check, which is the intended behaviour (it's real, not a false
+  positive), but the message doesn't yet point at which specific account.
 - **Bank movement analysis** (a receipts/payments-style matrix, like the
   bank schedules in a full audit file) needs a separate Xero bank
   transactions export - not built yet, no sample data to build it against.
