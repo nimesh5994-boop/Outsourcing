@@ -57,9 +57,20 @@ def create_practice(name: str = Form(...)):
 def practice_detail(request: Request, practice_id: str):
     practice = storage.get_practice(practice_id)
     templates_list = storage.list_templates(practice_id)
-    clients = storage.list_clients(practice_id)
     return templates.TemplateResponse("practice_detail.html", {
-        "request": request, "practice": practice, "templates_list": templates_list, "clients": clients,
+        "request": request, "practice": practice, "templates_list": templates_list,
+    })
+
+
+@app.get("/practices/{practice_id}/clients")
+def practice_clients(request: Request, practice_id: str):
+    practice = storage.get_practice(practice_id)
+    templates_list = storage.list_templates(practice_id)
+    clients = storage.list_clients(practice_id)
+    template_names = {t["id"]: t["name"] for t in templates_list}
+    return templates.TemplateResponse("practice_clients.html", {
+        "request": request, "practice": practice, "templates_list": templates_list,
+        "clients": clients, "template_names": template_names,
     })
 
 

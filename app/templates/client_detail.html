@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
-  <p class="muted"><a href="/practices/{{ client.practice_id }}">&larr; Back to practice</a></p>
+  <p class="muted"><a href="/practices/{{ client.practice_id }}/clients">&larr; Back to clients</a></p>
   <h1>{{ client.name }}</h1>
   <p class="muted">Working paper jobs for this client</p>
   {% if jobs %}

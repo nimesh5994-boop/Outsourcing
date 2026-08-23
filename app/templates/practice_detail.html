@@ -2,18 +2,27 @@
 {% block content %}
 <div class="card">
   <h1>{{ practice.name }}</h1>
-  <p class="muted">Templates and clients for this practice</p>
+  <p class="muted">Practice setup &mdash; templates and their configuration live here. Client work happens on the <a href="/practices/{{ practice.id }}/clients">Clients</a> page.</p>
+  <p><a class="button secondary" href="/practices/{{ practice.id }}/clients">Go to Clients &rarr;</a></p>
 </div>
 
 <div class="card">
-  <h2>Templates</h2>
+  <h2>Setup: Templates</h2>
   {% if templates_list %}
   <table>
-    <tr><th>Template</th><th>File</th><th>Version</th><th>Default</th><th></th></tr>
+    <tr><th>Template</th><th>File</th><th>Size</th><th>Version</th><th>Default</th><th></th></tr>
     {% for t in templates_list %}
     <tr>
       <td>{{ t.name }}</td>
       <td class="muted">{{ t.filename }}</td>
+      <td class="muted">
+        {% if t.normalisation %}
+          {{ (t.normalisation.stored_size_bytes / 1048576) | round(1) }} MB
+          {% if t.normalisation.normalised and t.normalisation.stored_size_bytes < t.normalisation.original_size_bytes %}
+            <span title="Reduced once at upload from {{ (t.normalisation.original_size_bytes / 1048576) | round(1) }} MB">(reduced)</span>
+          {% endif %}
+        {% endif %}
+      </td>
       <td>{{ t.version }}</td>
       <td>{% if practice.default_template_id == t.id %}<span class="badge ok">default</span>{% endif %}</td>
       <td>
@@ -32,44 +41,13 @@
   {% endif %}
 
   <h2 style="margin-top:24px">Upload a template</h2>
+  <p class="muted">The file is normalised once here at upload (not on every job) - this reduces its stored size and speeds up every future generation, but embedded images (e.g. a logo) and dropdown data-validation lists don't survive the process and would need re-adding to the template afterward.</p>
   <form method="post" action="/practices/{{ practice.id }}/templates" enctype="multipart/form-data">
     <label>Template name</label>
     <input type="text" name="name" required placeholder="e.g. Standard Limited Company WP">
     <label>File (.xlsx)</label>
     <input type="file" name="file" required accept=".xlsx">
     <div style="margin-top:16px"><button type="submit">Upload template</button></div>
-  </form>
-</div>
-
-<div class="card">
-  <h2>Clients</h2>
-  {% if clients %}
-  <table>
-    <tr><th>Client</th><th>Created</th><th></th></tr>
-    {% for c in clients %}
-    <tr>
-      <td>{{ c.name }}</td>
-      <td class="muted">{{ c.created_at[:10] }}</td>
-      <td><a class="button secondary" href="/clients/{{ c.id }}">Open</a></td>
-    </tr>
-    {% endfor %}
-  </table>
-  {% else %}
-  <p class="muted">No clients yet.</p>
-  {% endif %}
-
-  <h2 style="margin-top:24px">Add a client</h2>
-  <form method="post" action="/practices/{{ practice.id }}/clients">
-    <label>Client name</label>
-    <input type="text" name="name" required>
-    <label>Template (optional - defaults to the practice default above)</label>
-    <select name="template_id">
-      <option value="">-- use practice default --</option>
-      {% for t in templates_list %}
-      <option value="{{ t.id }}">{{ t.name }}</option>
-      {% endfor %}
-    </select>
-    <div style="margin-top:16px"><button type="submit">Create client</button></div>
   </form>
 </div>
 {% endblock %}

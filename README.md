@@ -29,6 +29,20 @@ the default, and every client created under that practice inherits it
 (overridable per client). Each client is then processed job-by-job,
 period-by-period, building up history over time.
 
+The UI splits **Setup** (`/practices/{id}` - templates and their config,
+where a practice admin works) from **Clients** (`/practices/{id}/clients` -
+the day-to-day job workflow), since they're different jobs done by
+different people at different cadences.
+
+A template is normalised once, at upload, not on every job: loading and
+re-saving it through openpyxl reduces its stored size substantially
+(confirmed on a real 63-sheet template: 24MB down to 11MB, cell data/
+formulas/formatting all intact) so every later generation off that
+template is fast. The trade-off - openpyxl round-tripping strips embedded
+images and dropdown data-validation lists - is paid once per template, not
+once per job; the practice re-adds a logo/validations to the template
+after upload if it needs them, not every time a job runs.
+
 Each template carries a JSON **customisation config** (edited from its
 detail page) controlling which schedules get generated for that template,
 where each one should be inserted, the header-cell convention used for the

@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <p class="muted"><a href="/practices/{{ practice.id }}">&larr; Back to practice setup</a></p>
+  <h1>{{ practice.name }} &mdash; Clients</h1>
+  {% if clients %}
+  <table>
+    <tr><th>Client</th><th>Template</th><th>Created</th><th></th></tr>
+    {% for c in clients %}
+    <tr>
+      <td>{{ c.name }}</td>
+      <td class="muted">{{ template_names.get(c.template_id, "practice default") }}</td>
+      <td class="muted">{{ c.created_at[:10] }}</td>
+      <td><a class="button secondary" href="/clients/{{ c.id }}">Open</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No clients yet.</p>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Add a client</h2>
+  <form method="post" action="/practices/{{ practice.id }}/clients">
+    <label>Client name</label>
+    <input type="text" name="name" required>
+    <label>Template (optional - defaults to the practice default set in Setup)</label>
+    <select name="template_id">
+      <option value="">-- use practice default --</option>
+      {% for t in templates_list %}
+      <option value="{{ t.id }}">{{ t.name }}</option>
+      {% endfor %}
+    </select>
+    <div style="margin-top:16px"><button type="submit">Create client</button></div>
+  </form>
+</div>
+{% endblock %}
