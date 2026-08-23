@@ -13,7 +13,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from app.control_accounts import ControlAccountResult
 from app.corporation_tax import CTComputation
-from app.data_sheets import DataRefs, with_row_ids
+from app.data_sheets import DataRefs, with_row_ids, write_data_sheets
 from app.financial_statements import (
     _BS_CURRENT_ASSETS,
     _BS_CURRENT_LIABILITIES,
@@ -26,7 +26,7 @@ from app.financial_statements import (
     build_bs_statement,
     build_pl_statement,
 )
-from app.fixed_assets import AssetRegisterResult, FixedAssetResult
+from app.fixed_assets import AssetRegisterResult, FixedAssetResult, group_fixed_asset_codes
 from app.nominal_matrix import MatrixResult, build_matrix_row_groups
 from app.recon import MATERIALITY_AMOUNT, VARIANCE_PCT_THRESHOLD, ReconResult
 from app.xlformulas import cell_ref, literal, quote, sum_of_values, sumifs_exact
@@ -1304,17 +1304,29 @@ def build_workbook(
 
     build_index_sheet(wb, client_name, current_label, comparative_label, entries)
 
-    variance_result = next((r for r in results if r.name == "Current vs comparative variance analysis"), None)
-    build_tb_lead_schedule(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame())
+    # raw-data sheets every formula-linked schedule below references, so the
+    # workbook recalculates like a manually-built working paper rather than
+    # holding Python-computed literals - see data_sheets.py / xlformulas.py
+    refs = write_data_sheets(wb, data)
 
-    build_statement_sheet(wb, client_name, current_label, pl_ref, f"{pl_ref} P&L", "PROFIT & LOSS", data.get("pl_current"), pl_statement)
-    build_statement_sheet(wb, client_name, current_label, bs_ref, f"{bs_ref} Balance Sheet", "BALANCE SHEET", data.get("bs_current"), bs_statement)
+    variance_result = next((r for r in results if r.name == "Current vs comparative variance analysis"), None)
+    if refs.tb_current is not None:
+        build_tb_lead_schedule_formulas(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame(), refs)
+    else:
+        build_tb_lead_schedule(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame())
+
+    pl_sheet_name, pl_net_profit_cell = build_pl_statement_sheet_formulas(wb, client_name, current_label, pl_ref, pl_statement, refs)
+    build_bs_statement_sheet_formulas(wb, client_name, current_label, bs_ref, bs_statement, refs, pl_sheet_name, pl_net_profit_cell)
 
     if ct_computation is not None:
-        build_corporation_tax_sheet(wb, client_name, current_label, ct_ref, ct_computation)
+        build_corporation_tax_sheet_formulas(wb, client_name, current_label, ct_ref, ct_computation, pl_sheet_name, pl_net_profit_cell)
 
     if fa_ref is not None:
-        build_recon_sheet(wb, client_name, current_label, fa_ref, f"{fa_ref} Fixed Assets", fixed_asset_result)
+        grouped_codes = group_fixed_asset_codes(data.get("tb_current"))
+        if grouped_codes and refs.tb_current is not None:
+            build_fixed_asset_category_sheet_formulas(wb, client_name, current_label, fa_ref, fixed_asset_result, refs, grouped_codes)
+        else:
+            build_recon_sheet(wb, client_name, current_label, fa_ref, f"{fa_ref} Fixed Assets", fixed_asset_result)
 
     if ar_ref is not None:
         build_asset_register_sheet(wb, client_name, current_label, ar_ref, asset_register_result)
@@ -1330,10 +1342,16 @@ def build_workbook(
         build_recon_sheet(wb, client_name, current_label, r, f"{r} {sheet_name}", res)
 
     for r in control_account_results:
-        build_control_account_sheet(wb, client_name, current_label, ca_refs[r.account_code], r)
+        if refs.tb_current is not None:
+            build_control_account_sheet_formulas(wb, client_name, current_label, ca_refs[r.account_code], r, refs)
+        else:
+            build_control_account_sheet(wb, client_name, current_label, ca_refs[r.account_code], r)
 
     for r in matrix_results:
-        build_matrix_sheet(wb, client_name, current_label, mx_refs[r.account_code], r)
+        if refs.nominal_current is not None:
+            build_matrix_sheet_formulas(wb, client_name, current_label, mx_refs[r.account_code], r, refs, data.get("nominal_current"))
+        else:
+            build_matrix_sheet(wb, client_name, current_label, mx_refs[r.account_code], r)
 
     build_points_forward_sheet(wb, client_name, current_label, pf_ref)
     return wb

@@ -52,6 +52,55 @@ adding a second template is configuration, not a rebuild. **Not yet wired
 up**: `generate` doesn't read this config yet (schedules always run, always
 land in the system's own generic layout) - see Roadmap.
 
+## Formula-linked schedules
+
+The generated workbook doesn't just contain Python-computed numbers - every
+figure on the TB Lead Schedule, control account rollforwards, P&L, Balance
+Sheet, Corporation Tax computation, category-level fixed asset register, and
+nominal activity matrix is a live Excel formula, the way a manually-built
+working paper is. Change a figure on one of the hidden `DATA_*` sheets and
+everything downstream recalculates - a reviewer can trace any number back to
+its source by following the formula chain, not just trust a pasted value.
+
+How it works: every job's raw canonical data (TB current/comparative,
+nominal activity, aged debtors/creditors, P&L, B/S) is written once onto
+hidden `DATA_*` sheets (`app/data_sheets.py`). Every schedule sheet then
+references those ranges - mostly via `SUMPRODUCT`-based exact-match and
+OR-across-values sums (`app/xlformulas.py`), not `SUMIFS`, because the
+verification library this was tested against (see below) mishandles
+`SUMIFS` on certain text criteria; `SUMPRODUCT` is standard, equally-safe
+Excel syntax with no known downside, so it's used everywhere instead. A few
+schedules cross-reference each other directly - the Balance Sheet's
+"current year profit" line and the Corporation Tax sheet's "profit per
+accounts" line both point straight at the P&L sheet's own NET PROFIT cell,
+rather than each holding their own copy of that number.
+
+Python still owns anything that's a genuine shaping/classification decision
+rather than arithmetic - which fixed asset category an account belongs to
+(parsing an inconsistently-formatted account name), which contra account a
+nominal transaction gets bucketed under and which accounts make the "top N
+by value" cut on the matrix, which control accounts exist at all. Those
+groupings are computed once in Python and then referenced by formula (e.g.
+by account code or by a synthetic per-transaction `row_id`), so the
+*number* in every cell is live, even where the *structure* of the schedule
+isn't something a spreadsheet formula should be deriving.
+
+Because this sandbox can't run LibreOffice to recalculate a workbook, every
+formula-linked schedule is verified with the `formulas` Python library (a
+real, independent formula evaluator) against the equivalent Python
+computation - not just "the string looks like a formula", but "a formula
+engine computes the same number" (`tests/test_formulas.py`, dev-only:
+`pip install -r requirements-dev.txt`). Two library-specific formula bugs
+were found and worked around this way (documented in `xlformulas.py`):
+`SUMIFS` mishandling leading-zero-looking text criteria, and wrapping an
+OR'd boolean condition in `>0` before multiplying returning all-TRUE
+regardless of the underlying condition.
+
+Not yet formula-linked: the reconciliation check sheets (TB self-balance,
+debtors/creditors/bank/VAT recon, nominal review), the asset-level fixed
+asset register (prior-year rollforward), and the closing fixed asset
+register - these still write Python-computed values today.
+
 ## Status
 
 This is a working MVP built and validated against real Xero exports for a
@@ -190,11 +239,18 @@ app/
   xero_reports.py        Xero-specific report parsers (see above)
   recon.py                 the reconciliation/cross-check engine
   control_accounts.py       control account rollforward + aged breakdown engine
-  nominal_matrix.py          nominal activity → contra nominal code analysis matrix
-  excel_builder.py             builds the final .xlsx, house-style header blocks + numbered index
-  storage.py                    filesystem-backed client/job storage
-  main.py                        FastAPI app + routes
-  templates/, static/             the (minimal) web UI
+  nominal_matrix.py          nominal activity → contra nominal code analysis matrix (+ formula row-id grouping)
+  fixed_assets.py             category-level + asset-level fixed asset register engine
+  financial_statements.py      structured P&L / Balance Sheet with the explicit balance check
+  corporation_tax.py            UK Corporation Tax computation (marginal relief etc.)
+  tax_rates.py                   the current CT rates config, monitored for HMRC changes
+  data_sheets.py                  writes hidden DATA_* raw-data sheets for the formula engine
+  xlformulas.py                    Excel formula-string builders (SUMPRODUCT-based, see above)
+  excel_builder.py                  builds the final .xlsx: house-style headers, numbered index,
+                                     value-based AND formula-linked schedule builders
+  storage.py                         filesystem-backed Practice/Template/Client/Job storage
+  main.py                             FastAPI app + routes
+  templates/, static/                  the (minimal) web UI
 ```
 
 `DataSource` in `parsers.py` is the seam for live API connectors later
@@ -226,6 +282,17 @@ workbook) against `sample_data/`, which mirrors the real Xero export
 structures (grouped reports, embedded comparative TB, un-evaluated formula
 subtotals) for a fictional client - no real client data is in this repo.
 
+`tests/test_formulas.py` additionally verifies the formula-linked schedules
+recalculate correctly, using the `formulas` library (a real, independent
+Excel formula evaluator) rather than trusting that a formula string merely
+looks right - see "Formula-linked schedules" above. It's skipped
+automatically unless that dev-only dependency is installed:
+
+```bash
+pip install -r requirements-dev.txt
+pytest tests/ -v
+```
+
 ## Known limitations / roadmap
 
 - **The template config doesn't drive generation yet.** A practice can
@@ -234,11 +301,18 @@ subtotals) for a fictional client - no real client data is in this repo.
   layout regardless of what's configured. Wiring the config in, and then
   actually inserting the generated schedules into a copy of the uploaded
   template file, is the next phase of work.
-- **Formula-linked output.** Every schedule currently writes Python-computed
-  final values into cells, not live Excel formulas referencing raw-data
-  sheets. Converting the whole engine (control accounts, nominal matrix,
-  fixed assets, CT, P&L/B&S) to emit formulas instead is a substantial
-  rewrite, planned but not started.
+- **Formula-linked output covers the core schedules, not everything yet.**
+  TB Lead Schedule, control accounts, P&L/B&S, category-level fixed assets,
+  Corporation Tax, and the nominal matrix are all live-formula (see
+  "Formula-linked schedules" above). The recon check sheets, the
+  asset-level fixed asset register, and the closing register still write
+  Python-computed values - converting those is the remaining piece.
+- **The formula engine isn't wired into template-based insertion yet.**
+  It drives the system's own generic layout (`build_workbook`). Once
+  schedules are inserted into a copy of a practice's real uploaded template
+  (see the point above on template config), the formula-writing functions
+  need to target wherever that template's own layout puts each schedule,
+  not a fixed row/column scheme.
 - **Inserting into a real template file has a known fidelity cost.**
   Round-tripping a real client's `.xlsx` through openpyxl (load, add sheets,
   save) strips embedded images (e.g. a firm's logo) and dropdown data
