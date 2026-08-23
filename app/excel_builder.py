@@ -708,6 +708,103 @@ def build_bs_statement_sheet_formulas(
     return sheet_name
 
 
+def build_fixed_asset_category_sheet_formulas(
+    wb: Workbook, client_name: str, period_label: str, ref: str, result: FixedAssetResult, refs: DataRefs,
+    grouped_codes: dict[str, dict[str, list[str]]],
+):
+    """Formula-linked version of the category-level fixed asset rollforward:
+    same cost/depreciation/NBV columns as the Python-computed sheet, but
+    every b/fwd, c/fwd, additions and depreciation figure is a live
+    SUMPRODUCT formula against DATA_TB_Current/DATA_TB_Comparative/
+    DATA_Nominal, OR'd across every account code Python grouped into that
+    category (grouped_codes - see fixed_assets.group_fixed_asset_codes).
+    Python still decides the category grouping itself (a text-parsing
+    problem, not something an Excel formula should attempt), but every
+    number in the rollforward recalculates from the raw data."""
+    sheet_name = f"{ref} Fixed Asset Register (Category)"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, period_label, "FIXED ASSET REGISTER (CATEGORY SUMMARY)", ref)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
+    status_cell.font = _status_font(result.status)
+    status_cell.fill = _status_fill(result.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=8)
+    ws.row_dimensions[row].height = 30
+
+    if result.detail.empty or refs.tb_current is None:
+        ws.cell(row=row + 2, column=1, value="No Fixed Asset accounts found in the trial balance.")
+        return sheet_name
+
+    table_row = row + 2
+    headers = [
+        "Category", "Cost b/fwd", "Additions", "Disposals (cost)", "Cost c/fwd (per TB)", "Cost diff",
+        "Acc. depreciation b/fwd", "Depreciation charge", "Depreciation on disposals", "Acc. depreciation c/fwd (per TB)",
+        "Depreciation diff", "NBV b/fwd", "NBV c/fwd",
+    ]
+    for j, h in enumerate(headers):
+        ws.cell(row=table_row, column=1 + j, value=h)
+    _style_header_row(ws, table_row, len(headers))
+
+    tb_c_bal, tb_c_code = refs.tb_current.col_range("balance"), refs.tb_current.col_range("account_code")
+    tb_p_bal, tb_p_code = (refs.tb_comparative.col_range("balance"), refs.tb_comparative.col_range("account_code")) if refs.tb_comparative else (None, None)
+    nom_debit, nom_credit, nom_code = (
+        (refs.nominal_current.col_range("debit"), refs.nominal_current.col_range("credit"), refs.nominal_current.col_range("account_code"))
+        if refs.nominal_current else (None, None, None)
+    )
+
+    def or_sum(sum_range, criteria_range, codes: list[str]) -> str:
+        if sum_range is None or not codes:
+            return "=0"
+        return sum_of_values(sum_range, criteria_range, [quote(c) for c in codes])
+
+    r = table_row + 1
+    for category in result.detail["Category"]:
+        codes = grouped_codes.get(category, {"cost": [], "depreciation": []})
+        cost_codes, dep_codes = codes["cost"], codes["depreciation"]
+
+        ws.cell(row=r, column=1, value=category).border = BORDER
+
+        b_fwd_cell = ws.cell(row=r, column=2, value=or_sum(tb_p_bal, tb_p_code, cost_codes))
+        b_fwd_cell.number_format = CURRENCY_FMT
+        add_cell = ws.cell(row=r, column=3, value=or_sum(nom_debit, nom_code, cost_codes))
+        add_cell.number_format = CURRENCY_FMT
+        disp_cell = ws.cell(row=r, column=4, value=or_sum(nom_credit, nom_code, cost_codes))
+        disp_cell.number_format = CURRENCY_FMT
+        c_fwd_cell = ws.cell(row=r, column=5, value=or_sum(tb_c_bal, tb_c_code, cost_codes))
+        c_fwd_cell.number_format = CURRENCY_FMT
+        diff_cell = ws.cell(row=r, column=6, value=f"=(B{r}+C{r}-D{r})-E{r}")
+        diff_cell.number_format = CURRENCY_FMT
+
+        dep_b_fwd_raw = or_sum(tb_p_bal, tb_p_code, dep_codes)
+        dep_b_fwd_cell = ws.cell(row=r, column=7, value=f"=-({dep_b_fwd_raw[1:]})")
+        dep_b_fwd_cell.number_format = CURRENCY_FMT
+        dep_charge_cell = ws.cell(row=r, column=8, value=or_sum(nom_credit, nom_code, dep_codes))
+        dep_charge_cell.number_format = CURRENCY_FMT
+        dep_disp_cell = ws.cell(row=r, column=9, value=or_sum(nom_debit, nom_code, dep_codes))
+        dep_disp_cell.number_format = CURRENCY_FMT
+        dep_c_fwd_raw = or_sum(tb_c_bal, tb_c_code, dep_codes)
+        dep_c_fwd_cell = ws.cell(row=r, column=10, value=f"=-({dep_c_fwd_raw[1:]})")
+        dep_c_fwd_cell.number_format = CURRENCY_FMT
+        dep_diff_cell = ws.cell(row=r, column=11, value=f"=(G{r}+H{r}-I{r})-J{r}")
+        dep_diff_cell.number_format = CURRENCY_FMT
+
+        nbv_b_fwd_cell = ws.cell(row=r, column=12, value=f"=B{r}-G{r}")
+        nbv_b_fwd_cell.number_format = CURRENCY_FMT
+        nbv_c_fwd_cell = ws.cell(row=r, column=13, value=f"=E{r}-J{r}")
+        nbv_c_fwd_cell.number_format = CURRENCY_FMT
+
+        row_data = result.detail[result.detail["Category"] == category].iloc[0]
+        flagged = abs(row_data["Cost diff"]) > MATERIALITY_AMOUNT or abs(row_data["Depreciation diff"]) > MATERIALITY_AMOUNT
+        if flagged:
+            for c in (6, 11):
+                ws.cell(row=r, column=c).fill = PatternFill("solid", fgColor=AMBER)
+        r += 1
+
+    ws.freeze_panes = f"A{table_row + 1}"
+    return sheet_name
+
+
 def build_matrix_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: MatrixResult):
     sheet_name = f"{ref} {result.account_name} Analysis"[:31]
     ws = wb.create_sheet(sheet_name)

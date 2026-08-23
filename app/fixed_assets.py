@@ -76,6 +76,28 @@ def _category_and_kind(account_name: str) -> tuple[str, str]:
     return stripped or account_name, kind
 
 
+def group_fixed_asset_codes(tb_current: pd.DataFrame) -> dict[str, dict[str, list[str]]]:
+    """Groups Fixed Asset TB account codes by category ("IT EQUIPMENT", ...)
+    and kind ("cost"/"depreciation"), the same grouping category_level_
+    rollforward uses internally - exposed separately so the formula-linked
+    Excel builder can reference these exact account codes in its own
+    SUMPRODUCT formulas instead of re-deriving (and potentially drifting
+    from) the grouping logic."""
+    if tb_current is None or tb_current.empty:
+        return {}
+    fa = tb_current[tb_current["account_type"].str.lower() == FIXED_ASSET_TYPE].copy()
+    if fa.empty:
+        return {}
+    fa["category"], fa["kind"] = zip(*fa["account_name"].map(_category_and_kind))
+    grouped: dict[str, dict[str, list[str]]] = {}
+    for category, group in fa.groupby("category"):
+        grouped[category] = {
+            "cost": group.loc[group["kind"] == "cost", "account_code"].astype(str).tolist(),
+            "depreciation": group.loc[group["kind"] == "depreciation", "account_code"].astype(str).tolist(),
+        }
+    return grouped
+
+
 def category_level_rollforward(
     tb_current: pd.DataFrame, tb_comparative: pd.DataFrame, nominal_activity: pd.DataFrame | None
 ) -> FixedAssetResult:
@@ -85,12 +107,13 @@ def category_level_rollforward(
     if tb_current is None or tb_current.empty:
         return FixedAssetResult("Fixed asset register (category summary)", "n/a", "No trial balance uploaded.")
 
-    fa = tb_current[tb_current["account_type"].str.lower() == FIXED_ASSET_TYPE].copy()
-    if fa.empty:
+    grouped = group_fixed_asset_codes(tb_current)
+    if not grouped:
         return FixedAssetResult("Fixed asset register (category summary)", "n/a", "No Fixed Asset accounts found in the trial balance.")
 
-    fa["category"], fa["kind"] = zip(*fa["account_name"].map(_category_and_kind))
-    codes = set(fa["account_code"].astype(str))
+    def current_balance(code: str) -> float:
+        mask = tb_current["account_code"].astype(str) == code
+        return float(tb_current.loc[mask, "balance"].sum())
 
     def comparative_balance(code: str) -> float:
         if tb_comparative is None or tb_comparative.empty:
@@ -105,23 +128,23 @@ def category_level_rollforward(
         return float(m["debit"].sum()), float(m["credit"].sum())
 
     rows = []
-    for category, group in fa.groupby("category"):
-        cost_rows = group[group["kind"] == "cost"]
-        dep_rows = group[group["kind"] == "depreciation"]
+    for category, codes in grouped.items():
+        cost_codes = codes["cost"]
+        dep_codes = codes["depreciation"]
 
-        cost_c_fwd = float(cost_rows["balance"].sum())
-        cost_b_fwd = sum(comparative_balance(c) for c in cost_rows["account_code"].astype(str))
-        additions = sum(movement(c)[0] for c in cost_rows["account_code"].astype(str))
-        disposals_cost = sum(movement(c)[1] for c in cost_rows["account_code"].astype(str))
+        cost_c_fwd = sum(current_balance(c) for c in cost_codes)
+        cost_b_fwd = sum(comparative_balance(c) for c in cost_codes)
+        additions = sum(movement(c)[0] for c in cost_codes)
+        disposals_cost = sum(movement(c)[1] for c in cost_codes)
 
         # accumulated depreciation is credit-natured (negative in this TB's
         # debit-positive convention) - flipped to a positive "amount of
         # depreciation" here so it reads naturally and subtracts correctly
         # from cost to give NBV, same treatment as debtors/creditors elsewhere
-        acc_dep_c_fwd = -float(dep_rows["balance"].sum())
-        acc_dep_b_fwd = -sum(comparative_balance(c) for c in dep_rows["account_code"].astype(str))
-        dep_charge = sum(movement(c)[1] for c in dep_rows["account_code"].astype(str))
-        dep_on_disposals = sum(movement(c)[0] for c in dep_rows["account_code"].astype(str))
+        acc_dep_c_fwd = -sum(current_balance(c) for c in dep_codes)
+        acc_dep_b_fwd = -sum(comparative_balance(c) for c in dep_codes)
+        dep_charge = sum(movement(c)[1] for c in dep_codes)
+        dep_on_disposals = sum(movement(c)[0] for c in dep_codes)
 
         computed_cost_c_fwd = cost_b_fwd + additions - disposals_cost
         computed_acc_dep_c_fwd = acc_dep_b_fwd + dep_charge - dep_on_disposals

@@ -19,11 +19,13 @@ import formulas  # noqa: E402
 
 from app import control_accounts as ca  # noqa: E402
 from app import financial_statements as fs  # noqa: E402
+from app import fixed_assets as fa  # noqa: E402
 from app import recon, xero_reports as xr  # noqa: E402
 from app.data_sheets import write_data_sheets  # noqa: E402
 from app.excel_builder import (  # noqa: E402
     build_bs_statement_sheet_formulas,
     build_control_account_sheet_formulas,
+    build_fixed_asset_category_sheet_formulas,
     build_pl_statement_sheet_formulas,
     build_tb_lead_schedule_formulas,
 )
@@ -168,3 +170,60 @@ def test_pl_bs_formulas_match_python_ground_truth_and_tie_out(tmp_path, canonica
 
     check_row = bs_line_to_row["CHECK: Net Assets - Total Equity (should be £0)"]
     assert _cell(sol, out.name, bs_sheet_name, f"B{check_row}") == pytest.approx(0.0, abs=0.01)
+
+
+def _fa_tb_row(code, name, account_type, debit, credit):
+    return {"account_code": code, "account_name": name, "account_type": account_type,
+            "debit": debit, "credit": credit, "balance": debit - credit}
+
+
+def test_fixed_asset_category_formulas_match_python_ground_truth(tmp_path):
+    # mirrors test_pipeline.py's unpunctuated-name regression fixture, with
+    # nominal movements added so additions/depreciation-charge formulas get
+    # exercised (and deliberately tie to zero, so the category ties out)
+    tb_current = pd.DataFrame([
+        _fa_tb_row("6350", "IT EQUIPMENT COST BROUGHT FORWARD", "Fixed Asset", 1612.19, 0),
+        _fa_tb_row("6351", "IT EQUIPMENT COST OF ADDITIONS", "Fixed Asset", 1514.15, 0),
+        _fa_tb_row("6360", "IT EQUIPMENT ACCUMULATED DEPRECIATION BROUGHT FORWARD", "Fixed Asset", 0, 189.57),
+    ])
+    tb_comparative = pd.DataFrame([
+        _fa_tb_row("6350", "IT EQUIPMENT COST BROUGHT FORWARD", "Fixed Asset", 1612.19, 0),
+        _fa_tb_row("6360", "IT EQUIPMENT ACCUMULATED DEPRECIATION BROUGHT FORWARD", "Fixed Asset", 0, 89.57),
+    ])
+    nominal_current = pd.DataFrame([
+        {"account_code": "6351", "debit": 1514.15, "credit": 0.0},
+        {"account_code": "6360", "debit": 0.0, "credit": 100.0},
+    ])
+
+    result = fa.category_level_rollforward(tb_current, tb_comparative, nominal_current)
+    assert result.status == "ok"
+    grouped_codes = fa.group_fixed_asset_codes(tb_current)
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, {"tb_current": tb_current, "tb_comparative": tb_comparative, "nominal_current": nominal_current})
+    sheet_name = build_fixed_asset_category_sheet_formulas(
+        wb, "Brightwell Landscaping Supplies Limited", "Year ended 31 December 2025", "1", result, refs, grouped_codes
+    )
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / "fa_formula.xlsx"
+    wb.save(out)
+
+    sol = _evaluate(out)
+
+    errors = [k for k, v in sol.items() if f"[{out.name}]{sheet_name.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value))]
+    assert not errors, f"formula errors: {errors}"
+
+    col_letters = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M"]
+    columns = [
+        "Category", "Cost b/fwd", "Additions", "Disposals (cost)", "Cost c/fwd (per TB)", "Cost diff",
+        "Acc. depreciation b/fwd", "Depreciation charge", "Depreciation on disposals", "Acc. depreciation c/fwd (per TB)",
+        "Depreciation diff", "NBV b/fwd", "NBV c/fwd",
+    ]
+    row0 = result.detail.iloc[0]
+    r = 8  # row5=status, table header row7, first data row8
+    for col, letter in zip(columns, col_letters):
+        if col == "Category":
+            assert _cell(sol, out.name, sheet_name, f"{letter}{r}") == row0[col]
+        else:
+            assert _cell(sol, out.name, sheet_name, f"{letter}{r}") == pytest.approx(row0[col], abs=0.01)
