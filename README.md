@@ -7,9 +7,11 @@ with reconciliations already run: TB self-balance and P&L/B&S tie-out,
 current-vs-comparative variance analysis flagged by materiality, debtors and
 creditors control account reconciliation (with the full aged listing as a
 breakdown of the closing balance), bank and VAT cross-checks, control account
-rollforwards (balance b/fwd + movements = balance c/fwd), and a nominal
+rollforwards (balance b/fwd + movements = balance c/fwd), a nominal
 activity analysis matrix that allocates transactions to their contra nominal
-code and flags anything that needs manual reallocation.
+code and flags anything that needs manual reallocation, and a UK Corporation
+Tax computation (current rates, marginal relief applied automatically,
+checked against whatever's booked as the tax charge).
 
 A small internal web app: staff upload a client's export files for a job,
 confirm (or correct) how columns map to the working paper's fields, and
@@ -66,10 +68,34 @@ quirks each one works around.
 | Nominal analysis matrix | Every transaction against an account allocated to its contra nominal code; multi-way splits and unallocated amounts flagged for manual review |
 | Bank reconciliation | Statement closing balance vs TB |
 | VAT cross-check | VAT return boxes vs P&L turnover and VAT control account |
+| Corporation Tax computation | Current UK rates (small profits/marginal relief/main rate) applied to accounting profit, checked against the booked tax charge |
 
 Every check produces a status (`ok` / `review` / `error` / `n/a`) and a
 plain-English message, shown on the workbook's Index sheet and again on
 each schedule.
+
+## Corporation Tax computation
+
+Built from `app/tax_rates.py` (the current rates, as a config - not
+hardcoded inside the calculator) and `app/corporation_tax.py` (the standard
+small profits rate / marginal relief / main rate rules, verified against
+the well-known £150,000 → 24% effective rate reference point). It takes
+accounting profit (from the derived P&L) through preparer-entered
+adjustments - disallowable expenses and capital allowances, both editable
+via a form on the job page since they need a fixed asset register / expense
+review this system doesn't have - to taxable profit, applies the current
+rate band automatically, and flags a variance against whatever's booked as
+Corporation Tax in the trial balance. It's a computation proforma and
+reasonableness check, not a full tax return.
+
+**Keeping the rates current**: a scheduled Routine ("HMRC Corporation Tax
+rate watch", quarterly, timed around UK Budget/Autumn Statement season)
+checks gov.uk for rate/threshold changes and sends a push+email notification
+if it finds one - it reports what changed rather than auto-updating the
+repo, so a real change gets a human decision before it reaches `tax_rates.py`.
+Every generated CT schedule also states the rates used and when they were
+last verified, so a stale config is visible on the workbook itself even
+between routine checks.
 
 ## Upload safety
 
@@ -160,3 +186,10 @@ subtotals) for a fictional client - no real client data is in this repo.
 - Payroll data (P30/P32/payslips) for a wages control account rollforward
   is a PDF-form-parsing problem, out of scope for now - a structured
   payroll summary upload would be the more tractable first step if needed.
+- **Corporation Tax computation** doesn't compute capital allowances or
+  identify disallowable expenses itself - both are manual inputs by design,
+  since that needs a fixed asset register and a line-by-line expense review
+  this system doesn't have. It also doesn't yet handle augmented profits
+  that differ from taxable profits (dividends received from non-51%-group
+  companies) - defaults to treating them as equal, which is correct for the
+  common case but not universal.
