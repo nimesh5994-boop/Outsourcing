@@ -18,7 +18,15 @@ TOTAL_PREFIX = "Total "
 
 
 def _load_raw(source: DataSource) -> pd.DataFrame:
-    raw = source.raw_dataframe()
+    # .copy() matters: DataSource caches and returns the same DataFrame
+    # object on every call, so renaming columns in place here would
+    # permanently corrupt it for every later raw_columns()/raw_dataframe()
+    # call on this same source - including the generic column-mapping
+    # fallback that runs right after a failed Xero-native parse attempt
+    # (e.g. platform was guessed/selected as Xero but the file wasn't a
+    # genuine native export) - that fallback would then see integer
+    # column positions instead of real headers and map nothing at all.
+    raw = source.raw_dataframe().copy()
     raw.columns = range(len(raw.columns))
     return raw
 
