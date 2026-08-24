@@ -6,7 +6,7 @@ from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import anomaly_detection, auth, compliance_checks, control_accounts, corporation_tax, document_detection, fixed_assets, mapping, nominal_matrix, parsers, recon, storage, xero_reports
+from app import anomaly_detection, auth, compliance_checks, control_accounts, corporation_tax, document_detection, fixed_assets, mapping, nominal_matrix, parsers, recon, reconciliation_agent, storage, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
 from app.models import PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS
 
@@ -347,6 +347,28 @@ def save_report_note(client_id: str, report_type: str, note: str = Form(""), nex
     return RedirectResponse(destination, status_code=303)
 
 
+def _add_ai_reconciliation_notes(results: list, client: dict, job: dict) -> None:
+    """Mutates each flagged (review/error) result in place, adding a short
+    AI-assisted note - see app/reconciliation_agent.py for what it's given
+    and the guardrails around it. Called only when the practice has opted
+    in for this template (see generate()); any failure here degrades to no
+    note per-check, never breaks generation."""
+    notes = client.get("report_notes") or {}
+    notes_context = "\n".join(f"- {REPORT_LABELS.get(rt, rt)}: {note}" for rt, note in notes.items())
+    period_label = job.get("current_label", "")
+    for result in results:
+        if result.status not in ("review", "error"):
+            continue
+        try:
+            result.ai_note = reconciliation_agent.explain_flagged_result(
+                result.name, result.status, result.message,
+                result.detail, result.extra_detail, result.extra_detail_label,
+                notes_context, job.get("client_name", ""), period_label,
+            )
+        except Exception:
+            result.ai_note = ""
+
+
 def _first_unconfirmed_upload(job: dict) -> str | None:
     for upload_id, upload in job["uploads"].items():
         if not upload["confirmed"]:
@@ -613,6 +635,8 @@ def _build_ct_computation(job: dict, data: dict) -> corporation_tax.CTComputatio
 @app.post("/jobs/{job_id}/generate")
 def generate(job_id: str, user: dict = Depends(auth.current_user_dep)):
     job, client = _authorize_job(user, job_id)
+    template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
+
     data = _load_canonical_data(job)
     pl_current = data.get("pl_current")
     current_year_profit = float(pl_current["amount"].sum()) if pl_current is not None and not pl_current.empty else None
@@ -623,6 +647,9 @@ def generate(job_id: str, user: dict = Depends(auth.current_user_dep)):
             data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"), current_year_profit,
         )
     )
+
+    if template and template["config"].get("ai_reconciliation_notes", {}).get("enabled"):
+        _add_ai_reconciliation_notes(results, client, job)
 
     ca_results = control_accounts.build_all_rollforwards(
         data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),

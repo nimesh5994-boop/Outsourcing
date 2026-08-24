@@ -462,6 +462,95 @@ def test_report_notes_and_section_scoped_upload(http_client):
     assert upload["report_type"] == "bank_statement"
 
 
+def test_ai_reconciliation_note_reaches_the_generated_workbook(http_client, monkeypatch):
+    """Full wiring, end to end: template config opts in -> generate() calls
+    the (mocked) agent for a flagged check -> the note lands on that
+    check's sheet in the actual downloaded workbook. The Anthropic API is
+    never really called in tests - see test_reconciliation_agent.py for
+    the agent's own unit tests; this just proves main.py -> excel_builder
+    wiring works, using a mock at the same patch point."""
+    from unittest.mock import MagicMock, patch
+
+    c = http_client
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    practice_id = _signup(c, admin_email="ainotes@acme.test")
+
+    resp = c.post(
+        f"/practices/{practice_id}/templates",
+        data={"name": "AI Notes Template"},
+        files={"file": ("template.xlsx", _make_template_bytes(),
+                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    from app import storage
+    template = storage.list_templates(practice_id)[0]
+    template["config"]["ai_reconciliation_notes"]["enabled"] = True
+    storage.save_template(template)
+
+    resp = c.post(f"/practices/{practice_id}/clients", data={
+        "name": "AI Notes Client", "template_id": template["id"],
+    }, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.post(f"/clients/{client_id}/notes/vat_return", data={
+        "note": "Detail tab has the transaction-level data.", "next": f"/jobs/{job_id}",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+
+    # a VAT return with no TB/P&L uploaded alongside it - guaranteed to
+    # flag (turnover and the VAT control balance both default to 0)
+    vat_csv = b"Box 1,Box 2,Box 3,Box 4,Box 5,Box 6,Box 7,Box 8,Box 9\n1000,0,1000,200,800,15000,5000,0,0\n"
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "vat_return"},
+        files={"files": ("vat.csv", vat_csv, "text/csv")}, follow_redirects=False,
+    )
+    location = resp.headers["location"]
+    assert "/mapping" in location
+    upload_id = location.rsplit("/", 2)[-2]
+    job = storage.get_job(job_id)
+    upload = job["uploads"][upload_id]
+    # real form submissions resubmit the pre-filled (auto-suggested)
+    # column mapping; a bare {"action": "confirm"} would silently map
+    # every column to None, zeroing out the VAT figures and defeating
+    # the point of this test (nothing would ever flag).
+    confirm_data = {"action": "confirm"}
+    confirm_data.update({f"col__{col}": field for col, field in (upload["mapping"] or {}).items() if field})
+    resp = c.post(location, data=confirm_data, follow_redirects=False)
+    assert resp.status_code == 303
+
+    mock_client = MagicMock()
+    block = MagicMock()
+    block.type = "text"
+    block.text = "The £800 Box 5 figure has no nominal ledger postings to compare against - nothing was uploaded."
+    response = MagicMock()
+    response.content = [block]
+    mock_client.messages.create.return_value = response
+
+    with patch("anthropic.Anthropic", return_value=mock_client):
+        resp = c.post(f"/jobs/{job_id}/generate", follow_redirects=False)
+    assert resp.status_code == 303
+    assert mock_client.messages.create.called
+
+    resp = c.get(f"/jobs/{job_id}/download")
+    assert resp.status_code == 200
+
+    import io as _io
+
+    import openpyxl
+    wb = openpyxl.load_workbook(_io.BytesIO(resp.content))
+    vat_sheet_names = [s for s in wb.sheetnames if "VAT" in s.upper()]
+    assert vat_sheet_names, wb.sheetnames
+    sheet_text = "\n".join(
+        str(cell.value) for row in wb[vat_sheet_names[0]].iter_rows() for cell in row if cell.value
+    )
+    assert "AI-ASSISTED NOTE" in sheet_text
+    assert "no nominal ledger postings" in sheet_text
+
+
 def test_upload_route_rejects_confirm_with_no_report_type(http_client):
     """Guard against silently confirming an upload the system couldn't
     classify and the user didn't pick a type for either - that would mark

@@ -64,6 +64,12 @@ DEFAULT_TEMPLATE_CONFIG = {
     "header_cells": {"client_name_cell": "A1", "period_cell": "A2", "schedule_title_cell": "A3"},
     "materiality": {"default_amount": 500, "variance_pct_threshold": 0.10},
     "numbering": {"style": "sequential", "start_at": 1},
+    # Off by default - a practice opts in explicitly. When on, every recon
+    # check flagged for review gets a short, clearly-labelled AI-assisted
+    # suggestion (via app/reconciliation_agent.py) written alongside the
+    # deterministic figures on that check's sheet. Requires the
+    # ANTHROPIC_API_KEY environment variable; see README.
+    "ai_reconciliation_notes": {"enabled": False},
 }
 
 SCHEMA_STATEMENTS = [

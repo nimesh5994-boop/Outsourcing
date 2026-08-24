@@ -286,6 +286,39 @@ noticing every ordinary invoice was getting flagged as its own duplicate).
 They surface candidates for a human to confirm, the same as every other
 check in this system - not an auto-fixer.
 
+### AI-assisted reconciliation notes (opt-in)
+
+Off by default. When a practice turns it on for a template
+(`ai_reconciliation_notes.enabled` in that template's config), every check
+flagged `review`/`error` gets one more attempt at being useful: a short
+suggestion from an LLM (`app/reconciliation_agent.py`, via the Anthropic
+API), shown as a distinctly-styled "AI-ASSISTED NOTE" block on that
+check's sheet, right below the deterministic detail tables.
+
+What it's given is exactly what a reviewer already sees on that sheet -
+the flagged check's own message and detail table, any `extra_detail` a
+check attaches (e.g. the VAT cross-check's candidate nominal postings),
+and the practice's own instruction note for that report type (see
+Uploading above) - nothing it wasn't already shown elsewhere. It's told
+explicitly to hedge, cite only what's in the data it was given, and
+respond with a fixed marker if it has nothing useful to add (in which
+case no note is written at all - it doesn't pad output for the sake of
+it).
+
+This is deliberately kept separate from the deterministic engine:
+`recon.py` and friends make no API calls and never will; `ReconResult`
+just carries an extra `ai_note` field that main.py's `generate()` fills
+in from outside, after all the real checks have already run and produced
+their real numbers. A note is a hint for the reviewer, not a finding -
+every number in the workbook is exactly what the deterministic checks
+computed, with or without this feature on. Any failure (missing API key,
+API error, timeout) degrades to no note - or a diagnosable one-line
+message in its place - never to a broken generation.
+
+Requires `ANTHROPIC_API_KEY` as an environment variable (see Running it /
+Deployment below) only if the feature is actually turned on for a
+template; the app runs fully without it otherwise.
+
 ## Compliance checklist
 
 Distilled from a real manual-job review checklist covering fixed assets,
@@ -393,6 +426,7 @@ app/
   document_detection.py   auto-detects report type/platform/period for an upload
   pdf_extraction.py        pdfplumber-based table extraction for PDF uploads
   recon.py                 the reconciliation/cross-check engine
+  reconciliation_agent.py    opt-in LLM explanation for flagged checks (no API calls from recon.py itself)
   anomaly_detection.py       cross-transaction checks (miscoding, duplicates, unusual posting dates)
   compliance_checks.py        data-driven checklist checks (DLA/S455, dividends, petty cash, loans)
   control_accounts.py       control account rollforward + aged breakdown engine
@@ -429,7 +463,9 @@ required even for local runs - point it at a local Postgres or a free Neon
 branch. Tables are created automatically on first connection (see
 `SCHEMA_STATEMENTS` in `storage.py`); there's no separate migration step.
 `SECRET_KEY` is also required, to sign session cookies (see Access
-control above).
+control above). `ANTHROPIC_API_KEY` is only needed if you turn on
+AI-assisted reconciliation notes for a template (see What gets checked
+above) - the app runs fine without it otherwise.
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
@@ -461,7 +497,9 @@ To deploy:
    `DATABASE_URL` (that connection string) and `SECRET_KEY` (a random
    value, e.g. `python3 -c "import secrets; print(secrets.token_hex(32))"`
    - used to sign session cookies, see Access control above). Tick
-   Production for both, at minimum. Never commit either to git.
+   Production for both, at minimum. Never commit either to git. Add
+   `ANTHROPIC_API_KEY` too if any practice will turn on AI-assisted
+   reconciliation notes - otherwise skip it, nothing needs it.
 3. `vercel deploy` (or connect the repo in the Vercel dashboard for
    git-push deploys). No other build step is needed - `requirements.txt`
    is installed automatically by the Python runtime.
@@ -513,14 +551,29 @@ raising a clear error). Its PDF cases build a real test PDF via
 `reportlab`, a dev-only dependency (`requirements-dev.txt`) - they skip
 automatically if it isn't installed.
 
+`tests/test_recon_vat.py` covers the VAT cross-check's candidate-
+reconciling-items enhancement in isolation (in-memory DataFrames, no
+database) - flagged vs. ok, with/without nominal activity, matching vs.
+non-matching postings.
+
+`tests/test_reconciliation_agent.py` covers the AI-assisted-notes agent
+directly, with the Anthropic client mocked throughout - no test in this
+suite ever calls the real API. Verifies the contract that must hold no
+matter what a model says: no API key degrades to a diagnosable message
+rather than silence, an API error degrades to a note rather than a raise,
+and the "nothing useful to add" marker becomes an empty note rather than
+clutter.
+
 `tests/test_storage_and_routes.py` exercises the Postgres-backed storage
 layer, the full practice -> template -> client -> job -> upload ->
 generate -> download HTTP flow (including a bulk upload of mixed Xero/
-CSV/PDF files walked through the auto-detect confirm chain), and the
-access-control model (signup, login, wrong password, unauthenticated
-redirect, a preparer scoped to only their granted clients, a manager
-blocked from user management, and cross-practice access denied) against a
-real (throwaway) Postgres schema
+CSV/PDF files walked through the auto-detect confirm chain, a multi-sheet
+workbook expanding into one upload per sheet, and - with a mocked
+Anthropic client - an AI-assisted note actually reaching the downloaded
+workbook end to end), and the access-control model (signup, login, wrong
+password, unauthenticated redirect, a preparer scoped to only their
+granted clients, a manager blocked from user management, and cross-
+practice access denied) against a real (throwaway) Postgres schema
 - the part of the app the other tests never touch, since they all work
 with in-memory DataFrames/fixtures directly. It's skipped automatically
 if no test database is reachable; point `TEST_DATABASE_URL` at one (or

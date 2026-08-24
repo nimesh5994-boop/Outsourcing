@@ -29,6 +29,13 @@ class ReconResult:
     # differences" with nothing to check against.
     extra_detail: pd.DataFrame = field(default_factory=pd.DataFrame)
     extra_detail_label: str = ""
+    # Set from outside this module (main.py's generate(), never here - recon.py
+    # stays pure deterministic logic with no API calls) by the optional,
+    # opt-in reconciliation-explanation agent - see app/reconciliation_agent.py.
+    # A short, clearly-labelled AI-assisted note on a flagged check, or "" if
+    # the feature is off, the check isn't flagged, or the agent had nothing
+    # useful to add beyond the deterministic message.
+    ai_note: str = ""
 
 
 def check_tb_self_balances(tb_current: pd.DataFrame, tb_comparative: pd.DataFrame) -> ReconResult:

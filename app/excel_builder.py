@@ -338,16 +338,27 @@ def build_recon_sheet(wb: Workbook, client_name: str, period_label: str, ref: st
     ws.row_dimensions[row].height = 30
 
     detail_row = row + 2
+    next_row = detail_row
     if result.detail is None or result.detail.empty:
         ws.cell(row=detail_row, column=1, value="No supporting detail available.")
-        return
-    next_row = _write_dataframe(ws, result.detail, start_row=detail_row)
-    ws.freeze_panes = f"A{detail_row + 1}"
+        next_row = detail_row + 2
+    else:
+        next_row = _write_dataframe(ws, result.detail, start_row=detail_row)
+        ws.freeze_panes = f"A{detail_row + 1}"
 
     if result.extra_detail is not None and not result.extra_detail.empty:
         label_row = next_row + 1
         ws.cell(row=label_row, column=1, value=result.extra_detail_label.upper()).font = SCHEDULE_FONT
-        _write_dataframe(ws, result.extra_detail, start_row=label_row + 1)
+        next_row = _write_dataframe(ws, result.extra_detail, start_row=label_row + 1)
+
+    if getattr(result, "ai_note", ""):
+        note_row = next_row + 1
+        note_cell = ws.cell(row=note_row, column=1, value=f"\U0001F916 AI-ASSISTED NOTE (not a finding - verify before relying on it): {result.ai_note}")
+        note_cell.font = Font(italic=True, color="5B4B8A", size=10)
+        note_cell.fill = PatternFill("solid", fgColor="F1EDFB")
+        note_cell.alignment = Alignment(wrap_text=True, vertical="top")
+        ws.merge_cells(start_row=note_row, start_column=1, end_row=note_row, end_column=8)
+        ws.row_dimensions[note_row].height = 45
 
 
 def build_control_account_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: ControlAccountResult, header_cells: dict | None = None):
