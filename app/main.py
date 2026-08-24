@@ -1,17 +1,14 @@
 import io
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import anomaly_detection, auth, compliance_checks, control_accounts, corporation_tax, fixed_assets, mapping, nominal_matrix, parsers, recon, storage, xero_reports
+from app import anomaly_detection, auth, compliance_checks, control_accounts, corporation_tax, document_detection, fixed_assets, mapping, nominal_matrix, parsers, recon, storage, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
 from app.models import PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS
-
-# report types with a dedicated Xero report parser (no manual column mapping needed)
-XERO_NATIVE_REPORT_TYPES = {"trial_balance", "nominal_activity", "aged_debtors", "aged_creditors"}
 
 BASE_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Working Paper Automation")
@@ -327,70 +324,90 @@ def save_tax_inputs(
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
-@app.post("/jobs/{job_id}/uploads")
-async def upload_file(job_id: str, report_type: str = Form(...), period: str = Form(...),
-                       platform: str = Form(...), file: UploadFile = None,
-                       user: dict = Depends(auth.current_user_dep)):
-    job, _client = _authorize_job(user, job_id)
-    content = await file.read()
+def _first_unconfirmed_upload(job: dict) -> str | None:
+    for upload_id, upload in job["uploads"].items():
+        if not upload["confirmed"]:
+            return upload_id
+    return None
 
-    source = parsers.FileDataSource(content, filename=file.filename)
-    expected_end = _expected_period_end(job, period)
 
-    # Xero exports have a known, specific layout (grouped reports, embedded
-    # comparative TB) that a dedicated parser handles directly - no manual
-    # column mapping step needed. Falls back to generic mapping if the file
-    # doesn't actually match the expected Xero layout (a real signal that
-    # either the wrong report type was picked, or it isn't a Xero export).
-    validation_note = ""
-    period_check = {"status": "unknown", "message": ""}
-    if platform == "xero" and report_type in XERO_NATIVE_REPORT_TYPES:
-        try:
-            _validate_xero_parse(report_type, source)
-        except Exception as exc:
-            validation_note = (
-                f"This file doesn't look like a standard Xero {REPORT_LABELS[report_type]} export "
-                f"({exc}) - check you selected the right report type, or map its columns manually below."
-            )
-        else:
-            period_check = xero_reports.check_period(xero_reports.extract_period_info(source), expected_end)
-            columns = source.raw_columns()
-            upload_id = storage.add_upload(job, report_type, period, platform, file.filename, content, columns)
-            job = storage.get_job(job_id)
-            job["uploads"][upload_id]["mapping"] = {}
-            job["uploads"][upload_id]["confirmed"] = True
-            job["uploads"][upload_id]["xero_native"] = True
-            job["uploads"][upload_id]["period_check"] = period_check
-            storage.save_job(job)
-            return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: bytes) -> None:
+    """Classifies and stores a single uploaded file. A genuine Xero-native
+    match (the file's actual layout parses cleanly, not just similar-
+    looking column names) auto-confirms immediately, same as before this
+    feature existed - that's a structural validation, not a guess. Anything
+    else (including PDFs, which flow through the same DataSource - see
+    parsers.py) gets its report type/platform/period guessed and queued
+    for a quick human confirm rather than trusted blind, since a wrong
+    guess here would silently misfile real client financials."""
+    source = parsers.FileDataSource(content, filename=filename)
+
+    xero_report_type = document_detection.try_xero_native(source)
+    if xero_report_type:
+        period = document_detection.guess_period(source, xero_report_type, job, xero_report_type)
+        expected_end = _expected_period_end(job, period)
+        period_check = xero_reports.check_period(xero_reports.extract_period_info(source), expected_end)
+        columns = source.raw_columns()
+        upload_id = storage.add_upload(job, xero_report_type, period, "xero", filename, content, columns)
+        job["uploads"][upload_id]["mapping"] = {}
+        job["uploads"][upload_id]["confirmed"] = True
+        job["uploads"][upload_id]["xero_native"] = True
+        job["uploads"][upload_id]["period_check"] = period_check
+        storage.save_job(job)
+        return
 
     columns = source.raw_columns()
-    upload_id = storage.add_upload(job, report_type, period, platform, file.filename, content, columns)
+    report_type, confidence = document_detection.classify_report_type(columns)
+    if report_type in ("profit_and_loss", "balance_sheet"):
+        profile_probe = mapping.suggest_mapping(report_type, columns)
+        category_col = next((c for c, f in profile_probe.items() if f == "category"), None)
+        report_type = document_detection.disambiguate_pl_vs_bs(source.raw_dataframe(), category_col)
+    platform = document_detection.classify_platform(columns, is_xero_native=False)
+    period = document_detection.guess_period(source, report_type or "trial_balance", job, None)
 
-    # try a saved profile first, fall back to alias-based suggestion
-    profile = mapping.load_profile(job["client_id"], report_type, platform)
-    if profile:
-        suggestion = {col: profile.get(col) for col in columns}
+    upload_id = storage.add_upload(job, report_type or "", period, platform, filename, content, columns)
+
+    suggestion = {}
+    validation_note = ""
+    if report_type:
+        profile = mapping.load_profile(job["client_id"], report_type, platform)
+        suggestion = {col: profile.get(col) for col in columns} if profile else mapping.suggest_mapping(report_type, columns)
+        required = REQUIRED_FIELDS.get(report_type, [])
+        matched_required = {v for v in suggestion.values() if v} & set(required)
+        if required and not matched_required:
+            validation_note = (
+                f"None of this file's columns look like a {REPORT_LABELS[report_type]} - "
+                f"double check the report type below before mapping columns."
+            )
     else:
-        suggestion = mapping.suggest_mapping(report_type, columns)
-
-    # simple category check: did we manage to guess a mapping for the fields
-    # this report type actually needs? If none matched at all, the file is
-    # probably not what was selected in the report-type dropdown.
-    required = REQUIRED_FIELDS.get(report_type, [])
-    matched_required = {v for v in suggestion.values() if v} & set(required)
-    if not validation_note and required and not matched_required:
         validation_note = (
-            f"None of this file's columns look like a {REPORT_LABELS[report_type]} - "
-            f"double check you selected the right report type before mapping columns."
+            "Couldn't confidently guess what kind of report this is - pick the report type below, "
+            "then map its columns."
         )
 
-    job = storage.get_job(job_id)
     job["uploads"][upload_id]["mapping"] = suggestion
     job["uploads"][upload_id]["validation_note"] = validation_note
+    job["uploads"][upload_id]["detection_confidence"] = confidence
     storage.save_job(job)
 
-    return RedirectResponse(f"/jobs/{job_id}/uploads/{upload_id}/mapping", status_code=303)
+
+@app.post("/jobs/{job_id}/uploads")
+async def upload_files(job_id: str, files: list[UploadFile] = File(...),
+                        user: dict = Depends(auth.current_user_dep)):
+    job, _client = _authorize_job(user, job_id)
+
+    for file in files:
+        content = await file.read()
+        if not content:
+            continue
+        job = storage.get_job(job_id)  # re-fetch: each ingest may have just saved the job
+        await _ingest_one_upload(job_id, job, file.filename, content)
+
+    job = storage.get_job(job_id)
+    next_upload_id = _first_unconfirmed_upload(job)
+    if next_upload_id:
+        return RedirectResponse(f"/jobs/{job_id}/uploads/{next_upload_id}/mapping", status_code=303)
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
 def _expected_period_end(job: dict, period: str):
@@ -400,25 +417,16 @@ def _expected_period_end(job: dict, period: str):
     return date.fromisoformat(value) if value else None
 
 
-def _validate_xero_parse(report_type: str, source: parsers.DataSource) -> None:
-    if report_type == "trial_balance":
-        xero_reports.parse_trial_balance(source)
-    elif report_type == "nominal_activity":
-        xero_reports.parse_account_transactions(source)
-    elif report_type == "aged_debtors":
-        xero_reports.parse_aged_report(source, "customer")
-    elif report_type == "aged_creditors":
-        xero_reports.parse_aged_report(source, "supplier")
-
-
 @app.get("/jobs/{job_id}/uploads/{upload_id}/mapping")
 def mapping_form(request: Request, job_id: str, upload_id: str, user: dict = Depends(auth.current_user_dep)):
     job, _client = _authorize_job(user, job_id)
     upload = job["uploads"][upload_id]
-    canonical_fields = REPORT_SCHEMAS[upload["report_type"]]
+    canonical_fields = REPORT_SCHEMAS.get(upload["report_type"], {})
     return templates.TemplateResponse("mapping.html", {
         "request": request, "current_user": user, "job": job, "upload": upload,
-        "canonical_fields": canonical_fields, "report_label": REPORT_LABELS[upload["report_type"]],
+        "canonical_fields": canonical_fields,
+        "report_label": REPORT_LABELS.get(upload["report_type"], "(report type not yet set)"),
+        "report_types": REPORT_TYPES, "report_labels": REPORT_LABELS, "platforms": PLATFORMS, "periods": PERIODS,
     })
 
 
@@ -427,6 +435,28 @@ async def save_mapping(request: Request, job_id: str, upload_id: str, user: dict
     job, _client = _authorize_job(user, job_id)
     form = await request.form()
     upload = job["uploads"][upload_id]
+
+    upload["report_type"] = form.get("report_type") or upload["report_type"]
+    upload["platform"] = form.get("platform") or upload["platform"]
+    upload["period"] = form.get("period") or upload["period"]
+
+    if form.get("action") == "retype":
+        # the report type (or platform) changed - re-suggest the column
+        # mapping against the new schema rather than confirming stale
+        # selections that were guessed for a different report type.
+        profile = mapping.load_profile(job["client_id"], upload["report_type"], upload["platform"])
+        upload["mapping"] = (
+            {col: profile.get(col) for col in upload["columns"]} if profile
+            else mapping.suggest_mapping(upload["report_type"], upload["columns"])
+        )
+        upload["validation_note"] = ""
+        storage.save_job(job)
+        return RedirectResponse(f"/jobs/{job_id}/uploads/{upload_id}/mapping", status_code=303)
+
+    if not upload["report_type"]:
+        upload["validation_note"] = "Pick a report type before confirming - without one, this file's data can't be mapped to anything."
+        storage.save_job(job)
+        return RedirectResponse(f"/jobs/{job_id}/uploads/{upload_id}/mapping", status_code=303)
 
     new_mapping = {}
     for col in upload["columns"]:
@@ -440,6 +470,10 @@ async def save_mapping(request: Request, job_id: str, upload_id: str, user: dict
 
     if form.get("save_profile"):
         mapping.save_profile(job["client_id"], upload["report_type"], upload["platform"], new_mapping)
+
+    next_upload_id = _first_unconfirmed_upload(job)
+    if next_upload_id and next_upload_id != upload_id:
+        return RedirectResponse(f"/jobs/{job_id}/uploads/{next_upload_id}/mapping", status_code=303)
 
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 

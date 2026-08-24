@@ -12,6 +12,7 @@ database engine, not a mock. Skipped automatically when no test database
 is reachable (e.g. a machine without Postgres installed); set
 TEST_DATABASE_URL to point at one explicitly.
 """
+import io
 import os
 import uuid
 from pathlib import Path
@@ -164,12 +165,11 @@ def test_full_http_flow_practice_to_download(http_client):
     with open(tb_path, "rb") as fh:
         resp = c.post(
             f"/jobs/{job_id}/uploads",
-            data={"report_type": "trial_balance", "period": "current", "platform": "xero"},
-            files={"file": (tb_path.name, fh,
-                             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            files={"files": (tb_path.name, fh,
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
             follow_redirects=False,
         )
-    assert resp.status_code == 303
+    assert resp.status_code == 303  # Xero-native TB auto-confirms straight through, no mapping-confirm redirect
 
     job = storage.get_job(job_id)
     assert len(job["uploads"]) == 1
@@ -289,3 +289,120 @@ def test_cross_practice_access_denied(http_client):
 
     resp = other.get(f"/practices/{practice_a_id}", follow_redirects=False)
     assert resp.status_code == 404
+
+
+def _make_pdf_trial_balance() -> bytes:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle
+
+    rows = [
+        ["Account Code", "Account Name", "Debit", "Credit"],
+        ["1000", "Bank Current Account", "12000.00", ""],
+        ["4000", "Sales", "", "75000.00"],
+    ]
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    table = Table(rows)
+    table.setStyle(TableStyle([("GRID", (0, 0), (-1, -1), 0.5, colors.black)]))
+    doc.build([table])
+    return buf.getvalue()
+
+
+def test_bulk_upload_mixed_files_auto_detect_and_confirm_chain(http_client):
+    """The real workflow this feature exists for: drop in several files of
+    different kinds and formats at once (a genuine Xero export, a generic
+    CSV, and a PDF) with no report-type/platform/period picked up front.
+    The Xero file should auto-confirm silently (real parser validation, not
+    a guess); the other two should get queued for a quick confirm each,
+    chained one after another; and the PDF (uploaded alongside a current-
+    period TB) should be guessed as the comparative TB via the "second
+    upload of this type" heuristic, since it has no period text of its own."""
+    pytest.importorskip("reportlab", reason="reportlab is a dev-only dependency for building test PDFs")
+    c = http_client
+    practice_id = _signup(c, admin_email="bulk@acme.test")
+
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Bulk Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+        "comparative_period_start": "2024-01-01", "comparative_period_end": "2024-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    tb_path = SAMPLE_DIR / "trial_balance_current_xero.xlsx"
+    bank_path = SAMPLE_DIR / "bank_statement_current.csv"
+    files_payload = [
+        ("files", (tb_path.name, tb_path.read_bytes(),
+                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+        ("files", (bank_path.name, bank_path.read_bytes(), "text/csv")),
+        ("files", ("prior_year_tb.pdf", _make_pdf_trial_balance(), "application/pdf")),
+    ]
+    resp = c.post(f"/jobs/{job_id}/uploads", files=files_payload, follow_redirects=False)
+    assert resp.status_code == 303
+
+    from app import storage
+    job = storage.get_job(job_id)
+    by_filename = {u["filename"]: u for u in job["uploads"].values()}
+    assert by_filename[tb_path.name]["confirmed"] is True  # Xero-native: no confirm step needed
+    assert by_filename[tb_path.name]["report_type"] == "trial_balance"
+    assert by_filename[bank_path.name]["report_type"] == "bank_statement"
+    assert by_filename["prior_year_tb.pdf"]["report_type"] == "trial_balance"
+
+    # walk the confirm chain the redirect points at, for every unconfirmed upload
+    location = resp.headers["location"]
+    hops = 0
+    while location and "/mapping" in location and hops < 5:
+        hops += 1
+        assert c.get(location).status_code == 200
+        resp = c.post(location, data={"action": "confirm"}, follow_redirects=False)
+        assert resp.status_code == 303
+        location = resp.headers["location"]
+    assert hops == 2  # bank statement + PDF both needed a confirm; the Xero file didn't
+
+    job = storage.get_job(job_id)
+    assert all(u["confirmed"] for u in job["uploads"].values())
+    by_filename = {u["filename"]: u for u in job["uploads"].values()}
+    assert by_filename["prior_year_tb.pdf"]["period"] == "comparative"
+
+    resp = c.post(f"/jobs/{job_id}/generate", follow_redirects=False)
+    assert resp.status_code == 303
+    resp = c.get(f"/jobs/{job_id}/download")
+    assert resp.status_code == 200
+    assert len(resp.content) > 1000
+
+
+def test_upload_route_rejects_confirm_with_no_report_type(http_client):
+    """Guard against silently confirming an upload the system couldn't
+    classify and the user didn't pick a type for either - that would mark
+    it 'confirmed' with an empty mapping, contributing nothing to the
+    generated workbook with no visible sign anything was wrong."""
+    c = http_client
+    practice_id = _signup(c, admin_email="guard@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Guard Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.post(
+        f"/jobs/{job_id}/uploads",
+        files={"files": ("mystery.csv", b"Foo,Bar\n1,2\n", "text/csv")},
+        follow_redirects=False,
+    )
+    location = resp.headers["location"]
+    assert "/mapping" in location
+
+    from app import storage
+    job = storage.get_job(job_id)
+    upload = next(iter(job["uploads"].values()))
+    assert upload["report_type"] == ""
+
+    resp = c.post(location, data={"action": "confirm"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == location  # bounced back, not confirmed
+
+    job = storage.get_job(job_id)
+    upload = next(iter(job["uploads"].values()))
+    assert upload["confirmed"] is False

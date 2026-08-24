@@ -50,7 +50,12 @@ class FileDataSource(DataSource):
     def _load(self) -> pd.DataFrame:
         if self._df is None:
             handle = io.BytesIO(self._buffer) if self._buffer is not None else self.file_path
-            if self._suffix in (".xlsx", ".xls"):
+            if self._suffix == ".pdf":
+                from app.pdf_extraction import extract_table_from_pdf
+
+                content = self._buffer if self._buffer is not None else self.file_path.read_bytes()
+                self._df = extract_table_from_pdf(content)
+            elif self._suffix in (".xlsx", ".xls"):
                 self._df = pd.read_excel(handle, dtype=str)
             else:
                 self._df = pd.read_csv(handle, dtype=str, keep_default_na=False)

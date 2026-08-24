@@ -31,7 +31,7 @@
     <tr><th>Report</th><th>Period</th><th>Platform</th><th>File</th><th>Mapping</th><th>Period check</th><th></th></tr>
     {% for u in job.uploads.values() %}
     <tr>
-      <td>{{ report_labels[u.report_type] }}</td>
+      <td>{{ report_labels.get(u.report_type, "(unknown - needs review)") }}</td>
       <td>{{ u.period }}</td>
       <td>{{ u.platform }}</td>
       <td class="muted">{{ u.filename }}</td>
@@ -88,36 +88,11 @@
 </div>
 
 <div class="card">
-  <h2>Upload a report</h2>
+  <h2>Upload reports</h2>
+  <p class="muted">Drop in as many files as you have for this job at once - trial balance, aged debtors/creditors, nominal activity, bank statement, VAT return, whatever you've got, in any order. The system figures out what each one is and which period it covers; you'll get a quick chance to confirm (or correct) that guess before it's used, one file at a time, right after upload.</p>
   <form method="post" action="/jobs/{{ job.id }}/uploads" enctype="multipart/form-data">
-    <div class="row">
-      <div>
-        <label>Report type</label>
-        <select name="report_type" required>
-          {% for rt in report_types %}
-          <option value="{{ rt }}">{{ report_labels[rt] }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div>
-        <label>Period</label>
-        <select name="period" required>
-          {% for p in periods %}
-          <option value="{{ p }}">{{ p }}</option>
-          {% endfor %}
-        </select>
-      </div>
-      <div>
-        <label>Source platform</label>
-        <select name="platform" required>
-          {% for p in platforms %}
-          <option value="{{ p }}">{{ p }}</option>
-          {% endfor %}
-        </select>
-      </div>
-    </div>
-    <label>File (CSV or XLSX export)</label>
-    <input type="file" name="file" required accept=".csv,.xlsx,.xls">
+    <label>Files (CSV, XLSX, or PDF export)</label>
+    <input type="file" name="files" required multiple accept=".csv,.xlsx,.xls,.pdf">
     <div style="margin-top:16px"><button type="submit">Upload</button></div>
   </form>
 </div>

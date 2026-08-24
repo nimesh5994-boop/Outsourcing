@@ -1,13 +1,44 @@
 {% extends "base.html" %}
 {% block content %}
 <div class="card">
-  <h1>Confirm column mapping</h1>
-  <p class="muted">{{ report_label }} &mdash; {{ upload.filename }} ({{ upload.platform }}, {{ upload.period }} period)</p>
-  <p class="muted">Expected period: {{ job.current_period_start if upload.period == 'current' else job.comparative_period_start }} to {{ job.current_period_end if upload.period == 'current' else job.comparative_period_end }} &mdash; this file's own layout can't be auto-checked against that, so please confirm it covers the right dates before continuing.</p>
+  <h1>Confirm what this file is</h1>
+  <p class="muted">{{ upload.filename }}{% if upload.detection_confidence is defined %} &mdash; guessed with {{ (upload.detection_confidence * 100) | round | int }}% confidence{% endif %}. Check the report type, platform and period below match the file, then confirm the column mapping underneath.</p>
   {% if upload.validation_note %}<p style="color:#b42318; font-size:13px;">&#9888; {{ upload.validation_note }}</p>{% endif %}
-  <p class="muted">We've matched columns from your export to the fields the working paper needs. Review and adjust any that look wrong, then confirm.</p>
+  {% if upload.period_check and upload.period_check.status == 'mismatch' %}<p style="color:#b42318; font-size:13px;">&#9888; {{ upload.period_check.message }}</p>{% endif %}
 
   <form method="post" action="/jobs/{{ job.id }}/uploads/{{ upload.id }}/mapping">
+    <div class="row">
+      <div>
+        <label>Report type</label>
+        <select name="report_type">
+          {% if not upload.report_type %}<option value="" selected>-- select --</option>{% endif %}
+          {% for rt in report_types %}
+          <option value="{{ rt }}" {% if upload.report_type == rt %}selected{% endif %}>{{ report_labels[rt] }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Source platform</label>
+        <select name="platform">
+          {% for p in platforms %}
+          <option value="{{ p }}" {% if upload.platform == p %}selected{% endif %}>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Period</label>
+        <select name="period">
+          {% for p in periods %}
+          <option value="{{ p }}" {% if upload.period == p %}selected{% endif %}>{{ p }}</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <p class="muted" style="margin-top:8px">Expected period: {{ job.current_period_start if upload.period == 'current' else job.comparative_period_start }} to {{ job.current_period_end if upload.period == 'current' else job.comparative_period_end }}.
+      Changed the report type or platform above? <button type="submit" name="action" value="retype" class="secondary">Update fields below</button> first, so the mapping matches the right schema.</p>
+
+    {% if canonical_fields %}
+    <h2 style="margin-top:20px">Column mapping</h2>
     <div class="mapping-row" style="font-weight:700; color:#6b7280; font-size:12px; text-transform:uppercase;">
       <div class="src">Column in your file</div>
       <div style="flex:1">Maps to</div>
@@ -27,9 +58,12 @@
     <label style="margin-top:20px"><input type="checkbox" name="save_profile" value="1" checked style="width:auto; display:inline-block; margin-right:6px;">
       Remember this mapping for {{ job.client_name }}'s future {{ report_label }} uploads from {{ upload.platform }}
     </label>
+    {% else %}
+    <p class="muted" style="margin-top:20px">Pick a report type above to see its column mapping.</p>
+    {% endif %}
 
     <div style="margin-top:16px">
-      <button type="submit">Confirm mapping</button>
+      <button type="submit" name="action" value="confirm">Confirm</button>
       <a class="button secondary" href="/jobs/{{ job.id }}">Cancel</a>
     </div>
   </form>

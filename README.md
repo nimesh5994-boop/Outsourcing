@@ -204,6 +204,38 @@ silently produces wrong numbers on them. What was true on real client data:
 See `app/xero_reports.py` for the parsers and the docstrings for the exact
 quirks each one works around.
 
+## Uploading: bulk, auto-detected, PDF-aware
+
+Staff don't pick a report type, platform, or period before uploading -
+they just drop in every file they have for the job at once (CSV, XLSX, or
+PDF, in any order), and the system works out what each one is:
+
+1. **Xero-native detection first** (`app/document_detection.py`,
+   `try_xero_native`): each file is actually run through the Xero-specific
+   parsers (see above) - if one parses cleanly, that's a structural
+   validation, not a guess, so the file auto-confirms immediately with no
+   review step, exactly as before this feature existed.
+2. **Otherwise, guess and confirm**: report type is scored against every
+   report type's column-alias dictionary (reusing `mapping.ALIASES`);
+   platform falls back to a light column-name heuristic (mostly "other",
+   since only Xero has a dedicated parser); period is guessed from
+   whatever date signal is available (Xero-style title-row text, or the
+   latest date in a date-shaped column), falling back to "a second upload
+   of this same report type is probably last year's comparative" when the
+   report type has no per-row dates at all (a TB, an aged listing, a VAT
+   return). None of this is trusted blind - each file that isn't a
+   Xero-native match is queued for a one-page confirm (report type/
+   platform/period + column mapping, all editable) before it's used,
+   chained one file after another until every upload from that batch is
+   confirmed.
+3. **PDF support** (`app/pdf_extraction.py`, via `pdfplumber`): for a
+   client who only has a PDF, the largest table found across the PDF's
+   pages is extracted into the same shape as a CSV/XLSX upload and flows
+   through the identical detection/mapping/confirm path. Deliberately
+   narrow: one dominant table per file, text-based PDFs only (no OCR - a
+   scanned/image-only PDF raises a clear error asking for a re-export
+   instead of silently extracting nothing).
+
 ## What gets checked
 
 | Check | What it does |
@@ -345,6 +377,8 @@ app/
   mapping.py           column-alias suggestions + per-client mapping profiles (generic/non-Xero path)
   parsers.py            generic CSV/XLSX loading + column mapping; DataSource abstraction
   xero_reports.py        Xero-specific report parsers (see above)
+  document_detection.py   auto-detects report type/platform/period for an upload
+  pdf_extraction.py        pdfplumber-based table extraction for PDF uploads
   recon.py                 the reconciliation/cross-check engine
   anomaly_detection.py       cross-transaction checks (miscoding, duplicates, unusual posting dates)
   compliance_checks.py        data-driven checklist checks (DLA/S455, dividends, petty cash, loans)
@@ -456,12 +490,24 @@ pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
 
+`tests/test_document_detection.py` covers the auto-detection/PDF-extraction
+unit logic directly (no database needed): Xero-native matching, the
+column-corruption regression (see git history - a failed Xero-native
+parse attempt used to permanently corrupt a file's cached column headers
+for every later use on the same upload), report-type/platform/period
+guessing, and PDF table extraction (including a scanned/no-table PDF
+raising a clear error). Its PDF cases build a real test PDF via
+`reportlab`, a dev-only dependency (`requirements-dev.txt`) - they skip
+automatically if it isn't installed.
+
 `tests/test_storage_and_routes.py` exercises the Postgres-backed storage
 layer, the full practice -> template -> client -> job -> upload ->
-generate -> download HTTP flow, and the access-control model (signup,
-login, wrong password, unauthenticated redirect, a preparer scoped to
-only their granted clients, a manager blocked from user management, and
-cross-practice access denied) against a real (throwaway) Postgres schema
+generate -> download HTTP flow (including a bulk upload of mixed Xero/
+CSV/PDF files walked through the auto-detect confirm chain), and the
+access-control model (signup, login, wrong password, unauthenticated
+redirect, a preparer scoped to only their granted clients, a manager
+blocked from user management, and cross-practice access denied) against a
+real (throwaway) Postgres schema
 - the part of the app the other tests never touch, since they all work
 with in-memory DataFrames/fixtures directly. It's skipped automatically
 if no test database is reachable; point `TEST_DATABASE_URL` at one (or
