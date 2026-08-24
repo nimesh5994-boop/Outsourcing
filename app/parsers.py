@@ -6,6 +6,7 @@ implementation is `FileDataSource` (reads an uploaded CSV/XLSX), but a
 without touching mapping, reconciliation or the Excel builder — they all
 just consume a canonical DataFrame, however it was produced.
 """
+import io
 from abc import ABC, abstractmethod
 from pathlib import Path
 
@@ -25,18 +26,34 @@ class DataSource(ABC):
 
 
 class FileDataSource(DataSource):
-    """Loads a CSV or XLSX export exactly as downloaded from the platform."""
+    """Loads a CSV or XLSX export exactly as downloaded from the platform -
+    either from a local path, or from raw bytes already held in memory (the
+    case once uploaded files live in Postgres rather than on disk: a
+    filesystem path wouldn't survive from one serverless invocation to the
+    next, so the upload route reads the file into bytes once and every
+    later step - mapping, parsing, generation - works from those bytes
+    instead of re-opening a path that a different instance's ephemeral
+    filesystem never had)."""
 
-    def __init__(self, file_path: str | Path):
-        self.file_path = Path(file_path)
+    def __init__(self, source: str | Path | bytes, filename: str | None = None):
+        if isinstance(source, (bytes, bytearray)):
+            if filename is None:
+                raise ValueError("filename is required when source is raw bytes (needed to tell CSV from XLSX)")
+            self._buffer: bytes | None = bytes(source)
+            self._suffix = Path(filename).suffix.lower()
+        else:
+            self.file_path = Path(source)
+            self._buffer = None
+            self._suffix = self.file_path.suffix.lower()
         self._df = None
 
     def _load(self) -> pd.DataFrame:
         if self._df is None:
-            if self.file_path.suffix.lower() in (".xlsx", ".xls"):
-                self._df = pd.read_excel(self.file_path, dtype=str)
+            handle = io.BytesIO(self._buffer) if self._buffer is not None else self.file_path
+            if self._suffix in (".xlsx", ".xls"):
+                self._df = pd.read_excel(handle, dtype=str)
             else:
-                self._df = pd.read_csv(self.file_path, dtype=str, keep_default_na=False)
+                self._df = pd.read_csv(handle, dtype=str, keep_default_na=False)
             self._df.columns = [str(c).strip() for c in self._df.columns]
         return self._df
 

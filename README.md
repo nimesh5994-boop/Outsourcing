@@ -325,9 +325,13 @@ app/
   xlformulas.py                    Excel formula-string builders (SUMPRODUCT-based, see above)
   excel_builder.py                  builds the final .xlsx: house-style headers, numbered index,
                                      value-based AND formula-linked schedule builders
-  storage.py                         filesystem-backed Practice/Template/Client/Job storage
+  storage.py                         Postgres-backed Practice/Template/Client/Job storage
+                                       (entities/files/mapping_profiles tables; files stored as BYTEA)
   main.py                             FastAPI app + routes
   templates/, static/                  the (minimal) web UI
+api/
+  index.py                             Vercel entrypoint - re-exports app.main:app as an ASGI callable
+vercel.json                            Vercel build/route config (Python runtime, api/index.py)
 ```
 
 `DataSource` in `parsers.py` is the seam for live API connectors later
@@ -338,15 +342,56 @@ canonical DataFrame.
 
 ## Running it
 
+Storage is Postgres-backed (see Architecture), so a `DATABASE_URL` is
+required even for local runs - point it at a local Postgres or a free Neon
+branch. Tables are created automatically on first connection (see
+`SCHEMA_STATEMENTS` in `storage.py`); there's no separate migration step.
+
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
+export DATABASE_URL="postgresql://user:password@host:5432/dbname"
 uvicorn app.main:app --reload
 ```
 
 Then open http://127.0.0.1:8000 - create a client, start a job with the
 period dates, upload the reports you have, confirm any mapping that needs
 review, and generate.
+
+## Deployment (Vercel + Neon)
+
+The app runs as a single FastAPI ASGI app behind Vercel's Python runtime:
+`api/index.py` re-exports `app.main:app`, and `vercel.json` routes every
+request to it. Because serverless invocations don't share a filesystem,
+all state (practices, templates, clients, jobs, uploaded/generated files)
+lives in Postgres rather than on disk - see `storage.py`.
+
+To deploy:
+
+1. Create a Postgres database (a [Neon](https://neon.tech) project works
+   well - serverless, scales to zero, has a generous free tier). Use a
+   pooled connection string (Neon's `-pooler` host) since each serverless
+   invocation opens its own connection.
+2. In the Vercel project settings, set the environment variable
+   `DATABASE_URL` to that connection string. Never commit it to git.
+3. `vercel deploy` (or connect the repo in the Vercel dashboard for
+   git-push deploys). No other build step is needed - `requirements.txt`
+   is installed automatically by the Python runtime.
+
+On first request after deploy, `storage.py` creates its tables
+(`entities`, `files`, `mapping_profiles`) if they don't already exist, so
+there's nothing else to provision.
+
+**Known constraint:** uploaded/template/generated files are stored as
+Postgres `BYTEA` rather than in a separate object store, to keep the
+credential footprint to just `DATABASE_URL`. This is simplest-thing-that-
+works for typical working-paper file sizes (tens of KB to a few MB), but
+two limits are worth knowing about: Vercel serverless functions cap
+response payload size (currently 4.5MB on the default plan), and very
+large template/output workbooks will hit that before Postgres itself
+becomes a problem. If that happens, move `save_file`/`load_file` in
+`storage.py` to an object store (Vercel Blob or S3) - callers already
+just pass/receive bytes, so the swap is contained to those two functions.
 
 ## Tests
 
@@ -369,6 +414,15 @@ automatically unless that dev-only dependency is installed:
 pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
+
+`tests/test_storage_and_routes.py` exercises the Postgres-backed storage
+layer and the full practice -> template -> client -> job -> upload ->
+generate -> download HTTP flow against a real (throwaway) Postgres schema
+- the part of the app the other tests never touch, since they all work
+with in-memory DataFrames/fixtures directly. It's skipped automatically
+if no test database is reachable; point `TEST_DATABASE_URL` at one (or
+run Postgres locally on the default port with a `wpa_test`/`wpa_test`
+role and database) to run it.
 
 ## Known limitations / roadmap
 

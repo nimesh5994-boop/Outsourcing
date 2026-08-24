@@ -1,20 +1,33 @@
-"""Filesystem-backed storage for clients and jobs.
+"""Postgres-backed storage for practices, templates, clients, jobs, and the
+files that belong to them (uploaded reports, template .xlsx files,
+generated working papers).
 
-Deliberately simple (JSON files on disk) for an internal single-instance
-tool. Swapping this for a real database later is a contained change since
-every other module only talks to the functions in this file.
+Started out as JSON files on the local filesystem - fine for a single
+long-running server, but broken on a serverless platform (Vercel): each
+invocation can land on a different instance with its own ephemeral
+filesystem, so a file written during upload might not be there when
+generate() runs a moment later. Postgres (Neon) fixes that by making state
+shared and durable across invocations; small/medium files (uploaded
+reports, template workbooks, generated packs) are stored as BYTEA in the
+same database rather than adding a second storage service - simplest
+architecture that actually works on Vercel, with a documented upgrade path
+to real object storage (Vercel Blob / S3) if file sizes grow enough that
+BYTEA and response-size limits become a real constraint (see README).
+
+Two generic tables back nearly everything:
+  entities(kind, id, parent_id, data JSONB) - practices/templates/clients/jobs,
+    each just a dict, the same shape they were as JSON files.
+  files(id, job_id, kind, filename, content BYTEA) - the raw bytes for an
+    upload, a template, or a generated output workbook.
+mapping_profiles is its own small table (composite key, not a blob) since
+it's looked up by (client, report_type, platform), not by id.
 """
-import json
+import os
 import uuid
 from datetime import datetime
-from pathlib import Path
 
-import openpyxl
-
-DATA_DIR = Path("data")
-PRACTICES_DIR = DATA_DIR / "practices"
-CLIENTS_DIR = DATA_DIR / "clients"
-JOBS_DIR = DATA_DIR / "jobs"
+import psycopg
+from psycopg.types.json import Jsonb
 
 # Default customization config for a newly-uploaded template. A practice
 # edits this to control which schedules get generated, where each one
@@ -53,20 +66,107 @@ DEFAULT_TEMPLATE_CONFIG = {
     "numbering": {"style": "sequential", "start_at": 1},
 }
 
+SCHEMA_STATEMENTS = [
+    """CREATE TABLE IF NOT EXISTS entities (
+        kind TEXT NOT NULL,
+        id TEXT NOT NULL,
+        parent_id TEXT,
+        data JSONB NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+        PRIMARY KEY (kind, id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_entities_kind_parent ON entities (kind, parent_id)",
+    """CREATE TABLE IF NOT EXISTS files (
+        id TEXT PRIMARY KEY,
+        job_id TEXT,
+        kind TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        content BYTEA NOT NULL,
+        content_type TEXT,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_files_job ON files (job_id)",
+    """CREATE TABLE IF NOT EXISTS mapping_profiles (
+        client_id TEXT NOT NULL,
+        report_type TEXT NOT NULL,
+        platform TEXT NOT NULL,
+        mapping JSONB NOT NULL,
+        PRIMARY KEY (client_id, report_type, platform)
+    )""",
+]
+
+_conn: psycopg.Connection | None = None
+
+
+def _connect() -> psycopg.Connection:
+    dsn = os.environ["DATABASE_URL"]
+    conn = psycopg.connect(dsn, autocommit=True)
+    with conn.cursor() as cur:
+        for stmt in SCHEMA_STATEMENTS:
+            cur.execute(stmt)
+    return conn
+
+
+def _get_conn() -> psycopg.Connection:
+    """Reuses one connection for the life of the process (a serverless
+    instance can be reused across several invocations) - reconnects
+    transparently if it's been closed or dropped (idle timeout, cold
+    start)."""
+    global _conn
+    if _conn is None or _conn.closed:
+        _conn = _connect()
+    return _conn
+
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:10]}"
 
 
-def _read_json(path: Path) -> dict | None:
-    if path.exists():
-        return json.loads(path.read_text())
-    return None
+# ---------- generic entity storage (practices/templates/clients/jobs) ----------
+
+def _get_entity(kind: str, entity_id: str) -> dict | None:
+    with _get_conn().cursor() as cur:
+        cur.execute("SELECT data FROM entities WHERE kind = %s AND id = %s", (kind, entity_id))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 
-def _write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, default=str))
+def _put_entity(kind: str, entity_id: str, parent_id: str | None, data: dict) -> None:
+    with _get_conn().cursor() as cur:
+        cur.execute(
+            """INSERT INTO entities (kind, id, parent_id, data) VALUES (%s, %s, %s, %s)
+               ON CONFLICT (kind, id) DO UPDATE SET data = EXCLUDED.data, parent_id = EXCLUDED.parent_id""",
+            (kind, entity_id, parent_id, Jsonb(data)),
+        )
+
+
+def _list_entities(kind: str, parent_id: str | None = None, order_by_id_desc: bool = False) -> list[dict]:
+    order = "id DESC" if order_by_id_desc else "id ASC"
+    with _get_conn().cursor() as cur:
+        if parent_id is None:
+            cur.execute(f"SELECT data FROM entities WHERE kind = %s ORDER BY {order}", (kind,))
+        else:
+            cur.execute(f"SELECT data FROM entities WHERE kind = %s AND parent_id = %s ORDER BY {order}", (kind, parent_id))
+        return [row[0] for row in cur.fetchall()]
+
+
+# ---------- file storage (uploads, templates, generated output) ----------
+
+def save_file(kind: str, job_id: str | None, filename: str, content: bytes, content_type: str | None = None) -> str:
+    file_id = _new_id("file")
+    with _get_conn().cursor() as cur:
+        cur.execute(
+            "INSERT INTO files (id, job_id, kind, filename, content, content_type) VALUES (%s, %s, %s, %s, %s, %s)",
+            (file_id, job_id, kind, filename, content, content_type),
+        )
+    return file_id
+
+
+def load_file(file_id: str) -> bytes | None:
+    with _get_conn().cursor() as cur:
+        cur.execute("SELECT content FROM files WHERE id = %s", (file_id,))
+        row = cur.fetchone()
+        return bytes(row[0]) if row else None
 
 
 # ---------- practices ----------
@@ -74,32 +174,25 @@ def _write_json(path: Path, payload: dict) -> None:
 def create_practice(name: str) -> dict:
     practice_id = _new_id("practice")
     practice = {"id": practice_id, "name": name, "created_at": datetime.utcnow().isoformat(), "default_template_id": None}
-    _write_json(PRACTICES_DIR / practice_id / "info.json", practice)
+    _put_entity("practice", practice_id, None, practice)
     return practice
 
 
 def get_practice(practice_id: str) -> dict | None:
-    return _read_json(PRACTICES_DIR / practice_id / "info.json")
+    return _get_entity("practice", practice_id)
 
 
 def save_practice(practice: dict) -> None:
-    _write_json(PRACTICES_DIR / practice["id"] / "info.json", practice)
+    _put_entity("practice", practice["id"], None, practice)
 
 
 def list_practices() -> list[dict]:
-    if not PRACTICES_DIR.exists():
-        return []
-    out = []
-    for d in sorted(PRACTICES_DIR.iterdir()):
-        info = _read_json(d / "info.json")
-        if info:
-            out.append(info)
-    return out
+    return _list_entities("practice")
 
 
 # ---------- templates (scoped to a practice) ----------
 
-def _normalise_template_file(file_path: Path) -> dict:
+def _normalise_template_file(content: bytes) -> tuple[bytes, dict]:
     """One-time cleanup at upload time (not repeated per job): loading and
     re-saving through openpyxl drops calcChain/printer-settings bloat and
     shrinks the file substantially - confirmed on a real 63-sheet template,
@@ -107,42 +200,46 @@ def _normalise_template_file(file_path: Path) -> dict:
     It also drops embedded images and dropdown data-validation lists, which
     is the deliberate trade-off: doing this once at setup keeps every later
     job generation fast, at the cost of re-adding a logo/validation lists
-    once per template rather than never. Falls back to the original file
-    untouched if it can't be parsed."""
-    original_size = file_path.stat().st_size
+    once per template rather than never. Falls back to the original bytes
+    untouched if the file can't be parsed."""
+    import io
+
+    import openpyxl
+
+    original_size = len(content)
     try:
-        wb = openpyxl.load_workbook(file_path)
-        wb.save(file_path)
+        wb = openpyxl.load_workbook(io.BytesIO(content))
+        buf = io.BytesIO()
+        wb.save(buf)
+        normalised_content = buf.getvalue()
         normalised = True
     except Exception:
+        normalised_content = content
         normalised = False
-    return {
+    return normalised_content, {
         "normalised": normalised,
         "original_size_bytes": original_size,
-        "stored_size_bytes": file_path.stat().st_size,
+        "stored_size_bytes": len(normalised_content),
     }
 
 
 def create_template(practice_id: str, name: str, file_bytes: bytes, filename: str) -> dict:
     template_id = _new_id("template")
-    template_dir = PRACTICES_DIR / practice_id / "templates" / template_id
-    template_dir.mkdir(parents=True, exist_ok=True)
-    file_path = template_dir / filename
-    file_path.write_bytes(file_bytes)
-    normalisation = _normalise_template_file(file_path)
+    normalised_content, normalisation = _normalise_template_file(file_bytes)
+    file_id = save_file("template", None, filename, normalised_content)
 
     template = {
         "id": template_id,
         "practice_id": practice_id,
         "name": name,
         "filename": filename,
-        "file_path": str(file_path),
+        "file_id": file_id,
         "created_at": datetime.utcnow().isoformat(),
         "version": 1,
         "config": DEFAULT_TEMPLATE_CONFIG,
         "normalisation": normalisation,
     }
-    _write_json(template_dir / "info.json", template)
+    _put_entity("template", template_id, practice_id, template)
 
     practice = get_practice(practice_id)
     if practice and not practice.get("default_template_id"):
@@ -152,24 +249,17 @@ def create_template(practice_id: str, name: str, file_bytes: bytes, filename: st
 
 
 def get_template(practice_id: str, template_id: str) -> dict | None:
-    return _read_json(PRACTICES_DIR / practice_id / "templates" / template_id / "info.json")
+    template = _get_entity("template", template_id)
+    return template if template and template.get("practice_id") == practice_id else None
 
 
 def save_template(template: dict) -> None:
     template["version"] = template.get("version", 1) + 1
-    _write_json(PRACTICES_DIR / template["practice_id"] / "templates" / template["id"] / "info.json", template)
+    _put_entity("template", template["id"], template["practice_id"], template)
 
 
 def list_templates(practice_id: str) -> list[dict]:
-    templates_dir = PRACTICES_DIR / practice_id / "templates"
-    if not templates_dir.exists():
-        return []
-    out = []
-    for d in sorted(templates_dir.iterdir()):
-        info = _read_json(d / "info.json")
-        if info:
-            out.append(info)
-    return out
+    return _list_entities("template", practice_id)
 
 
 # ---------- clients (scoped to a practice) ----------
@@ -180,23 +270,16 @@ def create_client(practice_id: str, name: str, template_id: str | None = None) -
         "id": client_id, "practice_id": practice_id, "name": name,
         "template_id": template_id, "created_at": datetime.utcnow().isoformat(),
     }
-    _write_json(CLIENTS_DIR / client_id / "info.json", client)
+    _put_entity("client", client_id, practice_id, client)
     return client
 
 
 def get_client(client_id: str) -> dict | None:
-    return _read_json(CLIENTS_DIR / client_id / "info.json")
+    return _get_entity("client", client_id)
 
 
 def list_clients(practice_id: str | None = None) -> list[dict]:
-    if not CLIENTS_DIR.exists():
-        return []
-    out = []
-    for d in sorted(CLIENTS_DIR.iterdir()):
-        info = _read_json(d / "info.json")
-        if info and (practice_id is None or info.get("practice_id") == practice_id):
-            out.append(info)
-    return out
+    return _list_entities("client", practice_id)
 
 
 # ---------- jobs ----------
@@ -221,7 +304,7 @@ def create_job(
         "status": "draft",
         "uploads": {},
     }
-    _write_json(JOBS_DIR / job_id / "job.json", job)
+    _put_entity("job", job_id, client_id, job)
     return job
 
 
@@ -233,41 +316,19 @@ def _period_label(start: str, end: str) -> str:
 
 
 def get_job(job_id: str) -> dict | None:
-    return _read_json(JOBS_DIR / job_id / "job.json")
+    return _get_entity("job", job_id)
 
 
 def save_job(job: dict) -> None:
-    _write_json(JOBS_DIR / job["id"] / "job.json", job)
+    _put_entity("job", job["id"], job["client_id"], job)
 
 
 def list_jobs(client_id: str | None = None) -> list[dict]:
-    if not JOBS_DIR.exists():
-        return []
-    out = []
-    for d in sorted(JOBS_DIR.iterdir(), reverse=True):
-        job = _read_json(d / "job.json")
-        if job and (client_id is None or job["client_id"] == client_id):
-            out.append(job)
-    return out
+    return _list_entities("job", client_id, order_by_id_desc=True)
 
 
-def job_dir(job_id: str) -> Path:
-    return JOBS_DIR / job_id
-
-
-def uploads_dir(job_id: str) -> Path:
-    d = JOBS_DIR / job_id / "uploads"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def output_dir(job_id: str) -> Path:
-    d = JOBS_DIR / job_id / "output"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
-def add_upload(job: dict, report_type: str, period: str, platform: str, filename: str, saved_path: str, columns: list[str]) -> str:
+def add_upload(job: dict, report_type: str, period: str, platform: str, filename: str, content: bytes, columns: list[str]) -> str:
+    file_id = save_file("upload", job["id"], filename, content)
     upload_id = _new_id("upload")
     job["uploads"][upload_id] = {
         "id": upload_id,
@@ -275,10 +336,31 @@ def add_upload(job: dict, report_type: str, period: str, platform: str, filename
         "period": period,
         "platform": platform,
         "filename": filename,
-        "path": saved_path,
+        "file_id": file_id,
         "columns": columns,
         "mapping": None,
         "confirmed": False,
     }
     save_job(job)
     return upload_id
+
+
+# ---------- reusable client mapping profiles ----------
+
+def load_mapping_profile(client_id: str, report_type: str, platform: str) -> dict | None:
+    with _get_conn().cursor() as cur:
+        cur.execute(
+            "SELECT mapping FROM mapping_profiles WHERE client_id = %s AND report_type = %s AND platform = %s",
+            (client_id, report_type, platform),
+        )
+        row = cur.fetchone()
+        return row[0] if row else None
+
+
+def save_mapping_profile(client_id: str, report_type: str, platform: str, mapping: dict) -> None:
+    with _get_conn().cursor() as cur:
+        cur.execute(
+            """INSERT INTO mapping_profiles (client_id, report_type, platform, mapping) VALUES (%s, %s, %s, %s)
+               ON CONFLICT (client_id, report_type, platform) DO UPDATE SET mapping = EXCLUDED.mapping""",
+            (client_id, report_type, platform, Jsonb(mapping)),
+        )

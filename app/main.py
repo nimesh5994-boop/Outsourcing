@@ -1,7 +1,8 @@
+import io
 from pathlib import Path
 
 from fastapi import FastAPI, Form, Request, UploadFile
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -174,12 +175,9 @@ def save_tax_inputs(
 async def upload_file(job_id: str, report_type: str = Form(...), period: str = Form(...),
                        platform: str = Form(...), file: UploadFile = None):
     job = storage.get_job(job_id)
-    dest_dir = storage.uploads_dir(job_id)
-    saved_path = dest_dir / f"{report_type}__{period}__{file.filename}"
     content = await file.read()
-    saved_path.write_bytes(content)
 
-    source = parsers.FileDataSource(saved_path)
+    source = parsers.FileDataSource(content, filename=file.filename)
     expected_end = _expected_period_end(job, period)
 
     # Xero exports have a known, specific layout (grouped reports, embedded
@@ -200,7 +198,7 @@ async def upload_file(job_id: str, report_type: str = Form(...), period: str = F
         else:
             period_check = xero_reports.check_period(xero_reports.extract_period_info(source), expected_end)
             columns = source.raw_columns()
-            upload_id = storage.add_upload(job, report_type, period, platform, file.filename, str(saved_path), columns)
+            upload_id = storage.add_upload(job, report_type, period, platform, file.filename, content, columns)
             job = storage.get_job(job_id)
             job["uploads"][upload_id]["mapping"] = {}
             job["uploads"][upload_id]["confirmed"] = True
@@ -210,7 +208,7 @@ async def upload_file(job_id: str, report_type: str = Form(...), period: str = F
             return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
     columns = source.raw_columns()
-    upload_id = storage.add_upload(job, report_type, period, platform, file.filename, str(saved_path), columns)
+    upload_id = storage.add_upload(job, report_type, period, platform, file.filename, content, columns)
 
     # try a saved profile first, fall back to alias-based suggestion
     profile = mapping.load_profile(job["client_id"], report_type, platform)
@@ -294,7 +292,8 @@ def _load_canonical_data(job: dict) -> dict:
     for upload in job["uploads"].values():
         if not upload["confirmed"]:
             continue
-        source = parsers.FileDataSource(upload["path"])
+        content = storage.load_file(upload["file_id"])
+        source = parsers.FileDataSource(content, filename=upload["filename"])
         report_type = upload["report_type"]
 
         if upload.get("xero_native"):
@@ -392,10 +391,11 @@ def generate(job_id: str):
 
     client = storage.get_client(job["client_id"])
     template = storage.get_template(client["practice_id"], client["template_id"]) if client and client.get("template_id") else None
+    template_bytes = storage.load_file(template["file_id"]) if template else None
 
-    if template and Path(template["file_path"]).exists():
+    if template_bytes is not None:
         wb = build_workbook_into_template(
-            template["file_path"], template["config"],
+            template_bytes, template["config"],
             job["client_name"], job["current_label"], job["comparative_label"], data, results,
             control_account_results=ca_results, matrix_results=mx_results, ct_computation=ct_computation,
             fixed_asset_result=fixed_asset_result, asset_register_result=asset_register_result,
@@ -407,8 +407,13 @@ def generate(job_id: str):
             fixed_asset_result=fixed_asset_result, asset_register_result=asset_register_result,
         )
 
-    out_path = storage.output_dir(job_id) / "working_paper.xlsx"
-    wb.save(out_path)
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    output_filename = f"{job['client_name']} - Working Papers - {job['current_label']}.xlsx"
+    job["output_file_id"] = storage.save_file(
+        "output", job_id, output_filename, buffer.getvalue(),
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
 
     job["status"] = "generated"
     job["summary"] = [{"name": r.name, "status": r.status, "message": r.message} for r in results]
@@ -420,7 +425,10 @@ def generate(job_id: str):
 @app.get("/jobs/{job_id}/download")
 def download(job_id: str):
     job = storage.get_job(job_id)
-    out_path = storage.output_dir(job_id) / "working_paper.xlsx"
+    content = storage.load_file(job["output_file_id"])
     filename = f"{job['client_name']} - Working Papers - {job['current_label']}.xlsx"
-    return FileResponse(out_path, filename=filename,
-                         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return Response(
+        content=content,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

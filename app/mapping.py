@@ -8,13 +8,10 @@ Two layers:
    client + report type + platform, it is saved as a reusable profile so the
    *next* period's file for that same client maps itself.
 """
-import json
 import re
-from pathlib import Path
 
+from app import storage
 from app.models import REPORT_SCHEMAS
-
-PROFILES_DIR = Path("data/clients")
 
 
 def _normalise(header: str) -> str:
@@ -117,18 +114,9 @@ def suggest_mapping(report_type: str, source_columns: list[str]) -> dict:
     return suggestion
 
 
-def profile_path(client_id: str, report_type: str, platform: str) -> Path:
-    return PROFILES_DIR / client_id / "mapping_profiles" / f"{report_type}__{platform}.json"
-
-
 def load_profile(client_id: str, report_type: str, platform: str) -> dict | None:
-    path = profile_path(client_id, report_type, platform)
-    if path.exists():
-        return json.loads(path.read_text())
-    return None
+    return storage.load_mapping_profile(client_id, report_type, platform)
 
 
 def save_profile(client_id: str, report_type: str, platform: str, mapping: dict) -> None:
-    path = profile_path(client_id, report_type, platform)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(mapping, indent=2))
+    storage.save_mapping_profile(client_id, report_type, platform, mapping)

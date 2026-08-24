@@ -3,6 +3,7 @@ results, in the house style observed in the firm's real working paper files:
 a CLIENT NAME / PERIOD / SCHEDULE TITLE header block on every sheet, and a
 numbered index of schedules with their status and any queries raised.
 """
+import io
 from datetime import datetime
 from pathlib import Path
 
@@ -1549,7 +1550,7 @@ def build_workbook(
 
 
 def build_workbook_into_template(
-    template_path: str | Path,
+    template_source: str | Path | bytes,
     template_config: dict,
     client_name: str,
     current_label: str,
@@ -1585,7 +1586,12 @@ def build_workbook_into_template(
     equivalents in the other computation modules are still fixed
     module-level constants) - see README known limitations.
     """
-    wb = openpyxl.load_workbook(template_path)
+    # template_source is bytes once templates live in Postgres rather than
+    # on disk (a local path wouldn't survive between serverless
+    # invocations) - openpyxl reads a file-like object just as happily as
+    # a path, so wrap bytes in BytesIO rather than requiring a real file
+    source = io.BytesIO(template_source) if isinstance(template_source, (bytes, bytearray)) else template_source
+    wb = openpyxl.load_workbook(source)
     schedules_cfg = template_config.get("schedules", {})
     numbering_cfg = template_config.get("numbering", {})
     header_cells = template_config.get("header_cells")
