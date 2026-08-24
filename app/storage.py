@@ -93,6 +93,24 @@ SCHEMA_STATEMENTS = [
         mapping JSONB NOT NULL,
         PRIMARY KEY (client_id, report_type, platform)
     )""",
+    """CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        practice_id TEXT NOT NULL,
+        email TEXT NOT NULL,
+        password_hash TEXT NOT NULL,
+        name TEXT NOT NULL,
+        role TEXT NOT NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    )""",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users (lower(email))",
+    "CREATE INDEX IF NOT EXISTS idx_users_practice ON users (practice_id)",
+    # which specific clients a 'preparer' can see - irrelevant for
+    # partner/manager, who see every client in their own practice.
+    """CREATE TABLE IF NOT EXISTS client_access (
+        user_id TEXT NOT NULL,
+        client_id TEXT NOT NULL,
+        PRIMARY KEY (user_id, client_id)
+    )""",
 ]
 
 _conn: psycopg.Connection | None = None
@@ -364,3 +382,89 @@ def save_mapping_profile(client_id: str, report_type: str, platform: str, mappin
                ON CONFLICT (client_id, report_type, platform) DO UPDATE SET mapping = EXCLUDED.mapping""",
             (client_id, report_type, platform, Jsonb(mapping)),
         )
+
+
+# ---------- users (each belongs to exactly one practice) + client access ----------
+# Roles: partner (full access within the practice, incl. managing users and
+# templates), manager (everything except managing users), preparer (only the
+# clients explicitly granted below). A real table rather than the generic
+# entities blob, since email needs a case-insensitive unique index and
+# password_hash should never round-trip through a generic JSONB dict by
+# accident.
+
+def _user_row_to_dict(row) -> dict:
+    return {
+        "id": row[0], "practice_id": row[1], "email": row[2], "password_hash": row[3],
+        "name": row[4], "role": row[5],
+        "created_at": row[6].isoformat() if hasattr(row[6], "isoformat") else row[6],
+    }
+
+
+_USER_COLUMNS = "id, practice_id, email, password_hash, name, role, created_at"
+
+
+def create_user(practice_id: str, email: str, password_hash: str, name: str, role: str) -> dict:
+    user_id = _new_id("user")
+    email = email.strip().lower()
+    with _get_conn().cursor() as cur:
+        cur.execute(
+            "INSERT INTO users (id, practice_id, email, password_hash, name, role) VALUES (%s, %s, %s, %s, %s, %s)",
+            (user_id, practice_id, email, password_hash, name, role),
+        )
+    return get_user(user_id)
+
+
+def get_user(user_id: str) -> dict | None:
+    with _get_conn().cursor() as cur:
+        cur.execute(f"SELECT {_USER_COLUMNS} FROM users WHERE id = %s", (user_id,))
+        row = cur.fetchone()
+        return _user_row_to_dict(row) if row else None
+
+
+def get_user_by_email(email: str) -> dict | None:
+    with _get_conn().cursor() as cur:
+        cur.execute(f"SELECT {_USER_COLUMNS} FROM users WHERE lower(email) = lower(%s)", (email.strip(),))
+        row = cur.fetchone()
+        return _user_row_to_dict(row) if row else None
+
+
+def list_users(practice_id: str) -> list[dict]:
+    with _get_conn().cursor() as cur:
+        cur.execute(f"SELECT {_USER_COLUMNS} FROM users WHERE practice_id = %s ORDER BY created_at ASC", (practice_id,))
+        return [_user_row_to_dict(row) for row in cur.fetchall()]
+
+
+def count_users() -> int:
+    with _get_conn().cursor() as cur:
+        cur.execute("SELECT count(*) FROM users")
+        return cur.fetchone()[0]
+
+
+def delete_user(user_id: str) -> None:
+    with _get_conn().cursor() as cur:
+        cur.execute("DELETE FROM client_access WHERE user_id = %s", (user_id,))
+        cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
+
+
+def set_client_access(user_id: str, client_ids: list[str]) -> None:
+    """Replaces the full set of clients a preparer can see - simplest correct
+    model for a checkbox-list UI (submit the whole selection, not deltas)."""
+    with _get_conn().cursor() as cur:
+        cur.execute("DELETE FROM client_access WHERE user_id = %s", (user_id,))
+        for client_id in client_ids:
+            cur.execute(
+                "INSERT INTO client_access (user_id, client_id) VALUES (%s, %s) ON CONFLICT DO NOTHING",
+                (user_id, client_id),
+            )
+
+
+def has_client_access(user_id: str, client_id: str) -> bool:
+    with _get_conn().cursor() as cur:
+        cur.execute("SELECT 1 FROM client_access WHERE user_id = %s AND client_id = %s", (user_id, client_id))
+        return cur.fetchone() is not None
+
+
+def list_client_access(user_id: str) -> list[str]:
+    with _get_conn().cursor() as cur:
+        cur.execute("SELECT client_id FROM client_access WHERE user_id = %s", (user_id,))
+        return [row[0] for row in cur.fetchall()]

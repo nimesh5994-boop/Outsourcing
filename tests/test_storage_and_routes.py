@@ -58,6 +58,7 @@ def http_client(monkeypatch):
     separator = "&" if "?" in TEST_DATABASE_URL else "?"
     scoped_dsn = f"{TEST_DATABASE_URL}{separator}options=-csearch_path%3D{schema}"
     monkeypatch.setenv("DATABASE_URL", scoped_dsn)
+    monkeypatch.setenv("SECRET_KEY", "test-secret-key-not-for-production")
 
     from app import storage
     storage._conn = None  # force reconnect against the schema-scoped DSN
@@ -70,6 +71,23 @@ def http_client(monkeypatch):
     admin_conn = psycopg.connect(TEST_DATABASE_URL, autocommit=True)
     admin_conn.execute(f'DROP SCHEMA "{schema}" CASCADE')
     admin_conn.close()
+
+
+def _signup(c: TestClient, practice_name="Acme & Co", admin_name="Alex Partner",
+            admin_email="alex@acme.test", admin_password="hunter2hunter") -> str:
+    """Creates a practice + its first (partner) user and logs the client in
+    via the session cookie, exactly as a real signup would. Returns the new
+    practice_id."""
+    resp = c.post(
+        "/practices",
+        data={
+            "practice_name": practice_name, "admin_name": admin_name,
+            "admin_email": admin_email, "admin_password": admin_password,
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    return resp.headers["location"].rsplit("/", 1)[-1]
 
 
 def _make_template_bytes() -> bytes:
@@ -104,14 +122,12 @@ def test_storage_entity_and_file_roundtrip(http_client):
 
 
 def test_full_http_flow_practice_to_download(http_client):
-    """practice -> template upload (normalised) -> client -> job -> report
-    upload -> generate -> download, all over real HTTP requests against a
-    real Postgres-backed app instance."""
+    """signup (practice + partner login) -> template upload (normalised) ->
+    client -> job -> report upload -> generate -> download, all over real
+    HTTP requests against a real Postgres-backed app instance, as the
+    logged-in partner."""
     c = http_client
-
-    resp = c.post("/practices", data={"name": "Acme & Co"}, follow_redirects=False)
-    assert resp.status_code == 303
-    practice_id = resp.headers["location"].rsplit("/", 1)[-1]
+    practice_id = _signup(c)
 
     resp = c.post(
         f"/practices/{practice_id}/templates",
@@ -177,3 +193,99 @@ def test_full_http_flow_practice_to_download(http_client):
     wb = openpyxl.load_workbook(io.BytesIO(resp.content))
     assert "Cover Page" in wb.sheetnames  # the template's own sheet survived untouched
     assert wb["Cover Page"]["A1"].value == "FIRM TEMPLATE COVER"
+
+
+def test_unauthenticated_request_redirects_to_login(http_client):
+    c = http_client
+    resp = c.get("/practices/practice_doesnotmatter", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/login")
+
+
+def test_wrong_password_rejected(http_client):
+    c = http_client
+    _signup(c, admin_email="owner@acme.test", admin_password="correct-horse-battery")
+    resp = c.post("/login", data={"email": "owner@acme.test", "password": "wrong"}, follow_redirects=False)
+    assert resp.status_code == 400
+    assert "Invalid email or password" in resp.text
+
+
+def test_preparer_scoped_to_granted_clients_only(http_client):
+    """The core RBAC guarantee: a preparer can see/act on a client they've
+    been granted access to, and gets a 403 - not the client's data - for
+    one they haven't, even though both clients are in the same practice."""
+    c = http_client
+    practice_id = _signup(c, admin_email="partner@acme.test")
+
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Client A"}, follow_redirects=False)
+    client_a_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Client B"}, follow_redirects=False)
+    client_b_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.post(f"/practices/{practice_id}/users", data={
+        "name": "Prep One", "email": "prep@acme.test", "password": "prepper-pass", "role": "preparer",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+
+    from app import storage
+    prep_user = storage.get_user_by_email("prep@acme.test")
+    resp = c.post(
+        f"/practices/{practice_id}/users/{prep_user['id']}/client-access",
+        data={"client_ids": [client_a_id]}, follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    # log out the partner, log in as the preparer
+    c.post("/logout")
+    resp = c.post("/login", data={"email": "prep@acme.test", "password": "prepper-pass"}, follow_redirects=False)
+    assert resp.status_code == 303
+
+    assert c.get(f"/clients/{client_a_id}").status_code == 200
+    resp = c.get(f"/clients/{client_b_id}", follow_redirects=False)
+    assert resp.status_code == 403
+
+    # preparer's client list only shows the granted client
+    resp = c.get(f"/practices/{practice_id}/clients")
+    assert "Client A" in resp.text
+    assert "Client B" not in resp.text
+
+    # preparer role restrictions: no creating clients, no managing users/templates
+    assert c.post(f"/practices/{practice_id}/clients", data={"name": "Client C"}, follow_redirects=False).status_code == 403
+    assert c.get(f"/practices/{practice_id}/users", follow_redirects=False).status_code == 403
+    assert c.post(f"/practices/{practice_id}/templates", data={"name": "X"}, follow_redirects=False).status_code == 403
+
+
+def test_manager_sees_all_clients_but_cannot_manage_users(http_client):
+    c = http_client
+    practice_id = _signup(c, admin_email="partner2@acme.test")
+    c.post(f"/practices/{practice_id}/clients", data={"name": "Only Client"}, follow_redirects=False)
+
+    c.post(f"/practices/{practice_id}/users", data={
+        "name": "Mgr One", "email": "mgr@acme.test", "password": "manager-pass", "role": "manager",
+    }, follow_redirects=False)
+
+    c.post("/logout")
+    c.post("/login", data={"email": "mgr@acme.test", "password": "manager-pass"}, follow_redirects=False)
+
+    resp = c.get(f"/practices/{practice_id}/clients")
+    assert "Only Client" in resp.text  # managers see every client, no grant needed
+
+    assert c.get(f"/practices/{practice_id}/users", follow_redirects=False).status_code == 403
+
+
+def test_cross_practice_access_denied(http_client):
+    """A user from one practice can't reach another practice's pages, even
+    though both exist in the same database."""
+    c = http_client
+    practice_a_id = _signup(c, admin_email="a@firm-a.test")
+
+    from app.main import app as fastapi_app
+    other = TestClient(fastapi_app)
+    resp = other.post("/practices", data={
+        "practice_name": "Firm B", "admin_name": "B Partner",
+        "admin_email": "b@firm-b.test", "admin_password": "firm-b-password",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+
+    resp = other.get(f"/practices/{practice_a_id}", follow_redirects=False)
+    assert resp.status_code == 404

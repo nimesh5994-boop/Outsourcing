@@ -23,6 +23,13 @@ header {
   padding: 18px 32px;
 }
 header a { color: white; text-decoration: none; font-weight: 600; font-size: 18px; }
+header { display: flex; align-items: center; justify-content: space-between; }
+.user-bar { font-size: 13px; display: flex; align-items: center; gap: 10px; }
+.user-bar .muted-header { color: #b7c2d6; }
+.user-bar button.secondary { background: transparent; color: white; border: 1px solid rgba(255,255,255,0.4); padding: 5px 12px; font-size: 12px; }
+.user-bar button.secondary:hover { background: rgba(255,255,255,0.1); }
+.auth-card { max-width: 420px; margin: 60px auto; }
+.error-text { color: var(--error); font-size: 13px; margin: 8px 0; }
 main { max-width: 980px; margin: 32px auto; padding: 0 20px; }
 .card {
   background: var(--card);

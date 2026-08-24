@@ -29,6 +29,39 @@ the default, and every client created under that practice inherits it
 (overridable per client). Each client is then processed job-by-job,
 period-by-period, building up history over time.
 
+## Access control
+
+Every user belongs to exactly one practice, with one of three roles:
+
+- **Partner** - full access: manage users, templates, and every client/job
+  in the practice.
+- **Manager** - the same client/job/template access as a Partner, minus
+  user management (can't add, remove, or re-scope other users).
+- **Preparer** - only the specific clients a Partner has explicitly granted
+  via **Manage Users → client access**; no template or user management.
+  Un-granted clients return a 403, not a 404, so a preparer can tell "not
+  mine" from "doesn't exist."
+
+There's no cross-practice access at all - a user from one practice gets a
+404 (not a 403) on another practice's pages, so practices can't even be
+distinguished from "doesn't exist" by someone outside them.
+
+**Signing up** (`/practices`, logged out) creates a new practice and its
+first user (a Partner) together - that's the only way a Partner account is
+ever created; every other user is added from that Partner's **Manage
+Users** page (name, email, a password the Partner sets and shares
+out-of-band, and a role - client access for Preparers is set from the same
+page afterward).
+
+Sessions are a signed cookie (`app/auth.py`, via `itsdangerous`), not a
+server-side session table - deliberately stateless so there's nothing to
+clean up on a serverless platform. Verifying the signature requires
+**`SECRET_KEY`**, a required environment variable alongside `DATABASE_URL`
+(see Running it / Deployment below) - generate one with
+`python3 -c "import secrets; print(secrets.token_hex(32))"` and never
+commit it to git. Passwords are hashed with `bcrypt`; nothing is ever
+compared or stored as plaintext.
+
 The UI splits **Setup** (`/practices/{id}` - templates and their config,
 where a practice admin works) from **Clients** (`/practices/{id}/clients` -
 the day-to-day job workflow), since they're different jobs done by
@@ -326,7 +359,9 @@ app/
   excel_builder.py                  builds the final .xlsx: house-style headers, numbered index,
                                      value-based AND formula-linked schedule builders
   storage.py                         Postgres-backed Practice/Template/Client/Job storage
-                                       (entities/files/mapping_profiles tables; files stored as BYTEA)
+                                       (entities/files/mapping_profiles/users/client_access tables)
+  auth.py                             password hashing, signed-cookie sessions, role/practice/
+                                       client authorization helpers
   main.py                             FastAPI app + routes
   templates/, static/                  the (minimal) web UI
 api/
@@ -346,11 +381,14 @@ Storage is Postgres-backed (see Architecture), so a `DATABASE_URL` is
 required even for local runs - point it at a local Postgres or a free Neon
 branch. Tables are created automatically on first connection (see
 `SCHEMA_STATEMENTS` in `storage.py`); there's no separate migration step.
+`SECRET_KEY` is also required, to sign session cookies (see Access
+control above).
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 export DATABASE_URL="postgresql://user:password@host:5432/dbname"
+export SECRET_KEY="$(python3 -c 'import secrets; print(secrets.token_hex(32))')"
 uvicorn app.main:app --reload
 ```
 
@@ -372,8 +410,11 @@ To deploy:
    well - serverless, scales to zero, has a generous free tier). Use a
    pooled connection string (Neon's `-pooler` host) since each serverless
    invocation opens its own connection.
-2. In the Vercel project settings, set the environment variable
-   `DATABASE_URL` to that connection string. Never commit it to git.
+2. In the Vercel project settings, set the environment variables
+   `DATABASE_URL` (that connection string) and `SECRET_KEY` (a random
+   value, e.g. `python3 -c "import secrets; print(secrets.token_hex(32))"`
+   - used to sign session cookies, see Access control above). Tick
+   Production for both, at minimum. Never commit either to git.
 3. `vercel deploy` (or connect the repo in the Vercel dashboard for
    git-push deploys). No other build step is needed - `requirements.txt`
    is installed automatically by the Python runtime.
@@ -416,8 +457,11 @@ pytest tests/ -v
 ```
 
 `tests/test_storage_and_routes.py` exercises the Postgres-backed storage
-layer and the full practice -> template -> client -> job -> upload ->
-generate -> download HTTP flow against a real (throwaway) Postgres schema
+layer, the full practice -> template -> client -> job -> upload ->
+generate -> download HTTP flow, and the access-control model (signup,
+login, wrong password, unauthenticated redirect, a preparer scoped to
+only their granted clients, a manager blocked from user management, and
+cross-practice access denied) against a real (throwaway) Postgres schema
 - the part of the app the other tests never touch, since they all work
 with in-memory DataFrames/fixtures directly. It's skipped automatically
 if no test database is reachable; point `TEST_DATABASE_URL` at one (or

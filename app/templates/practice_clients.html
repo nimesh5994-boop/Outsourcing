@@ -20,6 +20,7 @@
   {% endif %}
 </div>
 
+{% if current_user.role in ('partner', 'manager') %}
 <div class="card">
   <h2>Add a client</h2>
   <form method="post" action="/practices/{{ practice.id }}/clients">
@@ -35,4 +36,5 @@
     <div style="margin-top:16px"><button type="submit">Create client</button></div>
   </form>
 </div>
+{% endif %}
 {% endblock %}

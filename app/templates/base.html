@@ -6,7 +6,17 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-  <header><a href="/practices">Working Paper Automation</a></header>
+  <header>
+    <a href="/practices">Working Paper Automation</a>
+    {% if current_user %}
+    <span class="user-bar">
+      {{ current_user.name }} <span class="muted-header">({{ current_user.role }})</span>
+      <form method="post" action="/logout" style="display:inline">
+        <button type="submit" class="secondary">Log out</button>
+      </form>
+    </span>
+    {% endif %}
+  </header>
   <main>
     {% block content %}{% endblock %}
   </main>

@@ -3,9 +3,15 @@
 <div class="card">
   <h1>{{ practice.name }}</h1>
   <p class="muted">Practice setup &mdash; templates and their configuration live here. Client work happens on the <a href="/practices/{{ practice.id }}/clients">Clients</a> page.</p>
-  <p><a class="button secondary" href="/practices/{{ practice.id }}/clients">Go to Clients &rarr;</a></p>
+  <p>
+    <a class="button secondary" href="/practices/{{ practice.id }}/clients">Go to Clients &rarr;</a>
+    {% if current_user.role == 'partner' %}
+    <a class="button secondary" href="/practices/{{ practice.id }}/users">Manage Users &rarr;</a>
+    {% endif %}
+  </p>
 </div>
 
+{% if current_user.role in ('partner', 'manager') %}
 <div class="card">
   <h2>Setup: Templates</h2>
   {% if templates_list %}
@@ -50,4 +56,5 @@
     <div style="margin-top:16px"><button type="submit">Upload template</button></div>
   </form>
 </div>
+{% endif %}
 {% endblock %}
