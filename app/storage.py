@@ -287,6 +287,11 @@ def create_client(practice_id: str, name: str, template_id: str | None = None) -
     client = {
         "id": client_id, "practice_id": practice_id, "name": name,
         "template_id": template_id, "created_at": datetime.utcnow().isoformat(),
+        # {report_type: note text} - how this client's exports of that type
+        # should be read/treated (e.g. "VAT export has a Detail tab, use it
+        # to reconcile against nominal activity"). Persists per client
+        # across jobs, and is shown alongside that section's uploads.
+        "report_notes": {},
     }
     _put_entity("client", client_id, practice_id, client)
     return client
@@ -294,6 +299,10 @@ def create_client(practice_id: str, name: str, template_id: str | None = None) -
 
 def get_client(client_id: str) -> dict | None:
     return _get_entity("client", client_id)
+
+
+def save_client(client: dict) -> None:
+    _put_entity("client", client["id"], client["practice_id"], client)
 
 
 def list_clients(practice_id: str | None = None) -> list[dict]:

@@ -235,6 +235,19 @@ PDF, in any order), and the system works out what each one is:
    narrow: one dominant table per file, text-based PDFs only (no OCR - a
    scanned/image-only PDF raises a clear error asking for a re-export
    instead of silently extracting nothing).
+4. **Every sheet of a multi-sheet workbook is read**, not just the first
+   one - a VAT return export with separate Summary and Detail tabs (a real
+   failure mode this fixed: only the first tab was ever seen) expands into
+   one classified sub-upload per sheet through the identical pipeline.
+5. **Fixed sections, not a dropdown**: the job page shows one permanent
+   section per report type (TB, Aged Debtors, Nominal Activity, VAT
+   Return, ...), each with its own upload form (dropping a file there
+   sets its report type directly, no guessing needed for that part) and
+   an editable instruction note - free text describing how *this client's*
+   exports of that type should be read (e.g. "VAT export has a Detail tab
+   - use it to reconcile against nominal activity"). Notes persist per
+   client (`client["report_notes"]`), reused job after job, and are shown
+   right there when uploading.
 
 ## What gets checked
 

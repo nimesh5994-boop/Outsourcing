@@ -25,13 +25,32 @@
 </div>
 
 <div class="card">
-  <h2>Uploaded reports</h2>
-  {% if job.uploads %}
+  <h2>Generate</h2>
+  <form method="post" action="/jobs/{{ job.id }}/generate">
+    <button type="submit">Generate working paper</button>
+  </form>
+  <p class="muted">You can generate at any time &mdash; unconfirmed uploads are skipped, so any report type you haven't provided just shows as "no data" on its schedule.</p>
+</div>
+
+{% for rt in report_types %}
+<div class="card">
+  <h2>{{ report_labels[rt] }}</h2>
+
+  <details {% if report_notes.get(rt) %}open{% endif %} style="margin-bottom:14px">
+    <summary style="cursor:pointer; color:var(--muted); font-size:13px;">{{ 'Instruction note (set)' if report_notes.get(rt) else 'Add an instruction note' }}</summary>
+    <form method="post" action="/clients/{{ client.id }}/notes/{{ rt }}" style="margin-top:8px">
+      <input type="hidden" name="next" value="/jobs/{{ job.id }}">
+      <textarea name="note" rows="2" style="width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; font-family:inherit;" placeholder="How should {{ client.name }}'s {{ report_labels[rt] }} exports be read? e.g. &quot;VAT export has a Detail tab - use it to reconcile against nominal activity.&quot;">{{ report_notes.get(rt, '') }}</textarea>
+      <div style="margin-top:8px"><button type="submit" class="secondary">Save note</button></div>
+    </form>
+  </details>
+
+  {% set section_uploads = uploads_by_type.get(rt, []) %}
+  {% if section_uploads %}
   <table>
-    <tr><th>Report</th><th>Period</th><th>Platform</th><th>File</th><th>Mapping</th><th>Period check</th><th></th></tr>
-    {% for u in job.uploads.values() %}
+    <tr><th>Period</th><th>Platform</th><th>File</th><th>Mapping</th><th>Period check</th><th></th></tr>
+    {% for u in section_uploads %}
     <tr>
-      <td>{{ report_labels.get(u.report_type, "(unknown - needs review)") }}</td>
       <td>{{ u.period }}</td>
       <td>{{ u.platform }}</td>
       <td class="muted">{{ u.display_name or u.filename }}</td>
@@ -48,22 +67,40 @@
       <td><a class="button secondary" href="/jobs/{{ job.id }}/uploads/{{ u.id }}/mapping">{{ 'Edit mapping' if u.confirmed else 'Confirm mapping' }}</a></td>
     </tr>
     {% if u.validation_note %}
-    <tr><td colspan="7" style="color:#b42318; font-size:13px; padding-top:0;">&#9888; {{ u.validation_note }}</td></tr>
+    <tr><td colspan="6" style="color:#b42318; font-size:13px; padding-top:0;">&#9888; {{ u.validation_note }}</td></tr>
     {% endif %}
     {% if u.period_check and u.period_check.status == 'mismatch' %}
-    <tr><td colspan="7" style="color:#b42318; font-size:13px; padding-top:0;">&#9888; {{ u.period_check.message }}</td></tr>
+    <tr><td colspan="6" style="color:#b42318; font-size:13px; padding-top:0;">&#9888; {{ u.period_check.message }}</td></tr>
     {% endif %}
     {% endfor %}
   </table>
   {% else %}
-  <p class="muted">No files uploaded yet.</p>
+  <p class="muted">Nothing uploaded yet for this job.</p>
   {% endif %}
 
-  <form method="post" action="/jobs/{{ job.id }}/generate" style="margin-top:16px">
-    <button type="submit">Generate working paper</button>
+  <form method="post" action="/jobs/{{ job.id }}/uploads" enctype="multipart/form-data" style="margin-top:12px">
+    <input type="hidden" name="section_report_type" value="{{ rt }}">
+    <input type="file" name="files" multiple accept=".csv,.xlsx,.xls,.pdf">
+    <div style="margin-top:10px"><button type="submit" class="secondary">Add {{ report_labels[rt] }} file(s)</button></div>
   </form>
-  <p class="muted">You can generate at any time &mdash; unconfirmed uploads are skipped, so any report type you haven't provided just shows as "no data" on its schedule.</p>
 </div>
+{% endfor %}
+
+{% if uploads_by_type.get('') %}
+<div class="card">
+  <h2>Unclassified</h2>
+  <p class="muted">Uploaded outside a specific section, or the system couldn't confidently guess what these are - pick a report type on each one's confirm page.</p>
+  <table>
+    <tr><th>File</th><th></th></tr>
+    {% for u in uploads_by_type[''] %}
+    <tr>
+      <td class="muted">{{ u.display_name or u.filename }}</td>
+      <td><a class="button secondary" href="/jobs/{{ job.id }}/uploads/{{ u.id }}/mapping">Confirm mapping</a></td>
+    </tr>
+    {% endfor %}
+  </table>
+</div>
+{% endif %}
 
 <div class="card">
   <h2>Corporation tax computation inputs</h2>
@@ -84,16 +121,6 @@
       </div>
     </div>
     <div style="margin-top:16px"><button type="submit">Save tax inputs</button></div>
-  </form>
-</div>
-
-<div class="card">
-  <h2>Upload reports</h2>
-  <p class="muted">Drop in as many files as you have for this job at once - trial balance, aged debtors/creditors, nominal activity, bank statement, VAT return, whatever you've got, in any order. The system figures out what each one is and which period it covers; you'll get a quick chance to confirm (or correct) that guess before it's used, one file at a time, right after upload.</p>
-  <form method="post" action="/jobs/{{ job.id }}/uploads" enctype="multipart/form-data">
-    <label>Files (CSV, XLSX, or PDF export)</label>
-    <input type="file" name="files" required multiple accept=".csv,.xlsx,.xls,.pdf">
-    <div style="margin-top:16px"><button type="submit">Upload</button></div>
   </form>
 </div>
 {% endblock %}

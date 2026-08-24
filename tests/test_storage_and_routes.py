@@ -419,6 +419,49 @@ def test_multisheet_workbook_expands_into_one_upload_per_sheet(http_client):
     assert by_sheet["Summary"]["display_name"] == "vat_return.xlsx (Summary)"
 
 
+def test_report_notes_and_section_scoped_upload(http_client):
+    """The job page shows a fixed section per report type, each with an
+    editable instruction note (persisted per client, not per job) and its
+    own upload form - a file dropped into a section is classified as that
+    section's report type directly, no guessing needed for that part."""
+    c = http_client
+    practice_id = _signup(c, admin_email="sections@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Sections Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    assert "VAT Return" in resp.text
+    assert "Add VAT Return file(s)" in resp.text
+
+    resp = c.post(f"/clients/{client_id}/notes/vat_return", data={
+        "note": "Detail tab has the transaction-level data.", "next": f"/jobs/{job_id}",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/jobs/{job_id}"
+
+    from app import storage
+    client = storage.get_client(client_id)
+    assert client["report_notes"]["vat_return"] == "Detail tab has the transaction-level data."
+    assert "Instruction note (set)" in c.get(f"/jobs/{job_id}").text
+
+    bank_path = SAMPLE_DIR / "bank_statement_current.csv"
+    resp = c.post(
+        f"/jobs/{job_id}/uploads",
+        data={"section_report_type": "bank_statement"},
+        files={"files": (bank_path.name, bank_path.read_bytes(), "text/csv")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    job = storage.get_job(job_id)
+    upload = next(iter(job["uploads"].values()))
+    assert upload["report_type"] == "bank_statement"
+
+
 def test_upload_route_rejects_confirm_with_no_report_type(http_client):
     """Guard against silently confirming an upload the system couldn't
     classify and the user didn't pick a type for either - that would mark

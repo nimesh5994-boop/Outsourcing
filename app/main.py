@@ -300,11 +300,17 @@ def create_job(
 
 @app.get("/jobs/{job_id}")
 def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_user_dep)):
-    job, _client = _authorize_job(user, job_id)
+    job, client = _authorize_job(user, job_id)
+    uploads_by_type = {rt: [] for rt in REPORT_TYPES}
+    uploads_by_type.setdefault("", [])  # couldn't be classified at all
+    for upload in job["uploads"].values():
+        uploads_by_type.setdefault(upload["report_type"], []).append(upload)
     return templates.TemplateResponse("job_detail.html", {
-        "request": request, "current_user": user, "job": job,
+        "request": request, "current_user": user, "job": job, "client": client,
         "report_types": REPORT_TYPES, "report_labels": REPORT_LABELS,
         "platforms": PLATFORMS, "periods": PERIODS,
+        "uploads_by_type": uploads_by_type,
+        "report_notes": client.get("report_notes", {}),
     })
 
 
@@ -324,6 +330,23 @@ def save_tax_inputs(
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
+@app.post("/clients/{client_id}/notes/{report_type}")
+def save_report_note(client_id: str, report_type: str, note: str = Form(""), next: str = Form(""),
+                      user: dict = Depends(auth.current_user_dep)):
+    client = _authorize_client(user, client_id)
+    if report_type not in REPORT_TYPES:
+        raise HTTPException(status_code=400)
+    notes = dict(client.get("report_notes") or {})
+    if note.strip():
+        notes[report_type] = note.strip()
+    else:
+        notes.pop(report_type, None)
+    client["report_notes"] = notes
+    storage.save_client(client)
+    destination = next if next.startswith("/") and not next.startswith("//") else f"/clients/{client_id}"
+    return RedirectResponse(destination, status_code=303)
+
+
 def _first_unconfirmed_upload(job: dict) -> str | None:
     for upload_id, upload in job["uploads"].items():
         if not upload["confirmed"]:
@@ -332,17 +355,21 @@ def _first_unconfirmed_upload(job: dict) -> str | None:
 
 
 async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: bytes,
-                              sheet_name: str | None = None, display_name: str | None = None) -> None:
+                              sheet_name: str | None = None, display_name: str | None = None,
+                              type_hint: str | None = None) -> None:
     """Classifies and stores a single uploaded file (or, for a multi-sheet
     workbook, a single sheet of it - see upload_files() below, which is
     what passes sheet_name/display_name). A genuine Xero-native match (the
     file's actual layout parses cleanly, not just similar-looking column
     names) auto-confirms immediately, same as before this feature existed
-    - that's a structural validation, not a guess. Anything else (including
-    PDFs, which flow through the same DataSource - see parsers.py) gets its
-    report type/platform/period guessed and queued for a quick human
-    confirm rather than trusted blind, since a wrong guess here would
-    silently misfile real client financials."""
+    - that's a structural validation, not a guess, so it wins even over a
+    type_hint (uploading into the wrong section shouldn't force a
+    misdetection). Anything else (including PDFs, which flow through the
+    same DataSource - see parsers.py) gets queued for a quick human confirm
+    rather than trusted blind: report type comes from type_hint when the
+    file was dropped into a specific document-type section (see
+    job_detail.html) rather than guessed, but platform/period are always
+    guessed since the section doesn't tell us those."""
     source = parsers.FileDataSource(content, filename=filename, sheet_name=sheet_name)
     display_name = display_name or filename
 
@@ -363,11 +390,14 @@ async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: byt
         return
 
     columns = source.raw_columns()
-    report_type, confidence = document_detection.classify_report_type(columns)
-    if report_type in ("profit_and_loss", "balance_sheet"):
-        profile_probe = mapping.suggest_mapping(report_type, columns)
-        category_col = next((c for c, f in profile_probe.items() if f == "category"), None)
-        report_type = document_detection.disambiguate_pl_vs_bs(source.raw_dataframe(), category_col)
+    if type_hint:
+        report_type, confidence = type_hint, 1.0
+    else:
+        report_type, confidence = document_detection.classify_report_type(columns)
+        if report_type in ("profit_and_loss", "balance_sheet"):
+            profile_probe = mapping.suggest_mapping(report_type, columns)
+            category_col = next((c for c, f in profile_probe.items() if f == "category"), None)
+            report_type = document_detection.disambiguate_pl_vs_bs(source.raw_dataframe(), category_col)
     platform = document_detection.classify_platform(columns, is_xero_native=False)
     period = document_detection.guess_period(source, report_type or "trial_balance", job, None)
 
@@ -401,8 +431,10 @@ async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: byt
 
 @app.post("/jobs/{job_id}/uploads")
 async def upload_files(job_id: str, files: list[UploadFile] = File(...),
+                        section_report_type: str = Form(""),
                         user: dict = Depends(auth.current_user_dep)):
     job, _client = _authorize_job(user, job_id)
+    type_hint = section_report_type if section_report_type in REPORT_TYPES else None
 
     for file in files:
         content = await file.read()
@@ -427,7 +459,8 @@ async def upload_files(job_id: str, files: list[UploadFile] = File(...),
         for sheet in sheet_names:
             job = storage.get_job(job_id)  # re-fetch: each ingest may have just saved the job
             display_name = f"{file.filename} ({sheet})" if sheet else file.filename
-            await _ingest_one_upload(job_id, job, file.filename, content, sheet_name=sheet, display_name=display_name)
+            await _ingest_one_upload(job_id, job, file.filename, content, sheet_name=sheet,
+                                      display_name=display_name, type_hint=type_hint)
 
     job = storage.get_job(job_id)
     next_upload_id = _first_unconfirmed_upload(job)
