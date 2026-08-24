@@ -341,8 +341,13 @@ def build_recon_sheet(wb: Workbook, client_name: str, period_label: str, ref: st
     if result.detail is None or result.detail.empty:
         ws.cell(row=detail_row, column=1, value="No supporting detail available.")
         return
-    _write_dataframe(ws, result.detail, start_row=detail_row)
+    next_row = _write_dataframe(ws, result.detail, start_row=detail_row)
     ws.freeze_panes = f"A{detail_row + 1}"
+
+    if result.extra_detail is not None and not result.extra_detail.empty:
+        label_row = next_row + 1
+        ws.cell(row=label_row, column=1, value=result.extra_detail_label.upper()).font = SCHEDULE_FONT
+        _write_dataframe(ws, result.extra_detail, start_row=label_row + 1)
 
 
 def build_control_account_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: ControlAccountResult, header_cells: dict | None = None):

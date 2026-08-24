@@ -21,6 +21,14 @@ class ReconResult:
     status: str  # "ok" | "review" | "error" | "n/a"
     message: str
     detail: pd.DataFrame = field(default_factory=pd.DataFrame)
+    # An optional second, differently-shaped supporting table written
+    # below `detail` on the same sheet (see excel_builder.build_recon_sheet)
+    # - e.g. vat_cross_check attaches the actual nominal activity postings
+    # that make up a flagged variance, so a preparer has real candidate
+    # reconciling items in front of them instead of just "check for timing
+    # differences" with nothing to check against.
+    extra_detail: pd.DataFrame = field(default_factory=pd.DataFrame)
+    extra_detail_label: str = ""
 
 
 def check_tb_self_balances(tb_current: pd.DataFrame, tb_comparative: pd.DataFrame) -> ReconResult:
@@ -153,7 +161,10 @@ def bank_reconciliation(bank_statement: pd.DataFrame, tb: pd.DataFrame, bank_acc
     return ReconResult("Bank reconciliation", status, msg, detail)
 
 
-def vat_cross_check(vat_return: pd.DataFrame, pl: pd.DataFrame, tb: pd.DataFrame, vat_control_names: list[str]) -> ReconResult:
+def vat_cross_check(
+    vat_return: pd.DataFrame, pl: pd.DataFrame, tb: pd.DataFrame, vat_control_names: list[str],
+    nominal_activity: pd.DataFrame | None = None,
+) -> ReconResult:
     if vat_return is None or vat_return.empty:
         return ReconResult("VAT return cross-check", "n/a", "No VAT return uploaded.")
     v = vat_return.iloc[0]
@@ -180,7 +191,21 @@ def vat_cross_check(vat_return: pd.DataFrame, pl: pd.DataFrame, tb: pd.DataFrame
     flagged = detail[detail["Variance"].abs() > MATERIALITY_AMOUNT]
     status = "ok" if flagged.empty else "review"
     msg = "VAT return agrees to the nominal ledger within materiality." if flagged.empty else "VAT return does not agree to the nominal ledger - check for timing differences (cash vs accrual VAT scheme) or unposted VAT adjustments."
-    return ReconResult("VAT return cross-check", status, msg, detail)
+
+    result = ReconResult("VAT return cross-check", status, msg, detail)
+    if status == "review" and nominal_activity is not None and not nominal_activity.empty:
+        # real postings to VAT-related accounts, so there's something to
+        # actually check against instead of just "check for timing
+        # differences" with nothing in front of you.
+        mask = nominal_activity["account_name"].str.lower().apply(lambda n: any(k in n for k in vat_control_names))
+        candidates = nominal_activity.loc[mask, ["date", "account_name", "description", "contact", "debit", "credit"]]
+        candidates = candidates.sort_values("date")
+        if not candidates.empty:
+            result.extra_detail = candidates
+            result.extra_detail_label = (
+                "Candidate reconciling items - nominal activity postings to VAT-related accounts this period"
+            )
+    return result
 
 
 def run_all_recons(data: dict) -> list[ReconResult]:
@@ -204,6 +229,7 @@ def run_all_recons(data: dict) -> list[ReconResult]:
         vat_cross_check(
             data.get("vat_return"), data.get("pl_current"), data.get("tb_current"),
             ["vat control", "vat liability", "sales tax payable", "vat payable"],
+            data.get("nominal_current"),
         ),
     ]
     return results

@@ -34,7 +34,7 @@
       <td>{{ report_labels.get(u.report_type, "(unknown - needs review)") }}</td>
       <td>{{ u.period }}</td>
       <td>{{ u.platform }}</td>
-      <td class="muted">{{ u.filename }}</td>
+      <td class="muted">{{ u.display_name or u.filename }}</td>
       <td><span class="badge {{ 'confirmed' if u.confirmed else 'pending' }}">{{ 'confirmed' if u.confirmed else 'needs review' }}</span></td>
       <td>
         {% if u.period_check and u.period_check.status == 'mismatch' %}

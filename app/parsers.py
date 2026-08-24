@@ -35,7 +35,7 @@ class FileDataSource(DataSource):
     instead of re-opening a path that a different instance's ephemeral
     filesystem never had)."""
 
-    def __init__(self, source: str | Path | bytes, filename: str | None = None):
+    def __init__(self, source: str | Path | bytes, filename: str | None = None, sheet_name: str | None = None):
         if isinstance(source, (bytes, bytearray)):
             if filename is None:
                 raise ValueError("filename is required when source is raw bytes (needed to tell CSV from XLSX)")
@@ -45,6 +45,13 @@ class FileDataSource(DataSource):
             self.file_path = Path(source)
             self._buffer = None
             self._suffix = self.file_path.suffix.lower()
+        # None = the sheet pandas defaults to (the first one) - an .xlsx
+        # with several sheets (e.g. a VAT return export with separate
+        # "Summary" and "Detail" tabs) is otherwise silently reduced to
+        # whichever sheet happens to load first; see excel_sheet_names()
+        # and how main.py's upload route expands a multi-sheet file into
+        # one classified sub-upload per sheet instead.
+        self._sheet_name = sheet_name
         self._df = None
 
     def _load(self) -> pd.DataFrame:
@@ -56,7 +63,8 @@ class FileDataSource(DataSource):
                 content = self._buffer if self._buffer is not None else self.file_path.read_bytes()
                 self._df = extract_table_from_pdf(content)
             elif self._suffix in (".xlsx", ".xls"):
-                self._df = pd.read_excel(handle, dtype=str)
+                sheet = self._sheet_name if self._sheet_name is not None else 0
+                self._df = pd.read_excel(handle, sheet_name=sheet, dtype=str)
             else:
                 self._df = pd.read_csv(handle, dtype=str, keep_default_na=False)
             self._df.columns = [str(c).strip() for c in self._df.columns]
@@ -67,6 +75,19 @@ class FileDataSource(DataSource):
 
     def raw_dataframe(self) -> pd.DataFrame:
         return self._load()
+
+
+def excel_sheet_names(content: bytes) -> list[str]:
+    """Every sheet name in an .xlsx/.xls file, in workbook order - used to
+    decide whether an upload needs expanding into one sub-upload per sheet
+    rather than silently only ever reading the first one."""
+    import openpyxl
+
+    wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True)
+    try:
+        return list(wb.sheetnames)
+    finally:
+        wb.close()
 
 
 NUMERIC_FIELDS = {

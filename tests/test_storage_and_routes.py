@@ -372,6 +372,53 @@ def test_bulk_upload_mixed_files_auto_detect_and_confirm_chain(http_client):
     assert len(resp.content) > 1000
 
 
+def _make_multisheet_vat_workbook() -> bytes:
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    summary = wb.active
+    summary.title = "Summary"
+    summary.append(["Box 1", "Box 2", "Box 3", "Box 4", "Box 5", "Box 6", "Box 7", "Box 8", "Box 9"])
+    summary.append([1000, 0, 1000, 200, 800, 15000, 5000, 0, 0])
+    detail = wb.create_sheet("Detail")
+    detail.append(["Date", "Account Code", "Description", "Debit", "Credit"])
+    detail.append(["01/03/2025", "4000", "Sales invoice 101", "", "1000"])
+    detail.append(["05/03/2025", "5000", "Purchase invoice 55", "500", ""])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_multisheet_workbook_expands_into_one_upload_per_sheet(http_client):
+    """A VAT return export with separate Summary/Detail tabs used to be
+    silently reduced to whichever sheet pandas reads by default - every
+    sheet should now become its own classified sub-upload."""
+    c = http_client
+    practice_id = _signup(c, admin_email="multisheet@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Multisheet Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.post(
+        f"/jobs/{job_id}/uploads",
+        files={"files": ("vat_return.xlsx", _make_multisheet_vat_workbook(),
+                          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    from app import storage
+    job = storage.get_job(job_id)
+    assert len(job["uploads"]) == 2
+    by_sheet = {u["sheet_name"]: u for u in job["uploads"].values()}
+    assert by_sheet["Summary"]["report_type"] == "vat_return"
+    assert by_sheet["Detail"]["report_type"] == "nominal_activity"
+    assert by_sheet["Summary"]["display_name"] == "vat_return.xlsx (Summary)"
+
+
 def test_upload_route_rejects_confirm_with_no_report_type(http_client):
     """Guard against silently confirming an upload the system couldn't
     classify and the user didn't pick a type for either - that would mark

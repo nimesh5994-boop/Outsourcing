@@ -331,16 +331,20 @@ def _first_unconfirmed_upload(job: dict) -> str | None:
     return None
 
 
-async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: bytes) -> None:
-    """Classifies and stores a single uploaded file. A genuine Xero-native
-    match (the file's actual layout parses cleanly, not just similar-
-    looking column names) auto-confirms immediately, same as before this
-    feature existed - that's a structural validation, not a guess. Anything
-    else (including PDFs, which flow through the same DataSource - see
-    parsers.py) gets its report type/platform/period guessed and queued
-    for a quick human confirm rather than trusted blind, since a wrong
-    guess here would silently misfile real client financials."""
-    source = parsers.FileDataSource(content, filename=filename)
+async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: bytes,
+                              sheet_name: str | None = None, display_name: str | None = None) -> None:
+    """Classifies and stores a single uploaded file (or, for a multi-sheet
+    workbook, a single sheet of it - see upload_files() below, which is
+    what passes sheet_name/display_name). A genuine Xero-native match (the
+    file's actual layout parses cleanly, not just similar-looking column
+    names) auto-confirms immediately, same as before this feature existed
+    - that's a structural validation, not a guess. Anything else (including
+    PDFs, which flow through the same DataSource - see parsers.py) gets its
+    report type/platform/period guessed and queued for a quick human
+    confirm rather than trusted blind, since a wrong guess here would
+    silently misfile real client financials."""
+    source = parsers.FileDataSource(content, filename=filename, sheet_name=sheet_name)
+    display_name = display_name or filename
 
     xero_report_type = document_detection.try_xero_native(source)
     if xero_report_type:
@@ -353,6 +357,8 @@ async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: byt
         job["uploads"][upload_id]["confirmed"] = True
         job["uploads"][upload_id]["xero_native"] = True
         job["uploads"][upload_id]["period_check"] = period_check
+        job["uploads"][upload_id]["sheet_name"] = sheet_name
+        job["uploads"][upload_id]["display_name"] = display_name
         storage.save_job(job)
         return
 
@@ -388,6 +394,8 @@ async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: byt
     job["uploads"][upload_id]["mapping"] = suggestion
     job["uploads"][upload_id]["validation_note"] = validation_note
     job["uploads"][upload_id]["detection_confidence"] = confidence
+    job["uploads"][upload_id]["sheet_name"] = sheet_name
+    job["uploads"][upload_id]["display_name"] = display_name
     storage.save_job(job)
 
 
@@ -400,8 +408,26 @@ async def upload_files(job_id: str, files: list[UploadFile] = File(...),
         content = await file.read()
         if not content:
             continue
-        job = storage.get_job(job_id)  # re-fetch: each ingest may have just saved the job
-        await _ingest_one_upload(job_id, job, file.filename, content)
+
+        sheet_names = [None]
+        if Path(file.filename).suffix.lower() in (".xlsx", ".xls"):
+            try:
+                found = parsers.excel_sheet_names(content)
+            except Exception:
+                found = []
+            if len(found) > 1:
+                # a workbook with several tabs (e.g. a VAT return export
+                # with separate Summary and Detail sheets) would otherwise
+                # be silently reduced to whichever sheet pandas reads by
+                # default - every sheet becomes its own classified
+                # sub-upload instead, through the exact same path as any
+                # other file in this batch.
+                sheet_names = found
+
+        for sheet in sheet_names:
+            job = storage.get_job(job_id)  # re-fetch: each ingest may have just saved the job
+            display_name = f"{file.filename} ({sheet})" if sheet else file.filename
+            await _ingest_one_upload(job_id, job, file.filename, content, sheet_name=sheet, display_name=display_name)
 
     job = storage.get_job(job_id)
     next_upload_id = _first_unconfirmed_upload(job)
@@ -484,7 +510,7 @@ def _load_canonical_data(job: dict) -> dict:
         if not upload["confirmed"]:
             continue
         content = storage.load_file(upload["file_id"])
-        source = parsers.FileDataSource(content, filename=upload["filename"])
+        source = parsers.FileDataSource(content, filename=upload["filename"], sheet_name=upload.get("sheet_name"))
         report_type = upload["report_type"]
 
         if upload.get("xero_native"):

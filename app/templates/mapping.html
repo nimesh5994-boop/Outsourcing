@@ -2,7 +2,7 @@
 {% block content %}
 <div class="card">
   <h1>Confirm what this file is</h1>
-  <p class="muted">{{ upload.filename }}{% if upload.detection_confidence is defined %} &mdash; guessed with {{ (upload.detection_confidence * 100) | round | int }}% confidence{% endif %}. Check the report type, platform and period below match the file, then confirm the column mapping underneath.</p>
+  <p class="muted">{{ upload.display_name or upload.filename }}{% if upload.detection_confidence is defined %} &mdash; guessed with {{ (upload.detection_confidence * 100) | round | int }}% confidence{% endif %}. Check the report type, platform and period below match the file, then confirm the column mapping underneath.</p>
   {% if upload.validation_note %}<p style="color:#b42318; font-size:13px;">&#9888; {{ upload.validation_note }}</p>{% endif %}
   {% if upload.period_check and upload.period_check.status == 'mismatch' %}<p style="color:#b42318; font-size:13px;">&#9888; {{ upload.period_check.message }}</p>{% endif %}
 
