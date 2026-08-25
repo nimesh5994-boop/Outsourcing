@@ -579,7 +579,9 @@ def test_generate_progress_stream_reports_all_ten_steps_in_order(http_client):
         _json.loads(line[len("data: "):])
         for line in resp.text.split("\n") if line.startswith("data: ")
     ]
-    assert events[-1] == {"step": "complete", "redirect": f"/jobs/{job_id}"}
+    assert events[-1]["step"] == "complete"
+    assert events[-1]["redirect"] == f"/jobs/{job_id}"
+    assert "at" in events[-1]
 
     from app.main import GENERATE_STEPS
     step_events = [e for e in events[:-1] if e["step"] != 5]  # step 5 (AI notes) is off by default -> "skipped" only
@@ -596,6 +598,83 @@ def test_generate_progress_stream_reports_all_ten_steps_in_order(http_client):
     job = storage.get_job(job_id)
     assert job["status"] == "generated"
     assert job["output_file_id"]
+
+
+def test_generate_progress_is_persisted_and_summarized_with_timings(http_client):
+    """Progress events aren't just streamed live and thrown away - each one
+    is saved onto the job as it happens, so a page loaded after the run (or
+    after a stream that nobody watched) can still show what happened and how
+    long each step took. This also covers the classic synchronous POST route,
+    which shares the same generator and must persist identically."""
+    c = http_client
+    practice_id = _signup(c, admin_email="persist-progress@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Persisted Progress Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.post(f"/jobs/{job_id}/generate", follow_redirects=False)
+    assert resp.status_code == 303
+
+    from app import storage
+    from app.main import GENERATE_STEPS, _summarize_progress
+
+    job = storage.get_job(job_id)
+    progress = job.get("progress")
+    assert progress, "generate() must persist progress events onto the job even on the classic POST route"
+    assert progress[-1] == {"step": "complete", "redirect": f"/jobs/{job_id}", "at": progress[-1]["at"]}
+    for evt in progress:
+        assert "at" in evt
+
+    summary = _summarize_progress(progress)
+    assert summary["finished"] is True
+    assert summary["error_message"] is None
+    assert summary["total_seconds"] is not None and summary["total_seconds"] >= 0
+
+    rows_by_step = {r["step"]: r for r in summary["rows"]}
+    for n in range(1, len(GENERATE_STEPS) + 1):
+        row = rows_by_step[n]
+        assert row["label"] == GENERATE_STEPS[n - 1]
+        if n == 5:  # AI notes: off by default -> skipped, no duration
+            assert row["status"] == "skipped"
+            assert row["seconds"] is None
+        else:
+            assert row["status"] == "done"
+            assert row["seconds"] is not None and row["seconds"] >= 0
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    assert "Last generation" in resp.text
+    assert f"finished in {summary['total_seconds']:.1f}s" in resp.text
+
+
+def test_summarize_progress_reports_failure(http_client):
+    """If a run blew up partway through, the summary must say so plainly
+    rather than silently reporting 'finished' - this is what the job detail
+    page's failure banner is driven from."""
+    from app.main import _summarize_progress
+
+    progress = [
+        {"step": 1, "total": 10, "label": "Load data", "status": "running", "at": "2026-01-01T00:00:00+00:00"},
+        {"step": 1, "total": 10, "label": "Load data", "status": "done", "at": "2026-01-01T00:00:01+00:00"},
+        {"step": 2, "total": 10, "label": "Reconcile", "status": "running", "at": "2026-01-01T00:00:01+00:00"},
+        {"step": "error", "message": "boom", "at": "2026-01-01T00:00:02+00:00"},
+    ]
+    summary = _summarize_progress(progress)
+    assert summary["finished"] is False
+    assert summary["error_message"] == "boom"
+    assert summary["total_seconds"] is None
+    row2 = next(r for r in summary["rows"] if r["step"] == 2)
+    assert row2["status"] == "running"
+    assert row2["seconds"] is None
+
+
+def test_summarize_progress_empty_is_none(http_client):
+    from app.main import _summarize_progress
+    assert _summarize_progress(None) is None
+    assert _summarize_progress([]) is None
 
 
 def test_generate_stream_unauthenticated_redirects_to_login(http_client):

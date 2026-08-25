@@ -374,6 +374,19 @@ this environment - if it turns out to buffer the whole response, the
 progress page will still work (it'll just show everything at once, right
 before the redirect, rather than live) rather than break.
 
+**Persisted, not just streamed.** Every step event is written onto
+`job["progress"]` as it happens (`storage.save_job()` per event), whether or
+not anyone is watching the live stream - so the classic POST route persists
+the same trail as the SSE route, and a run that nobody watched live is still
+reviewable afterwards. The job detail page reads this back through
+`_summarize_progress()` and shows a collapsed **Last generation** panel
+under the Generate button: per-step status (done/skipped/still-running) and
+duration in seconds, a total run time, and - if the run errored out - the
+error message in place of a timing. This is the first item from the Pipeline
+Map's action plan (`§05`): a foundation for spotting which step is
+consistently slow or where a run tends to die, without having to have had
+the progress page open when it happened.
+
 ## Corporation Tax computation
 
 Built from `app/tax_rates.py` (the current rates, as a config - not

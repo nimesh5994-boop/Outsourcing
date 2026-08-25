@@ -1,5 +1,6 @@
 import io
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -312,6 +313,7 @@ def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_
         "platforms": PLATFORMS, "periods": PERIODS,
         "uploads_by_type": uploads_by_type,
         "report_notes": client.get("report_notes", {}),
+        "progress_summary": _summarize_progress(job.get("progress")),
     })
 
 
@@ -368,6 +370,47 @@ def _add_ai_reconciliation_notes(results: list, client: dict, job: dict) -> None
             )
         except Exception:
             result.ai_note = ""
+
+
+def _summarize_progress(progress: list[dict] | None) -> dict | None:
+    """Turns the flat list of persisted generate events (see
+    _generate_workbook_steps) into a per-step timing breakdown - a
+    step's duration is just the gap between its own "running" and
+    "done"/"skipped" timestamps, already there for the reading once
+    events are persisted with a timestamp on each one."""
+    if not progress:
+        return None
+
+    by_step: dict[int, dict] = {}
+    for evt in progress:
+        step = evt.get("step")
+        if not isinstance(step, int):
+            continue
+        entry = by_step.setdefault(step, {"step": step, "label": evt.get("label", "")})
+        entry[evt["status"]] = evt["at"]
+        if "detail" in evt:
+            entry["detail"] = evt["detail"]
+
+    rows = []
+    for step in sorted(by_step):
+        entry = by_step[step]
+        running_at, done_at, skipped_at = entry.get("running"), entry.get("done"), entry.get("skipped")
+        seconds = None
+        if running_at and done_at:
+            seconds = (datetime.fromisoformat(done_at) - datetime.fromisoformat(running_at)).total_seconds()
+        status = "done" if done_at else ("skipped" if skipped_at else "running")
+        rows.append({"step": step, "label": entry["label"], "status": status, "seconds": seconds, "detail": entry.get("detail")})
+
+    error_evt = next((e for e in progress if e.get("step") == "error"), None)
+    complete_evt = next((e for e in progress if e.get("step") == "complete"), None)
+    total_seconds = None
+    if complete_evt:
+        total_seconds = (datetime.fromisoformat(complete_evt["at"]) - datetime.fromisoformat(progress[0]["at"])).total_seconds()
+
+    return {
+        "rows": rows, "total_seconds": total_seconds,
+        "finished": complete_evt is not None, "error_message": error_evt["message"] if error_evt else None,
+    }
 
 
 def _first_unconfirmed_upload(job: dict) -> str | None:
@@ -660,11 +703,24 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     without looking at the intermediate events (so its behaviour/response
     is unchanged from before this existed), and the SSE route streams
     those same events to the browser as they're produced. A step's real
-    work happens between its "running" and "done" yields."""
+    work happens between its "running" and "done" yields.
+
+    Every event is also persisted onto job["progress"] (timestamped) as
+    it fires, so the last run's step-by-step timing survives past the
+    live stream - visible on the job page whether or not anyone watched
+    it happen, and still there if the browser was closed mid-run."""
     total = len(GENERATE_STEPS)
+    job["progress"] = []
+    storage.save_job(job)
+
+    def record(evt: dict) -> dict:
+        evt = {**evt, "at": datetime.now(timezone.utc).isoformat()}
+        job["progress"].append(evt)
+        storage.save_job(job)
+        return evt
 
     def event(n: int, status: str, **extra) -> dict:
-        return {"step": n, "total": total, "label": GENERATE_STEPS[n - 1], "status": status, **extra}
+        return record({"step": n, "total": total, "label": GENERATE_STEPS[n - 1], "status": status, **extra})
 
     template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
 
@@ -748,7 +804,7 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     storage.save_job(job)
     yield event(10, "done")
 
-    yield {"step": "complete", "redirect": f"/jobs/{job_id}"}
+    yield record({"step": "complete", "redirect": f"/jobs/{job_id}"})
 
 
 @app.post("/jobs/{job_id}/generate")
@@ -784,7 +840,10 @@ def generate_stream(job_id: str, user: dict = Depends(auth.current_user_dep)):
             for evt in _generate_workbook_steps(job_id, job, client):
                 yield f"data: {json.dumps(evt)}\n\n"
         except Exception as exc:
-            yield f"data: {json.dumps({'step': 'error', 'message': str(exc)})}\n\n"
+            error_evt = {"step": "error", "message": str(exc), "at": datetime.now(timezone.utc).isoformat()}
+            job["progress"].append(error_evt)
+            storage.save_job(job)
+            yield f"data: {json.dumps(error_evt)}\n\n"
 
     return StreamingResponse(
         event_source(), media_type="text/event-stream",

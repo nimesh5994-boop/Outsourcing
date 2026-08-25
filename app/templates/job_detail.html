@@ -28,6 +28,30 @@
   <h2>Generate</h2>
   <a class="button" href="/jobs/{{ job.id }}/generate/progress">Generate working paper</a>
   <p class="muted">You can generate at any time &mdash; unconfirmed uploads are skipped, so any report type you haven't provided just shows as "no data" on its schedule. Shows live progress through the ten build steps.</p>
+
+  {% if progress_summary %}
+  <details style="margin-top:16px">
+    <summary style="cursor:pointer; color:var(--muted); font-size:13px;">Last generation
+      {%- if progress_summary.error_message %} &mdash; failed
+      {%- elif progress_summary.finished %} &mdash; finished in {{ "%.1f"|format(progress_summary.total_seconds) }}s
+      {%- else %} &mdash; in progress, or interrupted before it finished
+      {%- endif -%}
+    </summary>
+    <table style="margin-top:10px">
+      <tr><th>Step</th><th>Status</th><th>Duration</th></tr>
+      {% for row in progress_summary.rows %}
+      <tr>
+        <td>{{ row.step }}. {{ row.label }}</td>
+        <td><span class="badge {{ 'confirmed' if row.status == 'done' else ('na' if row.status == 'skipped' else 'pending') }}">{{ row.status }}{% if row.detail %} ({{ row.detail }}){% endif %}</span></td>
+        <td class="muted">{{ "%.2fs"|format(row.seconds) if row.seconds is not none else "-" }}</td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% if progress_summary.error_message %}
+    <p class="error-text" style="margin-top:10px">&#9888; {{ progress_summary.error_message }}</p>
+    {% endif %}
+  </details>
+  {% endif %}
 </div>
 
 {% for rt in report_types %}
