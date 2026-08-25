@@ -26,10 +26,8 @@
 
 <div class="card">
   <h2>Generate</h2>
-  <form method="post" action="/jobs/{{ job.id }}/generate">
-    <button type="submit">Generate working paper</button>
-  </form>
-  <p class="muted">You can generate at any time &mdash; unconfirmed uploads are skipped, so any report type you haven't provided just shows as "no data" on its schedule.</p>
+  <a class="button" href="/jobs/{{ job.id }}/generate/progress">Generate working paper</a>
+  <p class="muted">You can generate at any time &mdash; unconfirmed uploads are skipped, so any report type you haven't provided just shows as "no data" on its schedule. Shows live progress through the ten build steps.</p>
 </div>
 
 {% for rt in report_types %}

@@ -346,6 +346,34 @@ grants, and corporation tax, each with a blank Status and Notes column for
 the preparer to complete. Deliberately doesn't repeat anything the
 data-driven checks above already cover.
 
+## Live progress during Generate
+
+Generating a working paper runs ten real steps in sequence - loading
+uploads, three check modules, the optional AI notes step, control account
+rollforwards, the nominal matrix, Corporation Tax, fixed asset registers,
+then building the workbook itself (see `GENERATE_STEPS` /
+`_generate_workbook_steps()` in `main.py`, the one place this logic
+lives). Clicking **Generate working paper** now opens a small progress
+page (`job_generate.html`) instead of just waiting on a blank load: it
+opens a Server-Sent Events connection to `GET /jobs/{id}/generate/stream`
+and lights up each step as it starts and finishes, redirecting to the job
+page the moment the workbook is saved. A step that didn't run (AI notes,
+when not enabled for that template) shows as skipped rather than stuck.
+
+The original `POST /jobs/{id}/generate` still exists, unchanged in
+behaviour - it just exhausts the same generator without looking at the
+intermediate events, so nothing that depended on the old classic
+request/redirect contract (including the test suite) needed to change.
+
+**Known unverified risk:** SSE depends on the response actually being
+streamed to the browser incrementally rather than buffered until the
+whole thing finishes. This is confirmed working locally
+(`uvicorn`/Starlette stream it correctly), but Vercel's Python runtime's
+streaming behaviour hasn't been verified against the real deployment from
+this environment - if it turns out to buffer the whole response, the
+progress page will still work (it'll just show everything at once, right
+before the redirect, rather than live) rather than break.
+
 ## Corporation Tax computation
 
 Built from `app/tax_rates.py` (the current rates, as a config - not
@@ -568,9 +596,11 @@ clutter.
 layer, the full practice -> template -> client -> job -> upload ->
 generate -> download HTTP flow (including a bulk upload of mixed Xero/
 CSV/PDF files walked through the auto-detect confirm chain, a multi-sheet
-workbook expanding into one upload per sheet, and - with a mocked
-Anthropic client - an AI-assisted note actually reaching the downloaded
-workbook end to end), and the access-control model (signup, login, wrong
+workbook expanding into one upload per sheet, the SSE progress stream
+reporting all ten generate steps in order and leaving the job in the same
+generated state as the classic POST route, and - with a mocked Anthropic
+client - an AI-assisted note actually reaching the downloaded workbook
+end to end), and the access-control model (signup, login, wrong
 password, unauthenticated redirect, a preparer scoped to only their
 granted clients, a manager blocked from user management, and cross-
 practice access denied) against a real (throwaway) Postgres schema

@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1>Generating &mdash; {{ job.client_name }}</h1>
+  <p class="muted">{{ job.current_label }}</p>
+  <ol id="gen-steps" class="progress-steps"></ol>
+  <p id="gen-error" class="error-text" style="display:none"></p>
+  <p class="muted" id="gen-fallback" style="margin-top:16px">
+    Taking a while, or nothing moving? <a href="/jobs/{{ job.id }}">Go back to the job</a> and try again.
+  </p>
+</div>
+
+<script>
+(function () {
+  var labels = {{ generate_steps | tojson }};
+  var list = document.getElementById("gen-steps");
+  labels.forEach(function (label, i) {
+    var li = document.createElement("li");
+    li.id = "gen-step-" + (i + 1);
+    li.className = "progress-step pending";
+    var marker = document.createElement("span");
+    marker.className = "progress-step-marker";
+    var text = document.createElement("span");
+    text.className = "progress-step-label";
+    text.textContent = label;
+    li.appendChild(marker);
+    li.appendChild(text);
+    list.appendChild(li);
+  });
+
+  function setStep(n, status, detailText) {
+    var el = document.getElementById("gen-step-" + n);
+    if (!el) return;
+    el.className = "progress-step " + status;
+    if (detailText) {
+      el.querySelector(".progress-step-label").textContent = labels[n - 1] + " (" + detailText + ")";
+    }
+  }
+
+  var source = new EventSource("/jobs/{{ job.id }}/generate/stream");
+
+  source.onmessage = function (evt) {
+    var data = JSON.parse(evt.data);
+
+    if (data.step === "complete") {
+      source.close();
+      document.getElementById("gen-fallback").style.display = "none";
+      window.location = data.redirect;
+      return;
+    }
+    if (data.step === "error") {
+      source.close();
+      var errEl = document.getElementById("gen-error");
+      errEl.textContent = "Something went wrong: " + data.message;
+      errEl.style.display = "block";
+      return;
+    }
+    if (data.status === "skipped") {
+      setStep(data.step, "skipped", data.detail);
+    } else {
+      setStep(data.step, data.status);
+    }
+  };
+
+  source.onerror = function () {
+    // EventSource retries automatically on a dropped connection; if the
+    // whole thing never got going, the static fallback message above
+    // (already on the page) is the way out - nothing further to do here.
+  };
+})();
+</script>
+{% endblock %}

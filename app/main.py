@@ -1,8 +1,9 @@
 import io
+import json
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import RedirectResponse, Response
+from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -632,32 +633,84 @@ def _build_ct_computation(job: dict, data: dict) -> corporation_tax.CTComputatio
     )
 
 
-@app.post("/jobs/{job_id}/generate")
-def generate(job_id: str, user: dict = Depends(auth.current_user_dep)):
-    job, client = _authorize_job(user, job_id)
+# Step labels shown on the live progress page (job_generate.html) - kept
+# here as the single source of truth; the JS on that page has its own
+# copy for offline rendering (a step's label needs to exist in the DOM
+# before its first SSE event arrives), so keep the two in sync if this
+# list ever changes.
+GENERATE_STEPS = [
+    "Loading and re-parsing confirmed uploads",
+    "Running reconciliation checks",
+    "Running anomaly detection",
+    "Running compliance checks",
+    "Generating AI-assisted reconciliation notes",
+    "Building control account rollforwards",
+    "Building the nominal activity matrix",
+    "Computing Corporation Tax",
+    "Building fixed asset registers",
+    "Building the Excel workbook",
+]
+
+
+def _generate_workbook_steps(job_id: str, job: dict, client: dict):
+    """Does the real work of generating a working paper, one step at a
+    time, yielding a small progress event before/after each of the ten
+    steps in GENERATE_STEPS. This is the one place the generation logic
+    lives - the classic POST route below just exhausts this generator
+    without looking at the intermediate events (so its behaviour/response
+    is unchanged from before this existed), and the SSE route streams
+    those same events to the browser as they're produced. A step's real
+    work happens between its "running" and "done" yields."""
+    total = len(GENERATE_STEPS)
+
+    def event(n: int, status: str, **extra) -> dict:
+        return {"step": n, "total": total, "label": GENERATE_STEPS[n - 1], "status": status, **extra}
+
     template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
 
+    yield event(1, "running")
     data = _load_canonical_data(job)
     pl_current = data.get("pl_current")
     current_year_profit = float(pl_current["amount"].sum()) if pl_current is not None and not pl_current.empty else None
-    results = (
-        recon.run_all_recons(data)
-        + anomaly_detection.run_all_anomaly_checks(data.get("nominal_current"))
-        + compliance_checks.run_all_compliance_checks(
-            data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"), current_year_profit,
-        )
+    yield event(1, "done")
+
+    yield event(2, "running")
+    results = recon.run_all_recons(data)
+    yield event(2, "done")
+
+    yield event(3, "running")
+    results = results + anomaly_detection.run_all_anomaly_checks(data.get("nominal_current"))
+    yield event(3, "done")
+
+    yield event(4, "running")
+    results = results + compliance_checks.run_all_compliance_checks(
+        data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"), current_year_profit,
     )
+    yield event(4, "done")
 
     if template and template["config"].get("ai_reconciliation_notes", {}).get("enabled"):
+        yield event(5, "running")
         _add_ai_reconciliation_notes(results, client, job)
+        yield event(5, "done")
+    else:
+        yield event(5, "skipped", detail="not enabled for this template")
 
+    yield event(6, "running")
     ca_results = control_accounts.build_all_rollforwards(
         data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
         data.get("aged_debtors"), data.get("aged_creditors"),
     )
-    mx_results = nominal_matrix.build_all_matrices(data.get("tb_current"), data.get("nominal_current"))
-    ct_computation = _build_ct_computation(job, data)
+    yield event(6, "done")
 
+    yield event(7, "running")
+    mx_results = nominal_matrix.build_all_matrices(data.get("tb_current"), data.get("nominal_current"))
+    yield event(7, "done")
+
+    yield event(8, "running")
+    ct_computation = _build_ct_computation(job, data)
+    yield event(8, "done")
+
+    yield event(9, "running")
     fixed_asset_result = fixed_assets.category_level_rollforward(
         data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
     )
@@ -665,10 +718,10 @@ def generate(job_id: str, user: dict = Depends(auth.current_user_dep)):
         data.get("fixed_asset_register"), data.get("nominal_current"), data.get("tb_current"),
         period_days=_period_days(job),
     )
+    yield event(9, "done")
 
-    template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
+    yield event(10, "running")
     template_bytes = storage.load_file(template["file_id"]) if template else None
-
     if template_bytes is not None:
         wb = build_workbook_into_template(
             template_bytes, template["config"],
@@ -690,12 +743,53 @@ def generate(job_id: str, user: dict = Depends(auth.current_user_dep)):
         "output", job_id, output_filename, buffer.getvalue(),
         content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
-
     job["status"] = "generated"
     job["summary"] = [{"name": r.name, "status": r.status, "message": r.message} for r in results]
     storage.save_job(job)
+    yield event(10, "done")
 
+    yield {"step": "complete", "redirect": f"/jobs/{job_id}"}
+
+
+@app.post("/jobs/{job_id}/generate")
+def generate(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    job, client = _authorize_job(user, job_id)
+    for _event in _generate_workbook_steps(job_id, job, client):
+        pass
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+@app.get("/jobs/{job_id}/generate/progress")
+def generate_progress(request: Request, job_id: str, user: dict = Depends(auth.current_user_dep)):
+    job, _client = _authorize_job(user, job_id)
+    return templates.TemplateResponse("job_generate.html", {
+        "request": request, "current_user": user, "job": job, "generate_steps": GENERATE_STEPS,
+    })
+
+
+@app.get("/jobs/{job_id}/generate/stream")
+def generate_stream(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Server-Sent Events: the same ten-step generation as the POST route
+    above, but each step's progress is pushed to the browser as it
+    happens instead of only being visible once the whole thing finishes.
+    A GET that triggers real work is unusual REST-wise, but it's what
+    SSE/EventSource (the simplest way to stream progress without adding a
+    JS framework or a job queue) requires, it's auth-gated the same as
+    every other route, and it's only ever reached via the button on
+    job_detail.html - never linked or crawlable."""
+    job, client = _authorize_job(user, job_id)
+
+    def event_source():
+        try:
+            for evt in _generate_workbook_steps(job_id, job, client):
+                yield f"data: {json.dumps(evt)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'step': 'error', 'message': str(exc)})}\n\n"
+
+    return StreamingResponse(
+        event_source(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/jobs/{job_id}/download")

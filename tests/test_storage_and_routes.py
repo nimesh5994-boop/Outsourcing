@@ -551,6 +551,61 @@ def test_ai_reconciliation_note_reaches_the_generated_workbook(http_client, monk
     assert "no nominal ledger postings" in sheet_text
 
 
+def test_generate_progress_stream_reports_all_ten_steps_in_order(http_client):
+    """The SSE progress endpoint (added so the person generating a
+    working paper can see what's happening instead of staring at a
+    blocked page) must report every one of the ten real steps, in the
+    right order, ending with a completion event - and must leave the job
+    in exactly the same generated state as the classic POST route does."""
+    c = http_client
+    practice_id = _signup(c, admin_email="progress@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Progress Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.get(f"/jobs/{job_id}/generate/progress")
+    assert resp.status_code == 200
+    assert "EventSource" in resp.text
+
+    resp = c.get(f"/jobs/{job_id}/generate/stream")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("text/event-stream")
+
+    import json as _json
+    events = [
+        _json.loads(line[len("data: "):])
+        for line in resp.text.split("\n") if line.startswith("data: ")
+    ]
+    assert events[-1] == {"step": "complete", "redirect": f"/jobs/{job_id}"}
+
+    from app.main import GENERATE_STEPS
+    step_events = [e for e in events[:-1] if e["step"] != 5]  # step 5 (AI notes) is off by default -> "skipped" only
+    seen_steps = [e["step"] for e in step_events]
+    assert seen_steps == sorted(seen_steps)  # strictly non-decreasing: steps arrive in order
+    for n in range(1, len(GENERATE_STEPS) + 1):
+        if n == 5:
+            assert any(e["step"] == 5 and e["status"] == "skipped" for e in events)
+            continue
+        assert any(e["step"] == n and e["status"] == "running" for e in events)
+        assert any(e["step"] == n and e["status"] == "done" for e in events)
+
+    from app import storage
+    job = storage.get_job(job_id)
+    assert job["status"] == "generated"
+    assert job["output_file_id"]
+
+
+def test_generate_stream_unauthenticated_redirects_to_login(http_client):
+    c = http_client
+    c.cookies.clear()
+    resp = c.get("/jobs/job_doesnotmatter/generate/stream", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/login")
+
+
 def test_upload_route_rejects_confirm_with_no_report_type(http_client):
     """Guard against silently confirming an upload the system couldn't
     classify and the user didn't pick a type for either - that would mark
