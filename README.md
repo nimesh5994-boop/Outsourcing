@@ -266,6 +266,7 @@ PDF, in any order), and the system works out what each one is:
 | VAT Reconciliation (Box 1 & 4) | General Ledger matched transaction-by-transaction against the filed return's Sales and Purchases detail - a dedicated workspace, see below |
 | PAYE Reconciliation | BrightPay payroll data matched against the General Ledger - Net Pay per employee per month, HMRC PAYE & NI and Pension Contributions as monthly totals - a dedicated workspace, see below |
 | Corporation Tax computation | Current UK rates (small profits/marginal relief/main rate) applied to accounting profit, checked against the booked tax charge |
+| Statutory filing deadlines | Companies House accounts filing, CT600 filing, and CT payment deadlines - computed purely from the job's period end, no upload needed - see below |
 | Fixed asset register (category) | Cost/depreciation rollforward per asset category, derived from TB + nominal activity, checked against the TB |
 | Fixed asset register (asset detail) | Prior-year register rolled forward asset-by-asset, new additions/possible disposals flagged from nominal activity, totals checked against TB |
 | Contact coding consistency | A contact whose postings are mostly on one nominal code but a small minority land on a different one - the "BT: 10 postings to Telephone, 2 to Light & Heat" pattern - flags the minority transactions with the likely correct code |
@@ -589,6 +590,41 @@ Every generated CT schedule also states the rates used and when they were
 last verified, so a stale config is visible on the workbook itself even
 between routine checks.
 
+## Statutory filing deadlines
+
+Built from `app/statutory_deadlines.py`: a real job file always states
+somewhere when the accounts and Corporation Tax return are due - this
+system had nowhere at all for that until now, despite needing nothing
+but the period end date already set when the job was created. Computes
+three dates for an ordinary UK private limited company:
+
+- **Companies House accounts filing deadline** - normally 9 months after
+  the period end, but governed by the Companies Act 2006 s.442
+  Accounting Reference Date rule: if the period end is itself the last
+  day of its calendar month (e.g. 31 December, or 28 February in a
+  non-leap year), the deadline is the *last day* of the target month 9
+  months later - regardless of how many days that month actually has -
+  not just the same day-of-month. Both cases are handled explicitly
+  (`_add_months_ch_style`), since getting this wrong silently would be
+  worse than not having the feature at all.
+- **Corporation Tax return (CT600) filing deadline** - 12 months after
+  the period end, HMRC's plain anniversary date (no ARD-style special
+  case).
+- **Corporation Tax payment deadline** - 9 months and 1 day after the
+  period end - stated explicitly as assuming the company pays by a
+  single instalment (augmented profits under £1.5m, scaled down for a
+  short period or associated companies), not the quarterly instalment
+  regime a large company must use instead.
+
+Always status `ok` (these are facts, not findings), so it never gets in
+the way of what actually needs review - just states the three dates on
+the Index sheet and its own schedule. Deliberately doesn't attempt a
+first set of accounts (its own 21-months-from-incorporation rule) or the
+confirmation statement (due from the incorporation/last-statement
+anniversary, not the accounting period) - neither is derivable from the
+job's period dates alone, and guessing either would be worse than
+leaving it out.
+
 ## Nominal analysis matrix
 
 Built from `app/nominal_matrix.py`: for a chosen account (Bank, or the
@@ -797,6 +833,7 @@ app/
   financial_statements.py      structured P&L / Balance Sheet with the explicit balance check
   corporation_tax.py            UK Corporation Tax computation (marginal relief etc.)
   tax_rates.py                   the current CT rates config, monitored for HMRC changes
+  statutory_deadlines.py           Companies House / HMRC filing deadline calculator (period dates only)
   data_sheets.py                  writes hidden DATA_* raw-data sheets for the formula engine
   xlformulas.py                    Excel formula-string builders (SUMPRODUCT-based, see above)
   excel_builder.py                  builds the final .xlsx: house-style headers, numbered index,
@@ -930,6 +967,15 @@ material-OTHER note never flipping status to "review" by itself, and the
 unallocated-transaction suggestion (a dominant contact history producing
 a suggestion, a 50/50 split or too little history correctly producing
 none).
+
+`tests/test_statutory_deadlines.py` covers the filing deadline
+calculator's date arithmetic directly (pure functions, no data or
+database at all): the Companies House Accounting Reference Date special
+case for a period end that IS the last day of its calendar month
+(31 December, 28 February in a non-leap year) landing on the last day of
+the target month rather than the same day-of-month, the plain case where
+it isn't, and that HMRC's CT600/CT payment deadlines don't share that
+special case.
 
 `tests/test_document_detection.py` covers the auto-detection/PDF-extraction
 unit logic directly (no database needed): Xero-native matching, the
