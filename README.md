@@ -501,6 +501,7 @@ already ingested, so the system flags them automatically:
 | Dividend vs distributable reserves review | Compares dividends declared this year against retained earnings b/fwd + this year's profit; flags a potential unlawful dividend if declared amounts exceed what's available |
 | Petty cash running balance review | Rolls the petty cash account's balance forward transaction by transaction through the year; flags any point it goes negative (physically impossible for cash, so it means a mis-dated/mis-posted entry or cash fronted by the business) |
 | Loan facility review | Detects Bounce Back Loan / Hire Purchase / Bank Loan-style accounts and lists the specific checklist points that apply to each (BBL's 12-month interest holiday, HP's within/after-one-year split, agreement/statement received) - a reminder, not a computed check, since there's no repayment schedule or agreement in the data this system has |
+| Going concern indicators (`app/going_concern.py`) | Negative net current assets (a working-capital deficit) and negative net assets (balance sheet insolvency), from the already-derived Balance Sheet statement - purely an arithmetic fact about the balance sheet shape, explicitly never presented as a verdict on going concern itself, which needs judgement and forward-looking information this system has no way to derive from historical accounting data alone |
 
 **Manual checklist tab** (`app/excel_builder.py: build_compliance_checklist_sheet`,
 config key `compliance_checklist`) - a static, editable pro-forma sheet
@@ -858,6 +859,7 @@ app/
   reconciliation_agent.py    opt-in LLM explanation for flagged checks (no API calls from recon.py itself)
   anomaly_detection.py       cross-transaction checks (miscoding, duplicates, unusual posting dates)
   compliance_checks.py        data-driven checklist checks (DLA/S455, dividends, petty cash, loans)
+  going_concern.py             negative net current assets / negative net assets indicators
   control_accounts.py       control account rollforward + aged breakdown engine
   nominal_matrix.py          nominal activity → contra nominal code analysis matrix (+ formula row-id grouping)
   fixed_assets.py             category-level + asset-level fixed asset register engine
@@ -1019,6 +1021,17 @@ account already covered by its own dedicated schedule ("Accrued
 Corporation Tax") to avoid double-counting the same balance, flagging a
 line that doesn't tie to the TB, and the transaction-level detail behind
 each line's movement.
+
+`tests/test_going_concern.py` covers the Going Concern indicators check
+directly (in-memory DataFrames, no database): a healthy balance sheet
+producing no flags, both indicators firing together, a working-capital
+deficit that doesn't imply negative net assets overall producing only
+one flag - and specifically the sign-convention regression that matters
+most, since `financial_statements.build_bs_statement`'s own "Current
+liabilities" line is displayed flipped to a positive number (not
+negative the way "NET ASSETS" is genuinely signed) - a real bug found
+and fixed while building this feature, which would otherwise have
+silently inverted the whole analysis.
 
 `tests/test_document_detection.py` covers the auto-detection/PDF-extraction
 unit logic directly (no database needed): Xero-native matching, the
