@@ -40,6 +40,23 @@ def test_recon_engine_runs_all_checks(canonical_data):
     assert tb_check.status == "ok"
 
 
+def test_debtors_creditors_control_recon_lists_every_customer_from_the_aged_report():
+    # the aggregate total-vs-TB check alone isn't enough - a preparer
+    # needs the client-wise list exactly as submitted in the aged report,
+    # not just a single reconciling total
+    aged = pd.DataFrame([
+        {"customer": "Acme Ltd", "current": 500.0, "bucket_1": 100.0, "bucket_2": 0.0, "bucket_3": 0.0, "bucket_4": 0.0, "older": 0.0, "total": 600.0},
+        {"customer": "Widgets Co", "current": 200.0, "bucket_1": 0.0, "bucket_2": 0.0, "bucket_3": 0.0, "bucket_4": 0.0, "older": 0.0, "total": 200.0},
+    ])
+    tb = pd.DataFrame([{"account_code": "1100", "account_name": "TRADE DEBTORS CONTROL", "account_type": "Current Asset", "balance": 800.0}])
+    result = recon.debtors_creditors_control_recon(aged, tb, ["debtors control", "trade debtors"], "customer", "Debtors control recon")
+    assert result.status == "ok"
+    assert list(result.extra_detail["Customer"]) == ["Acme Ltd", "Widgets Co"]
+    assert list(result.extra_detail["Total"]) == [600.0, 200.0]
+    assert result.extra_detail.iloc[0]["1 month"] == 100.0
+    assert "Customer-wise listing" in result.extra_detail_label
+
+
 def test_control_account_rollforwards_compute_correctly(canonical_data):
     # the hand-built sample nominal activity is an illustrative subset, not a
     # complete GL, so accounts won't all tie out perfectly - what matters is

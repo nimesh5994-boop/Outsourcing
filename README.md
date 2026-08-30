@@ -257,10 +257,10 @@ PDF, in any order), and the system works out what each one is:
 | Balance Sheet balance check | Net Assets vs Total Equity, with the current year's profit/(loss) explicitly bridged in (it isn't closed to retained earnings in the TB itself) - shown on the B/S sheet, not just the Index |
 | Variance analysis | Every nominal code, current vs comparative, flagged if it moves >10% and >£500 |
 | Nominal activity review | Flags suspense postings, round-sum manual journals, and descriptions that read like pending corrections |
-| Debtors/creditors control recon | Aged listing total vs TB control account balance |
+| Debtors/creditors control recon | Aged listing total vs TB control account balance, with the full client-wise listing (every customer/supplier, every ageing bucket, exactly as submitted) attached |
 | Control account rollforwards | B/fwd + movements = c/fwd for any balance-sheet account with nominal detail, with the aged listing attached as a breakdown of debtors/creditors closing balances specifically - plus the actual postings behind the movement and, where there's no aged listing, a movement-by-contact view - see below |
 | Control accounts - possible miscoding | Postings coded to the wrong balance-sheet control account, found by contact identity - see below |
-| Nominal analysis matrix | Every transaction against an account allocated to its contra nominal code; multi-way splits and unallocated amounts flagged for manual review |
+| Nominal analysis matrix | Every transaction against an account allocated to its contra nominal code; multi-way splits and unallocated amounts flagged for manual review - plus what's actually inside the OTHER catch-all, and suggested allocations for unallocated items based on that contact's own history - see below |
 | Bank reconciliation | Statement closing balance vs TB |
 | VAT cross-check | VAT return boxes vs P&L turnover and VAT control account |
 | VAT Reconciliation (Box 1 & 4) | General Ledger matched transaction-by-transaction against the filed return's Sales and Purchases detail - a dedicated workspace, see below |
@@ -564,6 +564,45 @@ Every generated CT schedule also states the rates used and when they were
 last verified, so a stale config is visible on the workbook itself even
 between routine checks.
 
+## Nominal analysis matrix
+
+Built from `app/nominal_matrix.py`: for a chosen account (Bank, or the
+accounts with the most transaction volume by default), every transaction
+is allocated to its contra nominal code as a matrix column - the pattern
+used in schedules like "Bank Receipt Analysis" / "Purchases & Expenses"
+in the real working paper - so a reviewer sees at a glance where the
+money went. Requires a Xero Account Transactions export (its "Related
+account" field is what makes contra-account allocation possible at all);
+generic-mapped uploads won't have this schedule. Contra accounts beyond
+the top 10 by value are folded into a single OTHER column so the matrix
+stays readable, and any transaction with no contra code at all is
+flagged UNALLOCATED.
+
+Two more features, same "read the GL in depth, surface the assumption"
+philosophy as FAR and control accounts above:
+
+**What's actually inside OTHER**: every matrix now attaches, as
+`extra_detail`, exactly which contra accounts got folded together - each
+with its own net amount and transaction count - so OTHER is never a dead
+end for a reviewer. When one of those folded-in accounts is itself
+individually material (> £500), the result message says so explicitly:
+folding into OTHER is purely a display-column cap, not a materiality
+judgement, and a large contra account that only missed the top-10 cut
+shouldn't read as immaterial. Advisory only - like FAR's system-estimated
+depreciation, this never by itself flags the matrix "review".
+
+**Suggested allocations for unallocated transactions**
+(`suggest_unallocated_reallocations`): for a transaction with no contra
+code at all, checks that SAME contact's other, already-allocated
+transactions on the same account - this client's own transaction
+history, not a generic guess, the same "client's own data as vocabulary"
+approach as FAR's capex suggestion and control accounts' miscoding
+suggestion. Only suggested when one contra account clearly dominates
+that contact's history (a real majority, over a real sample) - otherwise
+left as a genuine unallocated item with no guess attached. Runs as its
+own check across every matrix account with a candidate table of exactly
+what's suggested and why; never allocates anything itself.
+
 ## Control account rollforwards
 
 Built from `app/control_accounts.py`: for every balance-sheet account
@@ -848,6 +887,16 @@ only when there's no aged-listing breakdown to conflict with, and the
 control-account miscoding suggestion - including the regression case
 that matters most, that a normal double-entry contra-leg (a receipt
 through Bank, an invoice's Sales leg) is never mistaken for a miscoding.
+
+`tests/test_nominal_matrix.py` covers the nominal analysis matrix
+robustness features directly (in-memory DataFrames, no database): the
+OTHER-bucket breakdown, the regression case that UNALLOCATED itself
+folding into OTHER (with enough distinct contra accounts) is never
+double-reported alongside its own already-stated message clause, the
+material-OTHER note never flipping status to "review" by itself, and the
+unallocated-transaction suggestion (a dominant contact history producing
+a suggestion, a 50/50 split or too little history correctly producing
+none).
 
 `tests/test_document_detection.py` covers the auto-detection/PDF-extraction
 unit logic directly (no database needed): Xero-native matching, the

@@ -992,6 +992,9 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
 
     yield event(7, "running")
     mx_results = nominal_matrix.build_all_matrices(data.get("tb_current"), data.get("nominal_current"))
+    results = results + [nominal_matrix.suggest_unallocated_reallocations(
+        data.get("nominal_current"), [r.account_code for r in mx_results] or None,
+    )]
     yield event(7, "done")
 
     yield event(8, "running")

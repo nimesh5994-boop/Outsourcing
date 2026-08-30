@@ -911,7 +911,12 @@ def build_matrix_sheet(wb: Workbook, client_name: str, current_label: str, ref: 
         ws.cell(row=table_row, column=1, value="No data available.")
         return
     df = result.matrix.rename(columns={"date": "Date", "reference": "Reference", "description": "Description", "contact": "Contact"})
-    _write_dataframe(ws, df, start_row=table_row)
+    next_row = _write_dataframe(ws, df, start_row=table_row)
+
+    if not result.extra_detail.empty:
+        ws.cell(row=next_row + 1, column=1, value=result.extra_detail_label.upper()).font = SCHEDULE_FONT
+        _write_dataframe(ws, result.extra_detail, start_row=next_row + 2)
+
     ws.freeze_panes = f"A{table_row + 1}"
 
 
@@ -987,6 +992,10 @@ def build_matrix_sheet_formulas(
         diff_cell = ws.cell(row=r, column=diff_col, value=f"={get_column_letter(total_col)}{r}-({actual_formula[1:]})")
         diff_cell.number_format = CURRENCY_FMT
         r += 1
+
+    if not result.extra_detail.empty:
+        ws.cell(row=r + 1, column=1, value=result.extra_detail_label.upper()).font = SCHEDULE_FONT
+        _write_dataframe(ws, result.extra_detail, start_row=r + 2)
 
     ws.freeze_panes = f"A{table_row + 1}"
     return sheet_name

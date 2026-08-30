@@ -136,7 +136,24 @@ def debtors_creditors_control_recon(aged: pd.DataFrame, tb: pd.DataFrame, contro
     }])
     status = "ok" if abs(variance) <= MATERIALITY_AMOUNT else "review"
     msg = "Aged listing agrees to the control account." if status == "ok" else f"Aged listing does not agree to the TB control account by £{variance:,.2f} - investigate unposted invoices/credits or a control account misstatement."
-    return ReconResult(label, status, msg, detail)
+
+    result = ReconResult(label, status, msg, detail)
+    # The client-wise list exactly as submitted in the aged report - every
+    # column uploaded (current/overdue buckets/total), not just the
+    # aggregate above, so a preparer can see who actually makes up the
+    # balance without having to reopen the source file.
+    party_label = "Customer" if party_col == "customer" else "Supplier"
+    display_cols = [c for c in ["current", "bucket_1", "bucket_2", "bucket_3", "bucket_4", "older", "total"] if c in aged.columns]
+    display_names = {
+        "current": "Current", "bucket_1": "1 month", "bucket_2": "2 months", "bucket_3": "3 months",
+        "bucket_4": "4+ months", "older": "Older", "total": "Total",
+    }
+    party_detail = aged[[party_col, *display_cols]].rename(
+        columns={party_col: party_label, **{c: display_names[c] for c in display_cols}}
+    )
+    result.extra_detail = party_detail
+    result.extra_detail_label = f"{party_label}-wise listing (per aged report submitted)"
+    return result
 
 
 def bank_reconciliation(bank_statement: pd.DataFrame, tb: pd.DataFrame, bank_account_names: list[str] | None = None) -> ReconResult:
