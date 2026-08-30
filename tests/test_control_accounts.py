@@ -29,6 +29,32 @@ def _nom_row(date, code, name, debit=0.0, credit=0.0, description="", reference=
             "debit": debit, "credit": credit}
 
 
+# --- find_control_accounts account-type coverage --------------------------
+
+def test_find_control_accounts_covers_prepayment_inventory_and_non_current_types():
+    # a regression test for a real gap: Prepayment, Inventory, Non-current
+    # Asset and Non-current Liability are real, standard Xero account
+    # types that were previously entirely missing from control-account
+    # discovery - not because a prepayment or stock account isn't a
+    # control account, but because its type string just wasn't in the set
+    tb_current = pd.DataFrame([
+        {"account_code": "620", "account_name": "PREPAYMENTS", "account_type": "Prepayment"},
+        {"account_code": "630", "account_name": "STOCK ON HAND", "account_type": "Inventory"},
+        {"account_code": "900", "account_name": "BANK LOAN", "account_type": "Non-current Liability"},
+        {"account_code": "910", "account_name": "LONG TERM DEPOSIT", "account_type": "Non-current Asset"},
+        {"account_code": "6350", "account_name": "COMPUTER EQUIPMENT - COST", "account_type": "Fixed Asset"},
+    ])
+    nominal = pd.DataFrame([
+        _nom_row("2025-06-01", "620", "PREPAYMENTS", debit=2400.0, contact="AXA Insurance"),
+        _nom_row("2025-07-01", "630", "STOCK ON HAND", debit=5000.0, contact="Supplier Ltd"),
+        _nom_row("2025-08-01", "900", "BANK LOAN", credit=1000.0, contact="Barclays"),
+        _nom_row("2025-09-01", "910", "LONG TERM DEPOSIT", debit=1000.0, contact="Landlord"),
+        _nom_row("2025-10-01", "6350", "COMPUTER EQUIPMENT - COST", debit=1200.0, contact="Dell"),
+    ])
+    codes = {code for code, _ in ca.find_control_accounts(tb_current, nominal)}
+    assert codes == {"620", "630", "900", "910"}  # fixed assets excluded - handled by fixed_assets.py instead
+
+
 # --- extra_detail / movement_breakdown -----------------------------------
 
 def test_build_rollforward_attaches_movement_transactions_as_extra_detail():

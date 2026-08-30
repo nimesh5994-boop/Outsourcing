@@ -636,7 +636,15 @@ should equal balance c/fwd per the current year TB - any difference is
 exactly what needs journalling or investigating. Debtors/creditors
 control accounts also carry the full aged listing as a breakdown of the
 closing balance, so a reader sees what the balance is actually made up
-of, not just its total.
+of, not just its total. Covers every standard Xero balance-sheet account
+type with a rollforward that makes sense generically - Current Asset,
+Current Liability, Liability, **Prepayment, Inventory, Non-current
+Asset, Non-current Liability** - so a prepayment schedule, a stock
+account, or a long-term loan each get the same rollforward as a trade
+debtors control account, not just the handful of types this originally
+shipped with. Fixed Asset accounts are deliberately excluded here - they
+get their own, more sophisticated treatment in `fixed_assets.py` (see
+below).
 
 Two features - the same "read the GL in depth, surface the assumption"
 philosophy applied to FAR above - make this more robust:

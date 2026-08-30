@@ -11,11 +11,18 @@ total, and any gap between the two is a single clearly-flagged number left
 for the preparer to explain rather than silently absorbed.
 
 Scoped to balance-sheet control accounts that have nominal-ledger detail
-available (typically debtors/creditors/wages/VAT/other control accounts) -
-Xero's own "Account Transactions" report doesn't include bank accounts
-(those need a separate bank transactions export), so bank simply won't
-produce a rollforward here; it's covered by the simpler statement-vs-TB
-check in recon.py instead.
+available (typically debtors/creditors/wages/VAT/other control accounts,
+plus - since these are just as much "any balance-sheet account with
+nominal detail" - prepayments, stock/inventory, and non-current assets/
+liabilities like a long-term loan) - Xero's own "Account Transactions"
+report doesn't include bank accounts (those need a separate bank
+transactions export), so bank simply won't produce a rollforward here;
+it's covered by the simpler statement-vs-TB check in recon.py instead.
+Fixed assets are deliberately excluded here too - they get their own,
+more sophisticated treatment in fixed_assets.py (category/asset-level
+rollforward, depreciation, capex-miscoding suggestions), so a fixed
+asset account showing up as a second, plainer rollforward here would
+just be a worse duplicate of that.
 """
 from dataclasses import dataclass, field
 
@@ -25,7 +32,18 @@ from app.recon import ReconResult
 
 MATERIALITY_AMOUNT = 500.0
 
-ROLLFORWARD_ACCOUNT_TYPES = {"current asset", "current liability", "liability"}
+# "current asset"/"current liability"/"liability" were the original set;
+# "prepayment", "inventory", "non-current asset" and "non-current
+# liability" are equally real, standard Xero account types (Prepayment,
+# Inventory, Non-current Asset, Non-current Liability in Xero's own
+# Account Type dropdown) that were simply missing - a prepayment or a
+# long-term loan account got zero rollforward treatment at all before
+# this, not because it isn't a control account, but because its type
+# string wasn't in this set.
+ROLLFORWARD_ACCOUNT_TYPES = {
+    "current asset", "current liability", "liability",
+    "prepayment", "inventory", "non-current asset", "non-current liability",
+}
 EXCLUDE_NAME_KEYWORDS = ("retained earnings", "share capital", "profit for the year", "dividend")
 # deliberately specific phrases - a loose "debtor"/"creditor" substring match
 # would also catch unrelated accounts like "Sundry Creditors" or
