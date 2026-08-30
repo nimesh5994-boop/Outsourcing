@@ -996,11 +996,15 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     yield event(9, "running")
     fixed_asset_result = fixed_assets.category_level_rollforward(
         data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
+        period_days=_period_days(job),
     )
     asset_register_result = fixed_assets.asset_level_rollforward(
         data.get("fixed_asset_register"), data.get("nominal_current"), data.get("tb_current"),
         period_days=_period_days(job),
     )
+    results = results + [fixed_assets.suggest_capital_expenditure_reclassification(
+        data.get("tb_current"), data.get("nominal_current"), data.get("fixed_asset_register"),
+    )]
     yield event(9, "done")
 
     def _step10():

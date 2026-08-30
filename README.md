@@ -565,7 +565,9 @@ between routine checks.
 
 ## Fixed asset register
 
-Built from `app/fixed_assets.py`, in two parts that work independently:
+Built from `app/fixed_assets.py`, in two parts that work independently,
+plus two features that make both of them more robust by reading the
+General Ledger in depth rather than trusting the TB's own totals:
 
 **Category-level** (always available, no upload needed): real charts of
 accounts commonly split each fixed asset category into a cost/additions
@@ -576,7 +578,7 @@ stripping structural words like cost/additions/depreciation/brought/
 forward wherever they appear, rather than matching a fixed suffix
 pattern). Paired-up cost and depreciation accounts become a cost /
 accumulated depreciation / NBV rollforward per category, cross-checked
-against the TB.
+against the TB, brought forward from the comparative TB.
 
 **Asset-level** (needs a prior-year register upload - report type "Fixed
 Asset Register", generic column mapping since there's no standard
@@ -586,6 +588,51 @@ flags nominal-activity transactions against fixed asset cost codes that
 aren't yet in the register as candidate new additions, flags credit
 movements on those codes as possible disposals to match and remove, and
 reconciles the register's total NBV to the TB.
+
+**Additions, shown as real transactions, not just a total**
+(`far_additions_detail`): every debit posted during the year to a
+category's cost code, listed line-by-line - date, reference, description,
+contact, amount - attached below the category rollforward as its
+`extra_detail` (both in the fallback sheet and the formula-linked one).
+This is the first, no-inference step of making the register more robust:
+anything the client's own chart of accounts already says is a fixed
+asset shows up as a checkable addition, not just an aggregate a preparer
+has to trust.
+
+**System-estimated depreciation** (`DEFAULT_CATEGORY_DEPRECIATION`,
+`_infer_category_rate`): each category's brought-forward cost/NBV is run
+through a default depreciation rate and method inferred from the
+category's own name (computer/IT equipment 25% reducing balance, motor
+vehicles 25% reducing balance, fixtures/fittings/furniture 15% straight
+line, plant/machinery/equipment 20% reducing balance, leasehold
+improvements 10% straight line, buildings 2% straight line, 20% straight
+line otherwise), prorated for a period shorter than a full year. Shown as
+its own "System est." columns next to what's actually booked, and stated
+in the result message every time - deliberately never a reason to flag a
+category "review" by itself, since real accounting policies vary far too
+much for a keyword-inferred rate to be authoritative. It's a sanity-check
+number to look at, not a finding.
+
+**Capital expenditure coded elsewhere**
+(`suggest_capital_expenditure_reclassification`): the other direction -
+scans nominal activity coded to an ordinary expense account (Xero's
+Overhead/Direct Costs/Expense types) for postings above the £500
+materiality threshold that look like capital expenditure someone
+miscoded, e.g. a laptop put through "IT Costs" instead of "Computer
+Equipment", or a van through "Repairs and Maintenance" instead of "Motor
+Vehicles". The vocabulary it matches against is built from *this
+client's own* fixed asset categories - both the TB's cost/depreciation
+account names and, if uploaded, the prior year register's own category
+column - topped up with a short list of generic capex nouns (laptop,
+van, machinery, furniture, renovation, and similar). This is "nature of
+business" read from what the client actually owns already, not a
+generic industry guess: a garage's existing "Workshop Equipment"
+category is what catches its own miscoded tool purchases; a different
+client's categories catch different things. Runs as its own check
+("Fixed asset register - possible capital expenditure coded elsewhere")
+with a candidate table of exactly what matched and why - never
+reclassifies anything itself, since a keyword match on a description is
+a starting point for the preparer to check, not proof of capital nature.
 
 ## Upload safety
 

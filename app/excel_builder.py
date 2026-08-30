@@ -783,6 +783,7 @@ def build_fixed_asset_category_sheet_formulas(
         "Category", "Cost b/fwd", "Additions", "Disposals (cost)", "Cost c/fwd (per TB)", "Cost diff",
         "Acc. depreciation b/fwd", "Depreciation charge", "Depreciation on disposals", "Acc. depreciation c/fwd (per TB)",
         "Depreciation diff", "NBV b/fwd", "NBV c/fwd",
+        "System est. method", "System est. rate %", "System est. depreciation", "Booked vs system est. (diff)",
     ]
     for j, h in enumerate(headers):
         ws.cell(row=table_row, column=1 + j, value=h)
@@ -804,6 +805,7 @@ def build_fixed_asset_category_sheet_formulas(
     for category in result.detail["Category"]:
         codes = grouped_codes.get(category, {"cost": [], "depreciation": []})
         cost_codes, dep_codes = codes["cost"], codes["depreciation"]
+        row_data = result.detail[result.detail["Category"] == category].iloc[0]
 
         ws.cell(row=r, column=1, value=category).border = BORDER
 
@@ -836,12 +838,29 @@ def build_fixed_asset_category_sheet_formulas(
         nbv_c_fwd_cell = ws.cell(row=r, column=13, value=f"=E{r}-J{r}")
         nbv_c_fwd_cell.number_format = CURRENCY_FMT
 
-        row_data = result.detail[result.detail["Category"] == category].iloc[0]
+        # System-estimate columns are Python-side heuristic values (a
+        # default rate inferred from the category name - see
+        # fixed_assets.DEFAULT_CATEGORY_DEPRECIATION), not raw-data
+        # recalculations, so unlike every other column here they're
+        # written as plain values rather than SUMPRODUCT formulas.
+        ws.cell(row=r, column=14, value=row_data["System est. method"]).border = BORDER
+        rate_cell = ws.cell(row=r, column=15, value=row_data["System est. rate %"])
+        rate_cell.border = BORDER
+        est_dep_cell = ws.cell(row=r, column=16, value=row_data["System est. depreciation"])
+        est_dep_cell.number_format = CURRENCY_FMT
+        est_diff_cell = ws.cell(row=r, column=17, value=row_data["Booked vs system est. (diff)"])
+        est_diff_cell.number_format = CURRENCY_FMT
+
         flagged = abs(row_data["Cost diff"]) > MATERIALITY_AMOUNT or abs(row_data["Depreciation diff"]) > MATERIALITY_AMOUNT
         if flagged:
             for c in (6, 11):
                 ws.cell(row=r, column=c).fill = PatternFill("solid", fgColor=AMBER)
         r += 1
+
+    next_row = table_row + len(result.detail) + 2
+    if result.extra_detail is not None and not result.extra_detail.empty:
+        ws.cell(row=next_row, column=1, value=result.extra_detail_label.upper()).font = SCHEDULE_FONT
+        _write_dataframe(ws, result.extra_detail, start_row=next_row + 1)
 
     ws.freeze_panes = f"A{table_row + 1}"
     return sheet_name
