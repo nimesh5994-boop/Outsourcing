@@ -351,6 +351,11 @@ def build_recon_sheet(wb: Workbook, client_name: str, period_label: str, ref: st
         ws.cell(row=label_row, column=1, value=result.extra_detail_label.upper()).font = SCHEDULE_FONT
         next_row = _write_dataframe(ws, result.extra_detail, start_row=label_row + 1)
 
+    if getattr(result, "matched_detail", None) is not None and not result.matched_detail.empty:
+        label_row = next_row + 1
+        ws.cell(row=label_row, column=1, value=result.matched_detail_label.upper()).font = SCHEDULE_FONT
+        next_row = _write_dataframe(ws, result.matched_detail, start_row=label_row + 1)
+
     if getattr(result, "ai_note", ""):
         note_row = next_row + 1
         note_cell = ws.cell(row=note_row, column=1, value=f"\U0001F916 AI-ASSISTED NOTE (not a finding - verify before relying on it): {result.ai_note}")

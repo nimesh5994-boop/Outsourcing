@@ -29,6 +29,14 @@ class ReconResult:
     # differences" with nothing to check against.
     extra_detail: pd.DataFrame = field(default_factory=pd.DataFrame)
     extra_detail_label: str = ""
+    # A third, optional table for the full detail behind a check's own
+    # "matched"/"successful" count - not just the exceptions extra_detail
+    # already carries. e.g. vat_reconciliation shows every matched Box 1/
+    # Box 4 pair here (GL row <-> filed return row, with the implied VAT
+    # rate), so "142 matched" is never just a trusted number with nothing
+    # to check it against.
+    matched_detail: pd.DataFrame = field(default_factory=pd.DataFrame)
+    matched_detail_label: str = ""
     # Set from outside this module (main.py's generate(), never here - recon.py
     # stays pure deterministic logic with no API calls) by the optional,
     # opt-in reconciliation-explanation agent - see app/reconciliation_agent.py.

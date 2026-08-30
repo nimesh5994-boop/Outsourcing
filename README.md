@@ -331,6 +331,31 @@ Coverage** check - not duplicated as a false "exception" under both
 boxes just because a sale doesn't appear in the purchases detail (or
 vice versa).
 
+Same "read the GL in depth, surface the assumption" treatment applied to
+FAR/control accounts/the nominal matrix, translated here:
+
+- **Full matched-pairs detail**: each box's result now attaches every
+  matched GL-row/filed-return-row pair - not just the exceptions - as
+  `matched_detail` (a new field on `ReconResult`, generic enough that any
+  check can use it: extra_detail was already the exceptions table, this
+  is the proof behind "142 matched" so it's never just a trusted number).
+  Each pair also shows its **implied VAT rate** (VAT ÷ net, from the
+  actual GL posting) - when one doesn't correspond to a standard UK rate
+  (0%/5%/20%), that's stated in the box's message. Advisory only, same
+  discipline as FAR's system-estimated depreciation: never flips a box
+  to "review" by itself, since a partial-exemption or flat-rate-scheme
+  client can legitimately post other rates.
+- **Suggested box for General Ledger Coverage gaps**
+  (`_suggest_box_for_gl_coverage_gap`): for a GL transaction that matched neither box, checks that SAME
+  contact's other GL transactions that DID match - this client's own
+  pattern, not a guess, the same approach as FAR's capex suggestion,
+  control accounts' miscoding suggestion, and the nominal matrix's
+  unallocated-transaction suggestion. Only suggested when one box
+  clearly dominates that contact's matched history (a real majority,
+  over a real sample). Runs as its own check ("VAT Recon - suggested box
+  for unmatched General Ledger items") with a candidate table; never
+  moves or matches anything itself.
+
 **Settings** (saved per job): **VAT Accounting Basis** (Accrual - the
 General Ledger's own transaction/invoice date; Cash - a payment date
 column when the export actually has one, falling back to the
@@ -922,7 +947,11 @@ small differences without hiding genuine ones), cash vs accrual basis
 changing which pass a match resolves through, each General Ledger row
 claimed at most once, Box 1/Box 4 sharing one pool without cross-box
 false positives, and multi-file `Source File` tagging surviving into
-the unmatched-items table.
+the unmatched-items table - plus the matched-detail/implied-VAT-rate
+advisory (a non-standard rate stated in the message without flipping
+status) and the GL-coverage-gap box suggestion (a dominant contact
+history producing a suggestion, too little or too mixed history
+correctly producing none).
 
 `tests/test_brightpay_reports.py` covers the BrightPay native report
 parsers directly (in-memory CSV text, no database): one row per employee

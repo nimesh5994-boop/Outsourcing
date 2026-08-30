@@ -160,6 +160,17 @@
       </table>
     </details>
     {% endif %}
+    {% if r.matched_detail %}
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer; color:var(--muted); font-size:13px;">{{ r.matched_detail_label }} ({{ r.matched_detail|length }})</summary>
+      <table style="margin-top:8px">
+        <tr>{% for k in r.matched_detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
+        {% for row in r.matched_detail %}
+        <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
+        {% endfor %}
+      </table>
+    </details>
+    {% endif %}
     {% endfor %}
   </div>
   {% endif %}

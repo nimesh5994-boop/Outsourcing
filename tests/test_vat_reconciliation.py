@@ -132,9 +132,13 @@ def test_box1_and_box4_share_one_gl_pool_without_cross_contamination():
     filed_purchases = _filed([{"date": pd.Timestamp("2025-02-01"), "reference": "BILL-1", "contact": "Supplier Co", "net_amount": 800.0, "vat_amount": 160.0}])
 
     results = reconcile({"vat_gl": gl, "vat_filed_sales": filed_sales, "vat_filed_purchases": filed_purchases}, VatReconSettings())
-    assert len(results) == 3
-    assert [r.name for r in results] == ["VAT Recon - Box 1 (Sales)", "VAT Recon - Box 4 (Purchases)", "VAT Recon - General Ledger Coverage"]
-    assert [r.status for r in results] == ["ok", "ok", "ok"]  # every GL row claimed by exactly one box
+    assert len(results) == 4
+    assert [r.name for r in results] == [
+        "VAT Recon - Box 1 (Sales)", "VAT Recon - Box 4 (Purchases)", "VAT Recon - General Ledger Coverage",
+        "VAT Recon - suggested box for unmatched General Ledger items",
+    ]
+    # every GL row claimed by exactly one box - nothing left for the coverage-gap suggestion to look at
+    assert [r.status for r in results] == ["ok", "ok", "ok", "n/a"]
 
 
 def test_gl_activity_neither_box_accounts_for_is_reported_once():
@@ -150,9 +154,73 @@ def test_gl_activity_neither_box_accounts_for_is_reported_once():
     assert coverage.extra_detail.iloc[0]["Reference"] == "MYSTERY-1"
 
 
-def test_reconcile_with_no_data_returns_three_not_applicable_results():
+def test_matched_detail_lists_every_pair_with_implied_vat_rate():
+    gl = _gl([
+        {"date": pd.Timestamp("2025-04-14"), "reference": "INV-1", "contact": "Acme Ltd", "net_amount": 1000.0, "vat_amount": 200.0},
+        {"date": pd.Timestamp("2025-04-20"), "reference": "INV-2", "contact": "Widgets Co", "net_amount": 500.0, "vat_amount": 87.5},  # 17.5%
+    ])
+    filed = _filed([
+        {"date": pd.Timestamp("2025-04-14"), "reference": "INV-1", "contact": "Acme Ltd", "net_amount": 1000.0, "vat_amount": 200.0},
+        {"date": pd.Timestamp("2025-04-20"), "reference": "INV-2", "contact": "Widgets Co", "net_amount": 500.0, "vat_amount": 87.5},
+    ])
+    result = reconcile_box("Box 1 (Sales)", gl, filed, VatReconSettings())
+    assert result.status == "ok"  # the non-standard rate is advisory only, never flips status
+    assert len(result.matched_detail) == 2
+    rates = dict(zip(result.matched_detail["Filed reference"], result.matched_detail["Implied VAT rate %"]))
+    assert rates["INV-1"] == 20.0
+    assert rates["INV-2"] == 17.5
+    assert "1 matched item(s)" in result.message
+    assert "standard UK rate" in result.message
+
+
+def test_matched_detail_absent_when_nothing_matched():
+    gl = _gl([])
+    filed = _filed([{"date": pd.Timestamp("2025-04-14"), "reference": "INV-1", "contact": "Acme Ltd", "net_amount": 1000.0, "vat_amount": 200.0}])
+    result = reconcile_box("Box 1 (Sales)", gl, filed, VatReconSettings())
+    assert result.matched_detail.empty
+    assert "standard UK rate" not in result.message
+
+
+def test_gl_coverage_gap_suggests_box_from_contact_history():
+    gl = _gl([
+        {"date": pd.Timestamp("2025-01-01"), "reference": "INV-1", "contact": "Acme Ltd", "net_amount": 100.0, "vat_amount": 20.0},
+        {"date": pd.Timestamp("2025-02-01"), "reference": "INV-2", "contact": "Acme Ltd", "net_amount": 100.0, "vat_amount": 20.0},
+        {"date": pd.Timestamp("2025-03-01"), "reference": "INV-3", "contact": "Acme Ltd", "net_amount": 100.0, "vat_amount": 20.0},
+        {"date": pd.Timestamp("2025-04-01"), "reference": "INV-4", "contact": "Acme Ltd", "net_amount": 100.0, "vat_amount": 20.0},  # unmatched
+    ])
+    filed_sales = _filed([
+        {"date": pd.Timestamp("2025-01-01"), "reference": "INV-1", "contact": "Acme Ltd", "net_amount": 100.0, "vat_amount": 20.0},
+        {"date": pd.Timestamp("2025-02-01"), "reference": "INV-2", "contact": "Acme Ltd", "net_amount": 100.0, "vat_amount": 20.0},
+        {"date": pd.Timestamp("2025-03-01"), "reference": "INV-3", "contact": "Acme Ltd", "net_amount": 100.0, "vat_amount": 20.0},
+    ])
+    results = reconcile({"vat_gl": gl, "vat_filed_sales": filed_sales}, VatReconSettings())
+    suggestion = results[3]
+    assert suggestion.name == "VAT Recon - suggested box for unmatched General Ledger items"
+    assert suggestion.status == "review"
+    assert len(suggestion.detail) == 1
+    assert suggestion.detail.iloc[0]["Suggested box"] == "Box 1 (Sales)"
+    assert suggestion.detail.iloc[0]["Reference"] == "INV-4"
+
+
+def test_gl_coverage_gap_no_suggestion_without_enough_history():
+    gl = _gl([
+        {"date": pd.Timestamp("2025-01-01"), "reference": "INV-1", "contact": "Acme Ltd", "net_amount": 100.0, "vat_amount": 20.0},
+        {"date": pd.Timestamp("2025-02-01"), "reference": "INV-2", "contact": "New Contact Ltd", "net_amount": 50.0, "vat_amount": 10.0},
+    ])
+    filed_sales = _filed([{"date": pd.Timestamp("2025-01-01"), "reference": "INV-1", "contact": "Acme Ltd", "net_amount": 100.0, "vat_amount": 20.0}])
+    results = reconcile({"vat_gl": gl, "vat_filed_sales": filed_sales}, VatReconSettings())
+    suggestion = results[3]
+    assert suggestion.status == "ok"
+
+
+def test_gl_coverage_gap_suggestion_na_with_no_general_ledger():
+    results = reconcile({"vat_filed_sales": _filed([])}, VatReconSettings())
+    assert results[3].status == "n/a"
+
+
+def test_reconcile_with_no_data_returns_four_not_applicable_results():
     results = reconcile({}, VatReconSettings())
-    assert [r.status for r in results] == ["n/a", "n/a", "n/a"]
+    assert [r.status for r in results] == ["n/a", "n/a", "n/a", "n/a"]
 
 
 def test_multi_file_source_tagging_survives_into_unmatched_rows():

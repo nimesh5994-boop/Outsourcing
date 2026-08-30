@@ -954,7 +954,10 @@ def test_vat_reconciliation_end_to_end_through_http_and_into_the_workbook(http_c
 
     job = storage.get_job(job_id)
     results = {r["name"]: r for r in job["vat_recon_results"]}
-    assert set(results) == {"VAT Recon - Box 1 (Sales)", "VAT Recon - Box 4 (Purchases)", "VAT Recon - General Ledger Coverage"}
+    assert set(results) == {
+        "VAT Recon - Box 1 (Sales)", "VAT Recon - Box 4 (Purchases)", "VAT Recon - General Ledger Coverage",
+        "VAT Recon - suggested box for unmatched General Ledger items",
+    }
     assert results["VAT Recon - Box 1 (Sales)"]["status"] == "review"  # INV-101 variance
     assert results["VAT Recon - Box 4 (Purchases)"]["status"] == "ok"
     assert results["VAT Recon - General Ledger Coverage"]["status"] == "review"  # MYSTERY-1 unaccounted for

@@ -49,6 +49,20 @@ from app.recon import ReconResult
 DEFAULT_TOLERANCE = 0.0  # £ - "Exact Match"
 FLOAT_NOISE_FLOOR = 0.005  # £ - always absorbed regardless of tolerance, to avoid penny/float rounding false positives
 
+# Standard UK VAT rates (zero/reduced/standard) - used only as an advisory
+# sanity-check on matched pairs (see _implied_rate below), never to flag a
+# box "review" by itself: a partial-exemption or flat-rate-scheme client
+# can legitimately post other rates, so this is a heads-up to verify, not
+# a finding.
+STANDARD_VAT_RATES = (0.0, 0.05, 0.20)
+RATE_TOLERANCE = 0.005
+
+# Same thresholds nominal_matrix.py uses for its own contact-history
+# suggestion, kept independent per module rather than shared, so each
+# domain's suggestion logic can be tuned on its own terms later.
+MIN_HISTORY_FOR_SUGGESTION = 2
+DOMINANT_SHARE_THRESHOLD = 0.6
+
 GL_COLUMNS = ["date", "reference", "contact", "description", "net_amount", "vat_amount"]
 FILED_COLUMNS = GL_COLUMNS + ["source_file"]
 GL_DISPLAY_COLUMNS = {"date": "Date", "reference": "Reference", "contact": "Contact", "description": "Description", "net_amount": "Net Amount", "vat_amount": "VAT Amount"}
@@ -87,6 +101,21 @@ def _basis_date_column(gl: pd.DataFrame, basis: str) -> pd.Series:
 
 def _amounts_close(a: pd.Series, b: float, tolerance: float) -> pd.Series:
     return (a.round(2) - round(float(b), 2)).abs() <= (tolerance + 1e-9)
+
+
+def _implied_rate(net, vat) -> float | None:
+    """VAT / net from the actual GL posting - None when there's no net
+    amount to divide by (a rate is meaningless then, not zero)."""
+    net = float(net)
+    if abs(net) < 0.01:
+        return None
+    return round(abs(float(vat)) / abs(net), 4)
+
+
+def _is_standard_rate(rate: float | None) -> bool:
+    if rate is None:
+        return True  # nothing to check a rate against - not itself a finding
+    return any(abs(rate - r) <= RATE_TOLERANCE for r in STANDARD_VAT_RATES)
 
 
 def _prepare_pool(gl: pd.DataFrame | None, settings: VatReconSettings) -> pd.DataFrame:
@@ -209,11 +238,27 @@ def _box_result(box_label: str, filed: pd.DataFrame | None, matched: pd.DataFram
         f"({basis_note}, {tol_note}) - review the exceptions below."
     )
 
+    matched_out = matched.copy()
+    non_standard_count = 0
+    if not matched_out.empty:
+        rates = matched_out.apply(lambda r: _implied_rate(r["GL net"], r["GL VAT"]), axis=1)
+        matched_out["Implied VAT rate %"] = rates.apply(lambda r: round(r * 100, 1) if r is not None else "")
+        non_standard_count = int(rates.apply(lambda r: not _is_standard_rate(r)).sum())
+    if non_standard_count:
+        msg += (
+            f" {non_standard_count} matched item(s) have an implied VAT rate (VAT ÷ net, from the actual GL "
+            f"posting) that isn't a standard UK rate (0%/5%/20%) - see 'Implied VAT rate %' in the matched detail "
+            f"below; advisory only; a partial-exemption or flat-rate-scheme client can legitimately post other rates."
+        )
+
     result = ReconResult(name, status, msg, detail)
     review = _box_review_rows(unmatched_filed, matched, variance_threshold)
     if not review.empty:
         result.extra_detail = review
         result.extra_detail_label = f"{box_label} - items requiring review"
+    if not matched_out.empty:
+        result.matched_detail = matched_out
+        result.matched_detail_label = f"{box_label} - full matched detail"
     return result
 
 
@@ -239,14 +284,66 @@ def _gl_coverage_result(original_gl: pd.DataFrame | None, remaining_pool: pd.Dat
     return result
 
 
+def _suggest_box_for_gl_coverage_gap(remaining_pool: pd.DataFrame, box1_matched: pd.DataFrame, box4_matched: pd.DataFrame) -> ReconResult:
+    """For a General Ledger transaction that matched neither box (see
+    _gl_coverage_result), suggests which box it's probably missing from -
+    based on that SAME contact's other GL transactions that DID match,
+    this client's own pattern rather than a generic guess, the same
+    "client's own data as vocabulary" approach as fixed_assets/
+    control_accounts/nominal_matrix's own suggestion checks. Only
+    suggested when one box clearly dominates that contact's matched
+    history (a real majority, over a real sample) - never matches
+    anything itself."""
+    name = "VAT Recon - suggested box for unmatched General Ledger items"
+    unmatched = remaining_pool[GL_COLUMNS] if remaining_pool is not None and not remaining_pool.empty else pd.DataFrame(columns=GL_COLUMNS)
+    if unmatched.empty:
+        return ReconResult(name, "n/a", "No General Ledger items are unmatched to either box.")
+
+    box1_counts = box1_matched["GL contact"].apply(_normalise_contact).value_counts() if not box1_matched.empty else pd.Series(dtype=int)
+    box4_counts = box4_matched["GL contact"].apply(_normalise_contact).value_counts() if not box4_matched.empty else pd.Series(dtype=int)
+
+    rows = []
+    for _, row in unmatched.iterrows():
+        key = _normalise_contact(row["contact"])
+        if not key:
+            continue
+        b1, b4 = int(box1_counts.get(key, 0)), int(box4_counts.get(key, 0))
+        total = b1 + b4
+        if total < MIN_HISTORY_FOR_SUGGESTION:
+            continue
+        if b1 / total >= DOMINANT_SHARE_THRESHOLD:
+            suggested, based_on = "Box 1 (Sales)", b1
+        elif b4 / total >= DOMINANT_SHARE_THRESHOLD:
+            suggested, based_on = "Box 4 (Purchases)", b4
+        else:
+            continue
+        rows.append({
+            "Date": row["date"], "Reference": row["reference"], "Contact": row["contact"],
+            "Net Amount": row["net_amount"], "VAT Amount": row["vat_amount"],
+            "Suggested box": suggested,
+            "Based on": f"{based_on} of {total} of this contact's other GL transactions matched into that box",
+        })
+
+    if not rows:
+        return ReconResult(name, "ok", "No unmatched General Ledger item had a clear enough pattern in that contact's other transactions to suggest a box.")
+
+    detail = pd.DataFrame(rows).sort_values("Date").reset_index(drop=True)
+    msg = (
+        f"{len(detail)} unmatched General Ledger item(s) have a likely box based on that contact's own other "
+        f"transactions - a suggestion to check, not an automatic match."
+    )
+    return ReconResult(name, "review", msg, detail)
+
+
 def reconcile(data: dict, settings: VatReconSettings) -> list[ReconResult]:
     """data keys: vat_gl, vat_filed_sales, vat_filed_purchases (see
     main.py's _load_canonical_data - each is the concatenation of every
     confirmed upload of that type, tagged with a source_file column on
-    the filed sides). Always returns three results: Box 1, Box 4, then
-    General Ledger Coverage (whatever neither box's filed detail
-    accounted for) - "n/a" for a box with nothing filed against it, or
-    for coverage when there's no General Ledger at all."""
+    the filed sides). Always returns four results: Box 1, Box 4, General
+    Ledger Coverage (whatever neither box's filed detail accounted for),
+    then the suggested-box check for those coverage gaps - "n/a" for a
+    box with nothing filed against it, or for coverage/suggestions when
+    there's no General Ledger at all."""
     pool = _prepare_pool(data.get("vat_gl"), settings)
 
     box1_matched, box1_unmatched_filed, pool = match_box(pool, data.get("vat_filed_sales"), settings)
@@ -256,6 +353,7 @@ def reconcile(data: dict, settings: VatReconSettings) -> list[ReconResult]:
         _box_result("Box 1 (Sales)", data.get("vat_filed_sales"), box1_matched, box1_unmatched_filed, settings),
         _box_result("Box 4 (Purchases)", data.get("vat_filed_purchases"), box4_matched, box4_unmatched_filed, settings),
         _gl_coverage_result(data.get("vat_gl"), pool),
+        _suggest_box_for_gl_coverage_gap(pool, box1_matched, box4_matched),
     ]
 
 

@@ -394,6 +394,8 @@ def _recon_result_to_dict(result) -> dict:
         "detail": _df_to_records(result.detail),
         "extra_detail": _df_to_records(result.extra_detail),
         "extra_detail_label": result.extra_detail_label,
+        "matched_detail": _df_to_records(getattr(result, "matched_detail", None)),
+        "matched_detail_label": getattr(result, "matched_detail_label", ""),
     }
 
 
