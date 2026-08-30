@@ -383,11 +383,32 @@ whichever candidate's date is closest when more than one qualifies
 (**Date window**, a setting: how many days after the period end to
 search - HMRC and pension payments trail the tax month by days to
 weeks, never land the same day), and never letting one General Ledger
-posting settle two different months. A **Xero "Account Transactions"
-export lists one real payment twice** - once per side of the double
-entry, same contact, equal-and-opposite debit/credit - deduplicated
-before matching so it isn't mistaken for two separate payments (found
-by testing against the real export, not anticipated in advance).
+posting settle two different months.
+
+Two distinct things can put a same-contact, same-amount posting in the
+ledger, and only one of them is a real payment: a **cash settlement**
+(money that actually left the bank) or an **accrual booking** (an
+invoice or bill recorded as owed, with no payment yet). Found by
+inspecting a real export directly: an invoice raised in March and paid
+in April shows up as two separate ledger rows on two different dates,
+and a second invoice with no payment row at all by year end is
+genuinely still outstanding. Confusing the two would let an unpaid
+invoice masquerade as a paid one, or split one real payment's two
+double-entry legs (same contact, same date, equal-and-opposite
+debit/credit - Xero lists a payment once per account it touches) into
+what looks like two payments. So before matching, the General Ledger
+pool is narrowed using Xero's own `Source` column: rows reading
+"Payment", "Receivable Payment", "Spend Money" or "Receive Money" are
+kept as cash-settlement candidates; rows like "Payable Invoice" or a
+manual journal are excluded as accrual-only. What survives that filter
+is then deduplicated by (date, contact, amount) to collapse a single
+payment's two double-entry legs into one candidate. **This assumption
+is never applied silently** - every PAYE Recon result message states
+how many postings were excluded as accrual-only, so a preparer can
+check the judgement call rather than just trust it. If a General
+Ledger upload doesn't carry a `Source` column at all, the system says
+so plainly in the message and falls back to treating every same-
+contact posting as a candidate, rather than guessing.
 
 An item that doesn't find a within-tolerance match still gets the
 *nearest same-contact posting* reported as a diagnostic (ignoring
@@ -761,8 +782,13 @@ found by testing against a real export, zero-net-pay months correctly
 skipped, the date window as a hard requirement (not a soft preference -
 a regression test for a real bug caught while writing these tests),
 tolerance absorbing small differences, HMRC/pension keyword-contact
-matching, monthly aggregation across employees for pension, and the
-closest-same-contact diagnostic on an unmatched item.
+matching, monthly aggregation across employees for pension, the
+closest-same-contact diagnostic on an unmatched item, the cash-
+settlement-vs-accrual-only filter (an unpaid invoice correctly excluded
+rather than falsely matched, an invoice paid on a separate later date
+correctly matching only via its payment row, and the graceful fallback
+- with its own stated-in-the-message warning - when a General Ledger
+upload doesn't carry a `Source` column at all).
 
 `tests/test_reconciliation_agent.py` covers the AI-assisted-notes agent
 directly, with the Anthropic client mocked throughout - no test in this

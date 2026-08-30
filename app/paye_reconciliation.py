@@ -68,10 +68,10 @@ def _normalise_words(name) -> list[str]:
 
 def _employee_contact_match(gl_contact, employee_name) -> bool:
     """True if the GL contact's first and last word both appear in the
-    employee's name - handles "Cain Smith" (GL) matching "Cain Francis
-    Smith" (BrightPay's full legal name), a real mismatch found in the
-    sample data, without loosening to a single-word match that would
-    false-positive on a common first name alone."""
+    employee's name - handles "Jamie Doe" (GL) matching "Jamie Francis
+    Doe" (BrightPay's full legal name), a real mismatch found against an
+    actual client export, without loosening to a single-word match that
+    would false-positive on a common first name alone."""
     gl_words, employee_words = _normalise_words(gl_contact), _normalise_words(employee_name)
     if not gl_words or not employee_words:
         return False
@@ -90,25 +90,68 @@ def _gl_amount(row) -> float:
     return float(row["debit"]) - float(row["credit"])
 
 
-def _prepare_pool(nominal_activity: pd.DataFrame | None) -> pd.DataFrame:
-    """A "General Ledger" export (Xero's Account Transactions, in
-    particular) lists a single real-world payment once per account it
-    touches - a Spend Money transaction shows up both in the bank
-    account's own activity and in the account it was coded against, same
-    contact, same date, equal-and-opposite debit/credit. Left alone, that
-    means one real payment offers two candidates to match against (and,
-    worse, matching one leg would leave the other sitting in the pool as
-    a phantom second candidate for some other month). Collapsed here by
-    magnitude, since a payment's absolute amount is what BrightPay's
-    figures are compared against either way - only the sign convention
-    differs between which side of the entry a row represents."""
+CASH_SOURCE_KEYWORDS = ["spend money", "receive money", "receivable payment", "payment", "bank transfer"]
+
+
+def _looks_like_cash_movement(source_type) -> bool:
+    return any(k in str(source_type).lower() for k in CASH_SOURCE_KEYWORDS)
+
+
+def _prepare_pool(nominal_activity: pd.DataFrame | None) -> tuple[pd.DataFrame, str]:
+    """Two distinct things can put a posting in the General Ledger for
+    the same contact and amount, and BrightPay's figures (money actually
+    paid) should only ever be checked against the first:
+
+      1. A cash settlement - Xero's Source column reads "Payment",
+         "Receivable Payment", "Spend Money" or "Receive Money". This is
+         what actually left the bank.
+      2. An accrual booking with no settlement yet - "Payable Invoice",
+         "Sales Invoice", a manual journal - money recorded as owed, not
+         necessarily paid. Confirmed against a real export: an invoice
+         raised in March and paid in April shows up as two GL rows on
+         two different dates, and a second invoice with no payment row
+         at all by year end is exactly "recorded but not yet paid" -
+         neither should be treated as a completed payment.
+
+    Filtered to (1) here, with the exclusion count folded into the
+    result each check returns - never a silent assumption, since which
+    postings count as "paid" is exactly the kind of judgement call a
+    preparer needs to be able to check, not just trust.
+
+    Within the cash-settlement rows, a single real payment still lists
+    twice - one row per side of the double entry the bank leg and the
+    account it was coded against, same contact, same date, equal-and-
+    opposite debit/credit. Collapsed here by magnitude (only the sign
+    convention differs between which leg a row represents), so it isn't
+    treated as two independent candidates, or left as a phantom second
+    candidate for some other month once one leg is matched."""
+    columns = ["date", "reference", "contact", "description", "debit", "credit", "_amount", "_pool_id"]
     if nominal_activity is None or nominal_activity.empty:
-        return pd.DataFrame(columns=["date", "reference", "contact", "description", "debit", "credit", "_amount", "_pool_id"])
+        return pd.DataFrame(columns=columns), ""
+
     pool = nominal_activity.copy()
     pool["_amount"] = pool.apply(_gl_amount, axis=1).abs()
+
+    has_source_type = "source_type" in pool.columns and pool["source_type"].astype(str).str.strip().ne("").any()
+    if has_source_type:
+        cash_mask = pool["source_type"].apply(_looks_like_cash_movement)
+        excluded = int((~cash_mask).sum())
+        pool = pool[cash_mask]
+        note = (
+            f"General Ledger narrowed to {len(pool)} cash-settlement posting(s) (Payment/Spend Money/Receive "
+            f"Money) - {excluded} accrual-only posting(s) (an invoice or bill with no matching payment row) "
+            f"excluded, since these figures are money actually paid, not amounts invoiced."
+        )
+    else:
+        note = (
+            "This General Ledger upload doesn't identify each posting's source type, so cash-settlement "
+            "postings couldn't be told apart from accrual-only bookings (an invoice with no payment yet) - "
+            "every posting to a matching contact was treated as a candidate."
+        )
+
     pool = pool.drop_duplicates(subset=["date", "contact", "_amount"], keep="first").reset_index(drop=True)
     pool["_pool_id"] = range(len(pool))
-    return pool
+    return pool, note
 
 
 def _closest_candidate(pool: pd.DataFrame, contact_match) -> dict | None:
@@ -151,7 +194,7 @@ def reconcile_net_pay(payroll_summary: pd.DataFrame | None, nominal_activity: pd
     if payroll_summary is None or payroll_summary.empty:
         return ReconResult(name, "n/a", "No BrightPay Payroll Summary uploaded.")
 
-    pool = _prepare_pool(nominal_activity)
+    pool, note = _prepare_pool(nominal_activity)
     items = payroll_summary[payroll_summary["net_pay"] > 0]
     if items.empty:
         return ReconResult(name, "n/a", "No months with a positive net pay figure to reconcile.")
@@ -172,7 +215,7 @@ def reconcile_net_pay(payroll_summary: pd.DataFrame | None, nominal_activity: pd
                 "Closest GL candidate": (f"£{hint['amount']:.2f} on {hint['date'].date() if pd.notna(hint['date']) else '?'}" if hint else "none found for this contact"),
             })
 
-    return _build_result(name, matched_rows, unmatched_rows, "Employee", settings, "employee-month(s)")
+    return _build_result(name, matched_rows, unmatched_rows, "Employee", settings, "employee-month(s)", note)
 
 
 def reconcile_hmrc(p32: pd.DataFrame | None, nominal_activity: pd.DataFrame | None, settings: PayeReconSettings) -> ReconResult:
@@ -180,7 +223,7 @@ def reconcile_hmrc(p32: pd.DataFrame | None, nominal_activity: pd.DataFrame | No
     if p32 is None or p32.empty:
         return ReconResult(name, "n/a", "No BrightPay P32 uploaded.")
 
-    pool = _prepare_pool(nominal_activity)
+    pool, note = _prepare_pool(nominal_activity)
     items = p32[p32["amount_due"] > 0]
     if items.empty:
         return ReconResult(name, "n/a", "No tax months with an amount due to reconcile.")
@@ -201,7 +244,7 @@ def reconcile_hmrc(p32: pd.DataFrame | None, nominal_activity: pd.DataFrame | No
                 "Closest GL candidate": (f"£{hint['amount']:.2f} on {hint['date'].date() if pd.notna(hint['date']) else '?'}" if hint else "no HMRC-like contact found in the ledger"),
             })
 
-    return _build_result(name, matched_rows, unmatched_rows, "Month ending", settings, "tax month(s)")
+    return _build_result(name, matched_rows, unmatched_rows, "Month ending", settings, "tax month(s)", note)
 
 
 def reconcile_pension(pensions: pd.DataFrame | None, nominal_activity: pd.DataFrame | None, settings: PayeReconSettings) -> ReconResult:
@@ -214,7 +257,7 @@ def reconcile_pension(pensions: pd.DataFrame | None, nominal_activity: pd.DataFr
     if monthly.empty:
         return ReconResult(name, "n/a", "No months with a pension contribution to reconcile.")
 
-    pool = _prepare_pool(nominal_activity)
+    pool, note = _prepare_pool(nominal_activity)
     contact_match = lambda c: _keyword_contact_match(c, PENSION_CONTACT_KEYWORDS)
     matched_rows, unmatched_rows = [], []
     for _, item in monthly.iterrows():
@@ -231,10 +274,10 @@ def reconcile_pension(pensions: pd.DataFrame | None, nominal_activity: pd.DataFr
                 "Closest GL candidate": (f"£{hint['amount']:.2f} on {hint['date'].date() if pd.notna(hint['date']) else '?'}" if hint else "no pension-provider-like contact found in the ledger"),
             })
 
-    return _build_result(name, matched_rows, unmatched_rows, "Month ending", settings, "month(s)")
+    return _build_result(name, matched_rows, unmatched_rows, "Month ending", settings, "month(s)", note)
 
 
-def _build_result(name: str, matched_rows: list[dict], unmatched_rows: list[dict], key_label: str, settings: PayeReconSettings, unit: str) -> ReconResult:
+def _build_result(name: str, matched_rows: list[dict], unmatched_rows: list[dict], key_label: str, settings: PayeReconSettings, unit: str, note: str = "") -> ReconResult:
     """Unlike VAT's reference-based pass (which deliberately ignores
     amount so it can catch "same invoice, wrong amount"), every match
     here is only ever found by requiring the amount within tolerance in
@@ -242,7 +285,13 @@ def _build_result(name: str, matched_rows: list[dict], unmatched_rows: list[dict
     the amount differs outside tolerance" case, so status is just
     matched vs. unmatched. The Variance column on a matched row still
     shows any small in-tolerance drift, for transparency, without it
-    being treated as its own exception."""
+    being treated as its own exception.
+
+    `note` (from _prepare_pool) states, in the message every time, which
+    General Ledger postings were even in scope to be matched against
+    (cash-settlement only, and how many accrual-only rows that excluded)
+    - the assumption behind every match/no-match conclusion below, not
+    left implicit."""
     matched = pd.DataFrame(matched_rows)
     unmatched = pd.DataFrame(unmatched_rows)
     total_items = len(matched) + len(unmatched)
@@ -260,6 +309,8 @@ def _build_result(name: str, matched_rows: list[dict], unmatched_rows: list[dict
         f"{len(unmatched)} of {total_items} {unit} have no General Ledger match "
         f"({tol_note}, within {settings.date_window_days} days) - review the exceptions below."
     )
+    if note:
+        msg = f"{msg} {note}"
 
     result = ReconResult(name, status, msg, detail)
     if not unmatched.empty:

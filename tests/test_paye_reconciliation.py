@@ -12,7 +12,7 @@ from app.paye_reconciliation import PayeReconSettings, reconcile, reconcile_hmrc
 
 def _gl(rows):
     df = pd.DataFrame(rows)
-    for col in ("date", "reference", "contact", "description", "debit", "credit"):
+    for col in ("date", "reference", "contact", "description", "source_type", "debit", "credit"):
         if col not in df.columns:
             df[col] = "" if col not in ("debit", "credit") else 0.0
     return df
@@ -52,6 +52,57 @@ def test_double_entry_legs_are_deduplicated_not_double_counted():
     assert result.status == "review"  # only one real payment exists - the second month is a genuine miss
     assert (result.detail.loc[result.detail["Measure"] == "Matched to General Ledger", "Count"] == 1).all()
     assert (result.detail.loc[result.detail["Measure"] == "With no General Ledger match", "Count"] == 1).all()
+
+
+def test_accrual_only_posting_is_excluded_not_falsely_matched():
+    """An invoice/bill booked to the employee's contact with no payment
+    row at all (source_type "Payable Invoice") is money recorded as
+    owed, not money actually paid - it must not be treated as satisfying
+    BrightPay's net pay figure."""
+    gl = _gl([{
+        "date": pd.Timestamp("2025-04-30"), "contact": "Jamie Doe", "debit": 1084.84, "credit": 0.0,
+        "source_type": "Payable Invoice",
+    }])
+    payroll = pd.DataFrame([{"period_end": pd.Timestamp("2025-04-30"), "employee": "Jamie Francis Doe", "net_pay": 1084.84}])
+    result = reconcile_net_pay(payroll, gl, PayeReconSettings())
+    assert result.status == "review"
+    assert "accrual-only" in result.message
+
+
+def test_invoice_then_separate_payment_only_the_payment_is_the_candidate():
+    """The real pattern found in the client's export: an invoice booked
+    on one date (accrual, no cash movement) and paid on a separate later
+    date (source_type "Payment", the actual cash leaving the bank) -
+    only the payment row should be usable as a matching candidate, and
+    it should match against its own date, not the invoice's."""
+    gl = _gl([
+        {
+            "date": pd.Timestamp("2025-03-14"), "contact": "Jamie Doe", "debit": 1084.84, "credit": 0.0,
+            "source_type": "Payable Invoice",
+        },
+        {
+            "date": pd.Timestamp("2025-04-02"), "contact": "Jamie Doe", "debit": 1084.84, "credit": 0.0,
+            "source_type": "Payment",
+        },
+    ])
+    payroll = pd.DataFrame([{"period_end": pd.Timestamp("2025-03-31"), "employee": "Jamie Francis Doe", "net_pay": 1084.84}])
+    result = reconcile_net_pay(payroll, gl, PayeReconSettings(date_window_days=60))
+    assert result.status == "ok"
+    assert result.detail.loc[result.detail["Measure"] == "Matched to General Ledger", "Count"].iloc[0] == 1
+    assert "1 accrual-only posting" in result.message
+
+
+def test_missing_source_type_falls_back_to_treating_every_posting_as_a_candidate():
+    """When the General Ledger upload doesn't populate source_type at
+    all (an export format that doesn't carry it), the system can't tell
+    cash settlements from accruals - it must say so plainly rather than
+    silently guessing, and fall back to the pre-existing behaviour of
+    treating every same-contact posting as a candidate."""
+    gl = _gl([{"date": pd.Timestamp("2025-04-30"), "contact": "Jamie Doe", "debit": 1084.84, "credit": 0.0}])
+    payroll = pd.DataFrame([{"period_end": pd.Timestamp("2025-04-30"), "employee": "Jamie Francis Doe", "net_pay": 1084.84}])
+    result = reconcile_net_pay(payroll, gl, PayeReconSettings())
+    assert result.status == "ok"
+    assert "doesn't identify each posting's source type" in result.message
 
 
 def test_net_pay_skips_zero_pay_months():
