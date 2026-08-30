@@ -31,6 +31,9 @@ REPORT_LABELS = {
     "vat_gl": "VAT Reconciliation - General Ledger",
     "vat_filed_sales": "VAT Reconciliation - Filed Return, Sales Detail (Box 1)",
     "vat_filed_purchases": "VAT Reconciliation - Filed Return, Purchases Detail (Box 4)",
+    "paye_summary": "PAYE Reconciliation - BrightPay Payroll Summary",
+    "paye_p32": "PAYE Reconciliation - BrightPay P32",
+    "paye_pensions": "PAYE Reconciliation - BrightPay Pensions",
 }
 
 # canonical column -> friendly label, used to drive the mapping UI
@@ -149,6 +152,18 @@ REPORT_SCHEMAS = {
 # their own dedicated upload zones.
 VAT_RECON_TYPES = ["vat_gl", "vat_filed_sales", "vat_filed_purchases"]
 
+# The PAYE Reconciliation workspace (see app/paye_reconciliation.py and
+# app/brightpay_reports.py) - another dedicated section, same reasoning as
+# VAT_RECON_TYPES above but purely structurally-detected (like Xero's
+# native report types): BrightPay's exports have a fixed, known shape
+# with no user-mappable columns, so there is no generic fallback for a
+# file that fails native detection - it's left unclassified rather than
+# offered a column-mapping page with nothing sensible to map. These three
+# reuse the job's existing General Ledger upload (nominal_current) rather
+# than requiring their own, so they carry no REPORT_SCHEMAS/REQUIRED_FIELDS
+# entries and are never added to REPORT_TYPES.
+PAYE_RECON_TYPES = ["paye_summary", "paye_p32", "paye_pensions"]
+
 # Fields required for a period upload to be usable in reconciliation.
 REQUIRED_FIELDS = {
     "trial_balance": ["account_code", "account_name"],
@@ -165,6 +180,6 @@ REQUIRED_FIELDS = {
     "vat_filed_purchases": ["date", "net_amount", "vat_amount"],
 }
 
-PLATFORMS = ["xero", "qbo", "sage", "other"]
+PLATFORMS = ["xero", "qbo", "sage", "brightpay", "other"]
 
 PERIODS = ["current", "comparative"]

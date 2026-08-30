@@ -10,9 +10,9 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import anomaly_detection, auth, compliance_checks, control_accounts, corporation_tax, document_detection, fixed_assets, mapping, nominal_matrix, parsers, recon, reconciliation_agent, storage, vat_reconciliation, xero_reports
+from app import anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, fixed_assets, mapping, nominal_matrix, parsers, paye_reconciliation, recon, reconciliation_agent, storage, vat_reconciliation, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
-from app.models import PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS, VAT_RECON_TYPES
+from app.models import PAYE_RECON_TYPES, PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS, VAT_RECON_TYPES
 
 BASE_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Working Paper Automation")
@@ -331,6 +331,7 @@ def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_
         "report_notes": client.get("report_notes", {}),
         "progress_summary": _summarize_progress(job.get("progress")),
         "vat_recon_types": VAT_RECON_TYPES,
+        "paye_recon_types": PAYE_RECON_TYPES,
     })
 
 
@@ -413,6 +414,39 @@ def run_vat_reconciliation(job_id: str, user: dict = Depends(auth.current_user_d
     job["vat_recon_computed_at"] = datetime.now(timezone.utc).isoformat()
     storage.save_job(job)
     return RedirectResponse(f"/jobs/{job_id}#vat-recon", status_code=303)
+
+
+@app.post("/jobs/{job_id}/paye-recon-settings")
+def save_paye_recon_settings(
+    job_id: str,
+    paye_recon_tolerance: float = Form(0.0),
+    paye_recon_date_window_days: int = Form(paye_reconciliation.DEFAULT_DATE_WINDOW_DAYS),
+    user: dict = Depends(auth.current_user_dep),
+):
+    job, _client = _authorize_job(user, job_id)
+    job["paye_recon_tolerance"] = max(0.0, paye_recon_tolerance)
+    job["paye_recon_date_window_days"] = max(0, paye_recon_date_window_days)
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#paye-recon", status_code=303)
+
+
+@app.post("/jobs/{job_id}/paye-recon/run")
+def run_paye_reconciliation(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Computes the PAYE Reconciliation independently of the main Generate
+    pipeline, same reasoning as VAT Reconciliation above - reuses the
+    job's existing General Ledger upload (nominal_current) rather than
+    needing one of its own (see app/paye_reconciliation.py)."""
+    job, _client = _authorize_job(user, job_id)
+    data = _load_canonical_data(job)
+    settings = paye_reconciliation.PayeReconSettings(
+        tolerance=job.get("paye_recon_tolerance", 0.0),
+        date_window_days=job.get("paye_recon_date_window_days", paye_reconciliation.DEFAULT_DATE_WINDOW_DAYS),
+    )
+    results = paye_reconciliation.reconcile(data, settings)
+    job["paye_recon_results"] = [_recon_result_to_dict(r) for r in results]
+    job["paye_recon_computed_at"] = datetime.now(timezone.utc).isoformat()
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#paye-recon", status_code=303)
 
 
 @app.post("/clients/{client_id}/notes/{report_type}")
@@ -544,6 +578,24 @@ async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: byt
         job["uploads"][upload_id]["confirmed"] = True
         job["uploads"][upload_id]["xero_native"] = True
         job["uploads"][upload_id]["period_check"] = period_check
+        job["uploads"][upload_id]["sheet_name"] = sheet_name
+        job["uploads"][upload_id]["display_name"] = display_name
+        storage.save_job(job)
+        return
+
+    brightpay_report_type = brightpay_reports.try_brightpay_native(source)
+    if brightpay_report_type:
+        # Same reasoning as the Xero-native branch above: a genuine
+        # structural match on BrightPay's fixed export shape is certain
+        # enough to skip the confirm-mapping step entirely. BrightPay
+        # reports don't have a single current/comparative period the way
+        # a Xero TB does (one file spans many tax months), so "period" is
+        # just a placeholder here - _load_canonical_data concatenates
+        # every confirmed upload of these types together regardless of it.
+        columns = source.raw_columns()
+        upload_id = storage.add_upload(job, brightpay_report_type, "current", "brightpay", filename, content, columns)
+        job["uploads"][upload_id]["mapping"] = {}
+        job["uploads"][upload_id]["confirmed"] = True
         job["uploads"][upload_id]["sheet_name"] = sheet_name
         job["uploads"][upload_id]["display_name"] = display_name
         storage.save_job(job)
@@ -732,13 +784,29 @@ def _load_canonical_data(job: dict) -> dict:
             data.setdefault(report_type, []).append(df)
             continue
 
+        if report_type in PAYE_RECON_TYPES:
+            # Native BrightPay parse (see brightpay_reports.py), not
+            # generic column-mapping - these were auto-confirmed on
+            # upload the same way a Xero-native file is. Concatenated
+            # across every confirmed upload of the type, same reasoning
+            # as VAT_RECON_TYPES above: a client's tax year can span
+            # more than one BrightPay export.
+            if report_type == "paye_summary":
+                df = brightpay_reports.parse_payroll_summary(source)
+            elif report_type == "paye_p32":
+                df = brightpay_reports.parse_p32(source)
+            else:
+                df = brightpay_reports.parse_pensions(source)
+            data.setdefault(report_type, []).append(df)
+            continue
+
         key = DATA_KEY.get((report_type, upload["period"]))
         if not key:
             continue
         df = parsers.apply_mapping(source, report_type, upload["mapping"] or {})
         data[key] = df
 
-    for rt in VAT_RECON_TYPES:
+    for rt in VAT_RECON_TYPES + PAYE_RECON_TYPES:
         frames = data.get(rt)
         data[rt] = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
@@ -886,6 +954,11 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
         tolerance=job.get("vat_recon_tolerance", 0.0),
     )
     results = results + vat_reconciliation.reconcile(data, vat_settings)
+    paye_settings = paye_reconciliation.PayeReconSettings(
+        tolerance=job.get("paye_recon_tolerance", 0.0),
+        date_window_days=job.get("paye_recon_date_window_days", paye_reconciliation.DEFAULT_DATE_WINDOW_DAYS),
+    )
+    results = results + paye_reconciliation.reconcile(data, paye_settings)
     yield event(2, "done")
 
     yield event(3, "running")

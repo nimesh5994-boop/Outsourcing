@@ -263,6 +263,7 @@ PDF, in any order), and the system works out what each one is:
 | Bank reconciliation | Statement closing balance vs TB |
 | VAT cross-check | VAT return boxes vs P&L turnover and VAT control account |
 | VAT Reconciliation (Box 1 & 4) | General Ledger matched transaction-by-transaction against the filed return's Sales and Purchases detail - a dedicated workspace, see below |
+| PAYE Reconciliation | BrightPay payroll data matched against the General Ledger - Net Pay per employee per month, HMRC PAYE & NI and Pension Contributions as monthly totals - a dedicated workspace, see below |
 | Corporation Tax computation | Current UK rates (small profits/marginal relief/main rate) applied to accounting profit, checked against the booked tax charge |
 | Fixed asset register (category) | Cost/depreciation rollforward per asset category, derived from TB + nominal activity, checked against the TB |
 | Fixed asset register (asset detail) | Prior-year register rolled forward asset-by-asset, new additions/possible disposals flagged from nominal activity, totals checked against TB |
@@ -339,10 +340,69 @@ to be to count as the same transaction - and doubles as the threshold
 below which a found match's residual difference isn't worth flagging
 as a variance in the first place.
 
-This is the first of what's meant to be a small family of these -
-PAYE reconciliation (General Ledger vs the filed FPS/EPS submissions)
-is the planned next one, same shape: its own dedicated section, its
-own settings, testable on its own before it's relied on.
+This is the first of a small family of these - see PAYE Reconciliation
+next, same shape: its own dedicated section, its own settings,
+testable on its own before it's relied on.
+
+### PAYE Reconciliation workspace
+
+BrightPay payroll data matched against the General Ledger. Built
+against a real client's exports (BrightPay's Payroll Summary, P32, and
+Pensions reports, plus the matching Xero Account Transactions/Trial
+Balance), which turned up two things worth knowing before reading the
+design: this client's books had ~10 days of the year posted against a
+BrightPay export covering the full year (the reconciliation correctly
+reports that as "no General Ledger match" for almost everything - a
+real gap in the books, not a bug), and there is no formal payroll
+accrual journal at all - no Gross Wages or NI control account exists;
+net pay is paid straight to each employee (contact = employee name,
+no reference numbers), and PAYE/NI and pension are each paid to HMRC/
+the provider as one lump sum a month. The engine is built around that
+reality rather than an assumed textbook chart of accounts:
+
+- **Net Pay** is reconciled **employee-by-employee-by-month**: each
+  BrightPay employee/month is matched against a General Ledger posting
+  by contact name (fuzzy - first and last word, so BrightPay's full
+  legal name "Jamie Francis Doe" still matches a ledger contact of
+  "Jamie Doe") and amount, searching the *whole* ledger rather than
+  one assumed account, since a bookkeeper coding things differently
+  than expected is exactly the scenario this needs to survive.
+- **HMRC PAYE & NI** and **Pension Contributions** are reconciled as
+  **monthly company-wide totals** - P32's "Amount due" and each
+  month's total employee+employer pension contribution, matched
+  against a General Ledger posting whose contact looks like HMRC or a
+  pension provider (a short built-in keyword list per check, same
+  pattern as `vat_control_names` in the checks table above). There's
+  no per-employee trace of either in real books, so matching at
+  employee level isn't meaningful for these two.
+
+No reference/invoice numbers exist anywhere in this domain - BrightPay
+doesn't generate them and neither does a bank payment run - so
+matching is a single pass: contact + amount within tolerance, picking
+whichever candidate's date is closest when more than one qualifies
+(**Date window**, a setting: how many days after the period end to
+search - HMRC and pension payments trail the tax month by days to
+weeks, never land the same day), and never letting one General Ledger
+posting settle two different months. A **Xero "Account Transactions"
+export lists one real payment twice** - once per side of the double
+entry, same contact, equal-and-opposite debit/credit - deduplicated
+before matching so it isn't mistaken for two separate payments (found
+by testing against the real export, not anticipated in advance).
+
+An item that doesn't find a within-tolerance match still gets the
+*nearest same-contact posting* reported as a diagnostic (ignoring
+amount) - "no match" alone is rarely as useful to a preparer as "here's
+the closest thing, look at the difference yourself".
+
+**Three uploads**, auto-detected from BrightPay's own column layout
+(no mapping step, the same way a genuine Xero export auto-confirms) -
+Payroll Summary, P32, and Pensions. **No separate General Ledger
+upload**: this workspace reuses the job's existing Nominal Activity /
+General Ledger Detail upload rather than asking for the same file
+twice. A client's tax year can span more than one BrightPay export
+(a new one each BrightPay tax year); upload as many as needed, they're
+combined automatically the same way VAT Reconciliation's filed-return
+uploads are.
 
 ### AI-assisted reconciliation notes (opt-in)
 
@@ -541,6 +601,9 @@ app/
   recon.py                 the reconciliation/cross-check engine
   vat_reconciliation.py     VAT Reconciliation workspace - General Ledger vs Filed VAT
                              Return, Box 1/Box 4 transaction matching (see above)
+  brightpay_reports.py       native BrightPay report parsers (Payroll Summary, P32, Pensions)
+  paye_reconciliation.py      PAYE Reconciliation workspace - BrightPay payroll data vs
+                               the General Ledger (see above)
   reconciliation_agent.py    opt-in LLM explanation for flagged checks (no API calls from recon.py itself)
   anomaly_detection.py       cross-transaction checks (miscoding, duplicates, unusual posting dates)
   compliance_checks.py        data-driven checklist checks (DLA/S455, dividends, petty cash, loans)
@@ -682,6 +745,25 @@ claimed at most once, Box 1/Box 4 sharing one pool without cross-box
 false positives, and multi-file `Source File` tagging surviving into
 the unmatched-items table.
 
+`tests/test_brightpay_reports.py` covers the BrightPay native report
+parsers directly (in-memory CSV text, no database): one row per employee
+per month for Payroll Summary and Pensions with TOTAL rows and the
+trailing annual-summary block correctly excluded, one row per tax month
+for P32, native-detection returning the right report type per file (and
+`None` for an unrelated file), and a clear error rather than silent
+garbage when a file's shape doesn't match.
+
+`tests/test_paye_reconciliation.py` covers the PAYE Reconciliation
+workspace's matching engine directly (in-memory DataFrames, no
+database): fuzzy employee-name matching (BrightPay's full legal name vs
+a shorter General Ledger contact), the double-entry-leg deduplication
+found by testing against a real export, zero-net-pay months correctly
+skipped, the date window as a hard requirement (not a soft preference -
+a regression test for a real bug caught while writing these tests),
+tolerance absorbing small differences, HMRC/pension keyword-contact
+matching, monthly aggregation across employees for pension, and the
+closest-same-contact diagnostic on an unmatched item.
+
 `tests/test_reconciliation_agent.py` covers the AI-assisted-notes agent
 directly, with the Anthropic client mocked throughout - no test in this
 suite ever calls the real API. Verifies the contract that must hold no
@@ -699,8 +781,11 @@ reporting all ten generate steps in order and leaving the job in the same
 generated state as the classic POST route, the VAT Reconciliation
 workspace end to end (General Ledger + two multi-file Filed Return
 uploads, settings, the standalone Run button, and the same results
-landing in the generated workbook's own tabs), and - with a mocked
-Anthropic client - an AI-assisted note actually reaching the downloaded
+landing in the generated workbook's own tabs), the PAYE Reconciliation
+workspace end to end (a Xero-native General Ledger upload plus three
+auto-detected BrightPay uploads, settings, the standalone Run button,
+results landing in the generated workbook's own tabs), and - with a
+mocked Anthropic client - an AI-assisted note actually reaching the downloaded
 workbook end to end), and the access-control model (signup, login, wrong
 password, unauthenticated redirect, a preparer scoped to only their
 granted clients, a manager blocked from user management, and cross-

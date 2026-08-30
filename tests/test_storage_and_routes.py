@@ -980,3 +980,151 @@ def test_vat_reconciliation_end_to_end_through_http_and_into_the_workbook(http_c
     wb = _openpyxl.load_workbook(io.BytesIO(resp.content))
     assert any("VAT Recon - Box 1" in name for name in wb.sheetnames)
     assert any("VAT Recon - Box 4" in name for name in wb.sheetnames)
+
+
+def _make_payroll_gl_workbook() -> bytes:
+    """A minimal but genuinely Xero-native 'Account Transactions' export
+    (title rows + one section per account + a Total row per section,
+    exactly the shape app.xero_reports.parse_account_transactions
+    expects) - one real wages payment, one HMRC payment, one pension
+    payment, posted the way a real client export this feature was
+    designed against actually does it: net-pay-only postings coded
+    straight against a running account, contact carrying the payee
+    name, no reference numbers."""
+    from datetime import datetime as _dt
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Account Transactions"
+    ws.append(["Account Transactions"])
+    ws.append(["Test Co Ltd"])
+    ws.append(["For the period 1 April 2025 to 31 March 2026"])
+    ws.append(["Date", "Source", "Contact", "Contact Group", "Description", "Invoice Number", "Reference",
+                "Debit", "Credit", "Running Balance", "Gross", "Net", "VAT", "VAT Rate", "VAT Rate Name",
+                "Account Code", "Account Type", "Related account"])
+    ws.append(["Wages Payable - Payroll"])
+    ws.append([_dt(2025, 5, 2), "Spend Money", "Jamie Doe", None, "Jamie Doe", None, None,
+                1084.84, 0, None, None, None, None, None, "No VAT", "814", "Liability", "BANK"])
+    ws.append(["Total Wages Payable - Payroll", None, None, None, None, None, None, 0, 0, 0, 0, 0, 0, None, None, None, None, None])
+    ws.append(["PAYE Payable"])
+    ws.append([_dt(2025, 5, 20), "Spend Money", "HMRC", None, "HMRC", None, None,
+                449.52, 0, None, None, None, None, None, "No VAT", "825", "Liability", "BANK"])
+    ws.append(["Total PAYE Payable", None, None, None, None, None, None, 0, 0, 0, 0, 0, 0, None, None, None, None, None])
+    ws.append(["Pensions Costs"])
+    ws.append([_dt(2025, 5, 21), "Spend Money", "Nest", None, "Nest", None, None,
+                145.60, 0, None, None, None, None, None, "No VAT", "482", "Expense", "BANK"])
+    ws.append(["Total Pensions Costs", None, None, None, None, None, None, 0, 0, 0, 0, 0, 0, None, None, None, None, None])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _make_brightpay_csv(kind: str) -> bytes:
+    if kind == "payroll_summary":
+        text = (
+            "Name,Surname,Gross pay,Taxable gross,Tax,NIC-able gross,Employee NICs,"
+            "Student + Postgrad Loan deduction,Net pay,Take-home pay,Employer NICs,Employer pension,Cost to employer\n"
+            "Month 1 (Ending 30 April 2025)\n"
+            "Jamie,Doe,1200.00,1200.00,50.00,1200.00,25.00,0.00,1084.84,1084.84,40.16,0.00,1240.16\n"
+            "TOTAL,,1200.00,1200.00,50.00,1200.00,25.00,0.00,1084.84,1084.84,40.16,0.00,1240.16\n"
+        )
+    elif kind == "p32":
+        text = (
+            "Tax period ending,Gross tax,Tax refund received,CIS deductions suffered,Student loan,Postgraduate loan,"
+            "Net tax,Gross NICs,SMP recovered,NIC compensation on SMP,SPP recovered,NIC compensation on SPP,"
+            "ShPP recovered,NIC compensation on ShPP,SAP recovered,NIC compensation on SAP,SPBP recovered,"
+            "NIC compensation on SPBP,SNCP recovered,NIC compensation on SNCP,Employment allowance claim,"
+            "Apprenticeship Levy,Total deductions from NICs,Net NICs,Amount due\n"
+            "Tax Months 1 to 1 (Summary)\n"
+            "05/05/2025,50.00,0.00,0.00,0.00,0.00,50.00,75.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,0.00,25.00,0.00,25.00,50.00,449.52\n"
+        )
+    else:
+        text = (
+            "Name,Surname,Employee pensionable gross,Employee pension,Employee AVCs,Employer pensionable gross,"
+            "Employer pension,Employer AVCs,Employee + employer pension\n"
+            "Month 1 (Ending 30 April 2025)\n"
+            "Jamie,Doe,1200.00,105.60,0.00,1200.00,40.00,0.00,145.60\n"
+            "TOTAL,,1200.00,105.60,0.00,1200.00,40.00,0.00,145.60\n"
+        )
+    return text.encode()
+
+
+def test_paye_reconciliation_end_to_end_through_http_and_into_the_workbook(http_client):
+    """Full PAYE Reconciliation workspace flow over real HTTP requests: a
+    Xero-native General Ledger upload (the job's regular Nominal Activity
+    section - no separate GL upload for this workspace), three BrightPay
+    uploads (auto-detected from their own column layout, no mapping
+    step), settings, the standalone Run button, and finally that the
+    same three results land in the generated workbook's own tabs."""
+    c = http_client
+    practice_id = _signup(c, admin_email="paye-recon@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "PAYE Recon Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-04-01", "current_period_end": "2026-03-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    gl_bytes = _make_payroll_gl_workbook()
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "nominal_activity"},
+        files={"files": ("gl.xlsx", gl_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303  # Xero-native Account Transactions auto-confirms straight through
+
+    for kind, filename in [("payroll_summary", "payroll.csv"), ("p32", "p32.csv"), ("pensions", "pensions.csv")]:
+        resp = c.post(
+            f"/jobs/{job_id}/uploads",
+            files={"files": (filename, _make_brightpay_csv(kind), "text/csv")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303  # BrightPay native detection auto-confirms too, no type_hint needed
+
+    from app import storage
+    job = storage.get_job(job_id)
+    assert len(job["uploads"]) == 4
+    by_type = {}
+    for u in job["uploads"].values():
+        by_type.setdefault(u["report_type"], []).append(u)
+    assert len(by_type["nominal_activity"]) == 1
+    assert len(by_type["paye_summary"]) == 1
+    assert len(by_type["paye_p32"]) == 1
+    assert len(by_type["paye_pensions"]) == 1
+    assert all(u["confirmed"] for u in job["uploads"].values())
+
+    resp = c.post(f"/jobs/{job_id}/paye-recon-settings", data={"paye_recon_tolerance": "0.0", "paye_recon_date_window_days": "60"}, follow_redirects=False)
+    assert resp.status_code == 303
+
+    resp = c.post(f"/jobs/{job_id}/paye-recon/run", follow_redirects=False)
+    assert resp.status_code == 303
+
+    job = storage.get_job(job_id)
+    results = {r["name"]: r for r in job["paye_recon_results"]}
+    assert set(results) == {"PAYE Recon - Net Pay by Employee", "PAYE Recon - HMRC PAYE & NI", "PAYE Recon - Pension Contributions"}
+    assert results["PAYE Recon - Net Pay by Employee"]["status"] == "ok"
+    assert results["PAYE Recon - HMRC PAYE & NI"]["status"] == "ok"
+    assert results["PAYE Recon - Pension Contributions"]["status"] == "ok"
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    assert "PAYE Reconciliation" in resp.text
+
+    resp = c.post(f"/jobs/{job_id}/generate", follow_redirects=False)
+    assert resp.status_code == 303
+
+    job = storage.get_job(job_id)
+    summary_by_name = {s["name"]: s for s in job["summary"]}
+    assert summary_by_name["PAYE Recon - Net Pay by Employee"]["status"] == "ok"
+    assert summary_by_name["PAYE Recon - HMRC PAYE & NI"]["status"] == "ok"
+    assert summary_by_name["PAYE Recon - Pension Contributions"]["status"] == "ok"
+
+    import openpyxl as _openpyxl
+    resp = c.get(f"/jobs/{job_id}/download")
+    assert resp.status_code == 200
+    wb = _openpyxl.load_workbook(io.BytesIO(resp.content))
+    assert any("PAYE Recon - Net Pay" in name for name in wb.sheetnames)
+    assert any("PAYE Recon - HMRC" in name for name in wb.sheetnames)
+    assert any("PAYE Recon - Pension" in name for name in wb.sheetnames)

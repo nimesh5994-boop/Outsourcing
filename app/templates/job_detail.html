@@ -165,6 +165,109 @@
   {% endif %}
 </div>
 
+<div class="card" id="paye-recon">
+  <h2>PAYE Reconciliation</h2>
+  <p class="muted">BrightPay payroll data vs the General Ledger already uploaded for this job (the Nominal Activity / General Ledger Detail section below &mdash; no separate upload needed here). Net Pay is reconciled employee-by-employee-by-month, since that's paid to each person individually; HMRC PAYE &amp; NI and Pension Contributions are reconciled as monthly company-wide totals, since those are paid in one lump sum a month with no per-employee trace in the ledger.</p>
+
+  <h3 style="margin-top:20px; font-size:15px;">Reconciliation settings</h3>
+  <form method="post" action="/jobs/{{ job.id }}/paye-recon-settings">
+    <div class="row">
+      <div>
+        <label>Matching Tolerance</label>
+        <select name="paye_recon_tolerance">
+          {% set current_tolerance = job.paye_recon_tolerance if job.paye_recon_tolerance is not none else 0.0 %}
+          {% for t in [0.0, 1.0, 5.0, 10.0] %}
+          <option value="{{ t }}" {% if current_tolerance == t %}selected{% endif %}>{{ "Exact Match (£0.00)" if t == 0.0 else "£%.2f tolerance"|format(t) }}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div>
+        <label>Date window (days after period end)</label>
+        <select name="paye_recon_date_window_days">
+          {% set current_window = job.paye_recon_date_window_days if job.paye_recon_date_window_days is not none else 60 %}
+          {% for d in [30, 45, 60, 90] %}
+          <option value="{{ d }}" {% if current_window == d %}selected{% endif %}>{{ d }} days</option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+    <div style="margin-top:12px"><button type="submit" class="secondary">Save settings</button></div>
+  </form>
+
+  <h3 style="margin-top:24px; font-size:15px;">Upload BrightPay reports</h3>
+  {% for rt in paye_recon_types %}
+  <div style="border:1px dashed var(--border); border-radius:8px; padding:16px; margin-top:14px;">
+    <strong>{{ report_labels[rt] }}</strong>
+    <p class="muted" style="font-size:13px; margin:6px 0 10px;">
+      {% if rt == "paye_summary" %}
+      Upload BrightPay's Payroll Summary export (CSV) for the period, one row per employee per tax month. Auto-detected from its own column layout &mdash; no mapping needed.
+      {% elif rt == "paye_p32" %}
+      Upload BrightPay's P32 export (CSV) &mdash; the HMRC amount due per tax month. Auto-detected the same way.
+      {% else %}
+      Upload BrightPay's Pensions export (CSV) &mdash; employee and employer pension contributions per employee per tax month. Auto-detected the same way.
+      {% endif %}
+      A client's tax year can span more than one export (e.g. one per BrightPay tax year) &mdash; upload as many as needed, they're combined automatically.
+    </p>
+
+    {% set section_uploads = uploads_by_type.get(rt, []) %}
+    {% if section_uploads %}
+    <table>
+      <tr><th>File</th><th></th></tr>
+      {% for u in section_uploads %}
+      <tr>
+        <td class="muted">{{ u.display_name or u.filename }}</td>
+        <td><span class="badge confirmed">auto-detected</span></td>
+      </tr>
+      {% endfor %}
+    </table>
+    {% else %}
+    <p class="muted" style="font-size:13px;">No file uploaded yet.</p>
+    {% endif %}
+
+    <form method="post" action="/jobs/{{ job.id }}/uploads" enctype="multipart/form-data" style="margin-top:10px">
+      <input type="file" name="files" multiple accept=".csv,.xlsx,.xls,.pdf">
+      <div style="margin-top:8px"><button type="submit" class="secondary">Add file(s)</button></div>
+    </form>
+  </div>
+  {% endfor %}
+
+  <div style="margin-top:20px">
+    <form method="post" action="/jobs/{{ job.id }}/paye-recon/run">
+      <button type="submit">Run PAYE Reconciliation</button>
+    </form>
+    <p class="muted" style="margin-top:8px">Runs independently of Generate &mdash; use this to test and refine the PAYE inputs on their own before building the full working paper.</p>
+  </div>
+
+  {% if job.paye_recon_results %}
+  <div style="margin-top:20px">
+    <p class="muted" style="font-size:13px;">Last run: {{ job.paye_recon_computed_at }}</p>
+    {% for r in job.paye_recon_results %}
+    <h3 style="margin-top:16px; font-size:15px;">{{ r.name }} <span class="badge {{ r.status }}">{{ r.status }}</span></h3>
+    <p class="muted">{{ r.message }}</p>
+    {% if r.detail %}
+    <table>
+      <tr>{% for k in r.detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
+      {% for row in r.detail %}
+      <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
+      {% endfor %}
+    </table>
+    {% endif %}
+    {% if r.extra_detail %}
+    <details style="margin-top:10px">
+      <summary style="cursor:pointer; color:var(--muted); font-size:13px;">{{ r.extra_detail_label }} ({{ r.extra_detail|length }})</summary>
+      <table style="margin-top:8px">
+        <tr>{% for k in r.extra_detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
+        {% for row in r.extra_detail %}
+        <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
+        {% endfor %}
+      </table>
+    </details>
+    {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+</div>
+
 {% for rt in report_types %}
 <div class="card">
   <h2>{{ report_labels[rt] }}</h2>
