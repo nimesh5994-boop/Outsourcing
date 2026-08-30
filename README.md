@@ -502,6 +502,7 @@ already ingested, so the system flags them automatically:
 | Petty cash running balance review | Rolls the petty cash account's balance forward transaction by transaction through the year; flags any point it goes negative (physically impossible for cash, so it means a mis-dated/mis-posted entry or cash fronted by the business) |
 | Loan facility review | Detects Bounce Back Loan / Hire Purchase / Bank Loan-style accounts and lists the specific checklist points that apply to each (BBL's 12-month interest holiday, HP's within/after-one-year split, agreement/statement received) - a reminder, not a computed check, since there's no repayment schedule or agreement in the data this system has |
 | Going concern indicators (`app/going_concern.py`) | Negative net current assets (a working-capital deficit) and negative net assets (balance sheet insolvency), from the already-derived Balance Sheet statement - purely an arithmetic fact about the balance sheet shape, explicitly never presented as a verdict on going concern itself, which needs judgement and forward-looking information this system has no way to derive from historical accounting data alone |
+| Related party transactions (`app/related_party_transactions.py`) | Postings to a contact already identified as a related party (from Directors' Loan Account activity) landing on some other account - candidates for FRS 102 Section 33 disclosure. Explicitly not a completeness check - only catches a related party who also transacted through the DLA this year, since that's the only source of related-party identity this system has |
 
 **Manual checklist tab** (`app/excel_builder.py: build_compliance_checklist_sheet`,
 config key `compliance_checklist`) - a static, editable pro-forma sheet
@@ -860,6 +861,7 @@ app/
   anomaly_detection.py       cross-transaction checks (miscoding, duplicates, unusual posting dates)
   compliance_checks.py        data-driven checklist checks (DLA/S455, dividends, petty cash, loans)
   going_concern.py             negative net current assets / negative net assets indicators
+  related_party_transactions.py    DLA-contact postings landing outside the DLA account (FRS 102 s.33 candidates)
   control_accounts.py       control account rollforward + aged breakdown engine
   nominal_matrix.py          nominal activity → contra nominal code analysis matrix (+ formula row-id grouping)
   fixed_assets.py             category-level + asset-level fixed asset register engine
@@ -1032,6 +1034,15 @@ liabilities" line is displayed flipped to a positive number (not
 negative the way "NET ASSETS" is genuinely signed) - a real bug found
 and fixed while building this feature, which would otherwise have
 silently inverted the whole analysis.
+
+`tests/test_related_party_transactions.py` covers the Related Party
+Transactions check directly (in-memory DataFrames, no database): a
+posting to a DLA-identified contact landing outside the DLA account
+correctly flagged, the double-entry contra-leg of that same posting
+correctly deduplicated rather than counted twice, an unrelated contact
+and a below-threshold posting both correctly ignored, and "n/a" when
+there's no DLA account or no named DLA contacts to build a related-party
+list from at all.
 
 `tests/test_document_detection.py` covers the auto-detection/PDF-extraction
 unit logic directly (no database needed): Xero-native matching, the

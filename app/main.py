@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mapping, nominal_matrix, parsers, paye_reconciliation, recon, reconciliation_agent, statutory_deadlines, storage, vat_reconciliation, xero_reports
+from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mapping, nominal_matrix, parsers, paye_reconciliation, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, vat_reconciliation, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
 from app.models import PAYE_RECON_TYPES, PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS, VAT_RECON_TYPES
 
@@ -975,6 +975,9 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     results = results + [statutory_deadlines.build_result(date.fromisoformat(period_end_str) if period_end_str else None)]
     bs_statement_result = financial_statements.build_bs_statement(data.get("bs_current"), current_year_profit or 0.0)
     results = results + [going_concern.assess(bs_statement_result.statement)]
+    results = results + [related_party_transactions.find_related_party_transactions(
+        data.get("tb_current"), data.get("nominal_current"),
+    )]
     yield event(4, "done")
 
     if template and template["config"].get("ai_reconciliation_notes", {}).get("enabled"):
