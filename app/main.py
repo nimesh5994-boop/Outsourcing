@@ -1,5 +1,6 @@
 import io
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -377,7 +378,11 @@ def _summarize_progress(progress: list[dict] | None) -> dict | None:
     _generate_workbook_steps) into a per-step timing breakdown - a
     step's duration is just the gap between its own "running" and
     "done"/"skipped" timestamps, already there for the reading once
-    events are persisted with a timestamp on each one."""
+    events are persisted with a timestamp on each one. "retrying"
+    events (from _run_step_with_retry, steps 1 and 10 only) don't move
+    that gap - they're counted per step instead, so a step that needed
+    a couple of attempts still shows its real end-to-end duration plus
+    how many times it had to retry."""
     if not progress:
         return None
 
@@ -386,7 +391,11 @@ def _summarize_progress(progress: list[dict] | None) -> dict | None:
         step = evt.get("step")
         if not isinstance(step, int):
             continue
-        entry = by_step.setdefault(step, {"step": step, "label": evt.get("label", "")})
+        entry = by_step.setdefault(step, {"step": step, "label": evt.get("label", ""), "retries": 0})
+        if evt["status"] == "retrying":
+            entry["retries"] += 1
+            entry["last_retry_error"] = evt.get("error")
+            continue
         entry[evt["status"]] = evt["at"]
         if "detail" in evt:
             entry["detail"] = evt["detail"]
@@ -399,7 +408,11 @@ def _summarize_progress(progress: list[dict] | None) -> dict | None:
         if running_at and done_at:
             seconds = (datetime.fromisoformat(done_at) - datetime.fromisoformat(running_at)).total_seconds()
         status = "done" if done_at else ("skipped" if skipped_at else "running")
-        rows.append({"step": step, "label": entry["label"], "status": status, "seconds": seconds, "detail": entry.get("detail")})
+        rows.append({
+            "step": step, "label": entry["label"], "status": status, "seconds": seconds,
+            "detail": entry.get("detail"), "retries": entry["retries"],
+            "last_retry_error": entry.get("last_retry_error"),
+        })
 
     error_evt = next((e for e in progress if e.get("step") == "error"), None)
     complete_evt = next((e for e in progress if e.get("step") == "complete"), None)
@@ -694,6 +707,38 @@ GENERATE_STEPS = [
     "Building the Excel workbook",
 ]
 
+# Only steps 1 and 10 touch Postgres (loading uploads/template, saving the
+# workbook and job) - the other eight run on data already in memory, so a
+# retry there would never change a deterministic failure's outcome and
+# they're left unwrapped. 3 attempts = 1 try + 2 retries; backoff grows
+# with the attempt number so a real outage doesn't get hammered.
+STEP_RETRY_ATTEMPTS = 3
+STEP_RETRY_BASE_DELAY = 0.4
+
+
+def _run_step_with_retry(event_fn, n: int, work):
+    """Runs one step's work, retrying it with a short backoff before
+    giving up. Yields "running" once, then a "retrying" event (attempt
+    number + the error) for each failed attempt, then "done" and returns
+    work()'s result - or re-raises the last error once every attempt is
+    exhausted, exactly as an unwrapped step would (so a real, persistent
+    failure still surfaces the same way it always has)."""
+    yield event_fn(n, "running")
+    attempt = 1
+    while True:
+        try:
+            result = work()
+        except Exception as exc:
+            if attempt >= STEP_RETRY_ATTEMPTS:
+                raise
+            yield event_fn(n, "retrying", attempt=attempt, max_attempts=STEP_RETRY_ATTEMPTS, error=str(exc))
+            time.sleep(STEP_RETRY_BASE_DELAY * attempt)
+            attempt += 1
+            continue
+        break
+    yield event_fn(n, "done")
+    return result
+
 
 def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     """Does the real work of generating a working paper, one step at a
@@ -708,7 +753,13 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     Every event is also persisted onto job["progress"] (timestamped) as
     it fires, so the last run's step-by-step timing survives past the
     live stream - visible on the job page whether or not anyone watched
-    it happen, and still there if the browser was closed mid-run."""
+    it happen, and still there if the browser was closed mid-run.
+
+    Steps 1 and 10 (the only two that touch Postgres) run through
+    _run_step_with_retry, so a transient DB blip self-heals with a
+    couple of quick retries instead of failing the whole run - see that
+    function for the "retrying" events this can add between a step's
+    "running" and "done"."""
     total = len(GENERATE_STEPS)
     job["progress"] = []
     storage.save_job(job)
@@ -724,11 +775,13 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
 
     template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
 
-    yield event(1, "running")
-    data = _load_canonical_data(job)
-    pl_current = data.get("pl_current")
-    current_year_profit = float(pl_current["amount"].sum()) if pl_current is not None and not pl_current.empty else None
-    yield event(1, "done")
+    def _step1():
+        step_data = _load_canonical_data(job)
+        step_pl_current = step_data.get("pl_current")
+        step_profit = float(step_pl_current["amount"].sum()) if step_pl_current is not None and not step_pl_current.empty else None
+        return step_data, step_pl_current, step_profit
+
+    data, pl_current, current_year_profit = yield from _run_step_with_retry(event, 1, _step1)
 
     yield event(2, "running")
     results = recon.run_all_recons(data)
@@ -776,33 +829,38 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     )
     yield event(9, "done")
 
-    yield event(10, "running")
-    template_bytes = storage.load_file(template["file_id"]) if template else None
-    if template_bytes is not None:
-        wb = build_workbook_into_template(
-            template_bytes, template["config"],
-            job["client_name"], job["current_label"], job["comparative_label"], data, results,
-            control_account_results=ca_results, matrix_results=mx_results, ct_computation=ct_computation,
-            fixed_asset_result=fixed_asset_result, asset_register_result=asset_register_result,
-        )
-    else:
-        wb = build_workbook(
-            job["client_name"], job["current_label"], job["comparative_label"], data, results,
-            control_account_results=ca_results, matrix_results=mx_results, ct_computation=ct_computation,
-            fixed_asset_result=fixed_asset_result, asset_register_result=asset_register_result,
-        )
+    def _step10():
+        template_bytes = storage.load_file(template["file_id"]) if template else None
+        if template_bytes is not None:
+            wb = build_workbook_into_template(
+                template_bytes, template["config"],
+                job["client_name"], job["current_label"], job["comparative_label"], data, results,
+                control_account_results=ca_results, matrix_results=mx_results, ct_computation=ct_computation,
+                fixed_asset_result=fixed_asset_result, asset_register_result=asset_register_result,
+            )
+        else:
+            wb = build_workbook(
+                job["client_name"], job["current_label"], job["comparative_label"], data, results,
+                control_account_results=ca_results, matrix_results=mx_results, ct_computation=ct_computation,
+                fixed_asset_result=fixed_asset_result, asset_register_result=asset_register_result,
+            )
 
-    buffer = io.BytesIO()
-    wb.save(buffer)
-    output_filename = f"{job['client_name']} - Working Papers - {job['current_label']}.xlsx"
-    job["output_file_id"] = storage.save_file(
-        "output", job_id, output_filename, buffer.getvalue(),
-        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    )
-    job["status"] = "generated"
-    job["summary"] = [{"name": r.name, "status": r.status, "message": r.message} for r in results]
-    storage.save_job(job)
-    yield event(10, "done")
+        buffer = io.BytesIO()
+        wb.save(buffer)
+        output_filename = f"{job['client_name']} - Working Papers - {job['current_label']}.xlsx"
+        # If a retry lands here (save_file succeeds, then save_job fails),
+        # the prior attempt's file row is left in place, unreferenced -
+        # harmless (never read back), and simpler than trying to reuse or
+        # clean it up for a failure mode this rare.
+        job["output_file_id"] = storage.save_file(
+            "output", job_id, output_filename, buffer.getvalue(),
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+        job["status"] = "generated"
+        job["summary"] = [{"name": r.name, "status": r.status, "message": r.message} for r in results]
+        storage.save_job(job)
+
+    yield from _run_step_with_retry(event, 10, _step10)
 
     yield record({"step": "complete", "redirect": f"/jobs/{job_id}"})
 

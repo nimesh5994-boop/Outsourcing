@@ -42,7 +42,9 @@
       {% for row in progress_summary.rows %}
       <tr>
         <td>{{ row.step }}. {{ row.label }}</td>
-        <td><span class="badge {{ 'confirmed' if row.status == 'done' else ('na' if row.status == 'skipped' else 'pending') }}">{{ row.status }}{% if row.detail %} ({{ row.detail }}){% endif %}</span></td>
+        <td><span class="badge {{ 'confirmed' if row.status == 'done' else ('na' if row.status == 'skipped' else 'pending') }}">{{ row.status }}{% if row.detail %} ({{ row.detail }}){% endif %}</span>
+          {% if row.retries %}<span class="badge review" title="{{ row.last_retry_error }}">retried {{ row.retries }}x</span>{% endif %}
+        </td>
         <td class="muted">{{ "%.2fs"|format(row.seconds) if row.seconds is not none else "-" }}</td>
       </tr>
       {% endfor %}

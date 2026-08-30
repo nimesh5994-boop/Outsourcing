@@ -650,6 +650,132 @@ def test_generate_progress_is_persisted_and_summarized_with_timings(http_client)
     assert f"finished in {summary['total_seconds']:.1f}s" in resp.text
 
 
+def test_run_step_with_retry_recovers_from_a_transient_failure(monkeypatch):
+    """The retry helper itself (used by steps 1 and 10, the only two that
+    touch Postgres): a step whose work raises once and then succeeds must
+    end up "done" with the right result, having emitted exactly one
+    "retrying" event in between - and never sleep for real in tests."""
+    from app import main
+
+    monkeypatch.setattr(main.time, "sleep", lambda *_: None)
+
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("simulated transient DB blip")
+        return "workbook built"
+
+    events = []
+
+    def event_fn(n, status, **extra):
+        evt = {"step": n, "status": status, **extra}
+        events.append(evt)
+        return evt
+
+    gen = main._run_step_with_retry(event_fn, 10, flaky)
+    result = None
+    try:
+        while True:
+            next(gen)
+    except StopIteration as stop:
+        result = stop.value
+
+    assert result == "workbook built"
+    assert calls["n"] == 2
+    statuses = [e["status"] for e in events]
+    assert statuses == ["running", "retrying", "done"]
+    assert events[1]["attempt"] == 1
+    assert events[1]["max_attempts"] == main.STEP_RETRY_ATTEMPTS
+    assert "simulated transient DB blip" in events[1]["error"]
+
+
+def test_run_step_with_retry_gives_up_after_max_attempts(monkeypatch):
+    """A persistent (not transient) failure must still surface as a real
+    error once every attempt is exhausted - retry must never silently
+    swallow a genuine failure."""
+    from app import main
+
+    monkeypatch.setattr(main.time, "sleep", lambda *_: None)
+
+    calls = {"n": 0}
+
+    def always_fails():
+        calls["n"] += 1
+        raise ConnectionError("still down")
+
+    events = []
+
+    def event_fn(n, status, **extra):
+        evt = {"step": n, "status": status, **extra}
+        events.append(evt)
+        return evt
+
+    gen = main._run_step_with_retry(event_fn, 1, always_fails)
+    with pytest.raises(ConnectionError, match="still down"):
+        list(gen)
+
+    assert calls["n"] == main.STEP_RETRY_ATTEMPTS
+    statuses = [e["status"] for e in events]
+    assert statuses == ["running"] + ["retrying"] * (main.STEP_RETRY_ATTEMPTS - 1)
+
+
+def test_generate_recovers_from_a_transient_storage_blip(http_client, monkeypatch):
+    """End-to-end: a real generate run where step 1's storage.load_file
+    call fails once (simulating a transient Postgres blip) must still
+    finish successfully via one retry - and the retry must be visible in
+    the persisted progress trail, not just silently absorbed."""
+    c = http_client
+    practice_id = _signup(c, admin_email="retry-recover@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Retry Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    tb_path = SAMPLE_DIR / "trial_balance_current_xero.xlsx"
+    with open(tb_path, "rb") as fh:
+        resp = c.post(
+            f"/jobs/{job_id}/uploads",
+            files={"files": (tb_path.name, fh,
+                              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303  # Xero-native TB auto-confirms
+
+    from app import main, storage
+
+    monkeypatch.setattr(main.time, "sleep", lambda *_: None)
+    original_load_file = storage.load_file
+    calls = {"n": 0}
+
+    def flaky_load_file(file_id):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise ConnectionError("simulated transient DB blip")
+        return original_load_file(file_id)
+
+    monkeypatch.setattr(storage, "load_file", flaky_load_file)
+
+    resp = c.post(f"/jobs/{job_id}/generate", follow_redirects=False)
+    assert resp.status_code == 303
+    assert calls["n"] == 2  # one failed attempt, one that succeeded
+
+    job = storage.get_job(job_id)
+    assert job["status"] == "generated"
+    retry_events = [e for e in job["progress"] if e.get("status") == "retrying"]
+    assert len(retry_events) == 1
+    assert retry_events[0]["step"] == 1
+    assert "simulated transient DB blip" in retry_events[0]["error"]
+
+    summary = main._summarize_progress(job["progress"])
+    step1_row = next(r for r in summary["rows"] if r["step"] == 1)
+    assert step1_row["status"] == "done"
+    assert step1_row["retries"] == 1
+
+
 def test_summarize_progress_reports_failure(http_client):
     """If a run blew up partway through, the summary must say so plainly
     rather than silently reporting 'finished' - this is what the job detail

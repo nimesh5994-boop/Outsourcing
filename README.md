@@ -387,6 +387,20 @@ Map's action plan (`§05`): a foundation for spotting which step is
 consistently slow or where a run tends to die, without having to have had
 the progress page open when it happened.
 
+**Retries transient failures automatically.** Only steps 1 (loading
+confirmed uploads) and 10 (loading the template and saving the workbook +
+job) touch Postgres - everything else runs on data already in memory, so a
+failure there is deterministic and retrying it would never change the
+outcome. Those two steps run through `_run_step_with_retry()`: up to two
+retries with a short, growing backoff before the step's error is allowed to
+fail the run, same as before this existed. A "retrying" event fires between
+attempts (with the attempt number and the error), persisted alongside every
+other progress event, so a run that needed a retry still shows up in the
+**Last generation** panel with a `retried Nx` badge next to the step,
+instead of either failing outright on a one-off blip or silently hiding
+that it happened. This is the second item from the Pipeline Map's action
+plan (`§05`).
+
 ## Corporation Tax computation
 
 Built from `app/tax_rates.py` (the current rates, as a config - not

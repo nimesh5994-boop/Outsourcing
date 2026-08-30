@@ -57,6 +57,8 @@
     }
     if (data.status === "skipped") {
       setStep(data.step, "skipped", data.detail);
+    } else if (data.status === "retrying") {
+      setStep(data.step, "retrying", "retrying, attempt " + (data.attempt + 1) + " of " + data.max_attempts);
     } else {
       setStep(data.step, data.status);
     }
