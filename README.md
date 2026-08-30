@@ -398,8 +398,8 @@ attempts (with the attempt number and the error), persisted alongside every
 other progress event, so a run that needed a retry still shows up in the
 **Last generation** panel with a `retried Nx` badge next to the step,
 instead of either failing outright on a one-off blip or silently hiding
-that it happened. This is the second item from the Pipeline Map's action
-plan (`§05`).
+that it happened. This is the third item from the Pipeline Map's action
+plan (`§05`) - persist and time were combined into one item above.
 
 ## Corporation Tax computation
 
