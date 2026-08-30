@@ -983,6 +983,11 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
         data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
         data.get("aged_debtors"), data.get("aged_creditors"),
     )
+    results = results + [control_accounts.suggest_control_account_miscoding(
+        data.get("tb_current"), data.get("nominal_current"),
+        [(r.account_code, r.account_name) for r in ca_results],
+        data.get("aged_debtors"), data.get("aged_creditors"),
+    )]
     yield event(6, "done")
 
     yield event(7, "running")

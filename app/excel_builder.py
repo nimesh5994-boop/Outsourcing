@@ -404,6 +404,17 @@ def build_control_account_sheet(wb: Workbook, client_name: str, current_label: s
         if result.status != "ok" and str(ws.cell(row=diff_row, column=1).value or "").startswith("UNEXPLAINED"):
             for c in range(1, 3):
                 ws.cell(row=diff_row, column=c).fill = PatternFill("solid", fgColor=AMBER)
+        next_row = end_row + 1
+
+    if not result.movement_breakdown.empty:
+        ws.cell(row=next_row, column=1, value=result.movement_breakdown_label).font = SCHEDULE_FONT
+        ws.cell(row=next_row, column=1).alignment = Alignment(wrap_text=True)
+        ws.merge_cells(start_row=next_row, start_column=1, end_row=next_row, end_column=4)
+        next_row = _write_dataframe(ws, result.movement_breakdown, start_row=next_row + 1)
+
+    if not result.extra_detail.empty:
+        ws.cell(row=next_row, column=1, value=result.extra_detail_label.upper()).font = SCHEDULE_FONT
+        _write_dataframe(ws, result.extra_detail, start_row=next_row + 1)
 
     ws.freeze_panes = f"A{table_row + 1}"
 
@@ -526,6 +537,22 @@ def build_control_account_sheet_formulas(wb: Workbook, client_name: str, current
             if result.status != "ok":
                 for c in (1, 2):
                     ws.cell(row=diff_bd_row, column=c).fill = PatternFill("solid", fgColor=AMBER)
+            next_row = diff_bd_row + 2
+
+    # Movement-by-contact breakdown and the underlying transaction detail
+    # are Python-side supplementary tables (not raw-data recalculations),
+    # so - like the fixed asset category sheet's own extra_detail block -
+    # they're written as plain values below the formula-linked schedule
+    # rather than as further SUMPRODUCT formulas.
+    if not result.movement_breakdown.empty:
+        ws.cell(row=next_row, column=1, value=result.movement_breakdown_label).font = SCHEDULE_FONT
+        ws.cell(row=next_row, column=1).alignment = Alignment(wrap_text=True)
+        ws.merge_cells(start_row=next_row, start_column=1, end_row=next_row, end_column=4)
+        next_row = _write_dataframe(ws, result.movement_breakdown, start_row=next_row + 1)
+
+    if not result.extra_detail.empty:
+        ws.cell(row=next_row, column=1, value=result.extra_detail_label.upper()).font = SCHEDULE_FONT
+        _write_dataframe(ws, result.extra_detail, start_row=next_row + 1)
 
     ws.freeze_panes = f"A{table_row + 1}"
 

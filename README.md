@@ -258,7 +258,8 @@ PDF, in any order), and the system works out what each one is:
 | Variance analysis | Every nominal code, current vs comparative, flagged if it moves >10% and >£500 |
 | Nominal activity review | Flags suspense postings, round-sum manual journals, and descriptions that read like pending corrections |
 | Debtors/creditors control recon | Aged listing total vs TB control account balance |
-| Control account rollforwards | B/fwd + movements = c/fwd for any balance-sheet account with nominal detail, with the aged listing attached as a breakdown of debtors/creditors closing balances specifically |
+| Control account rollforwards | B/fwd + movements = c/fwd for any balance-sheet account with nominal detail, with the aged listing attached as a breakdown of debtors/creditors closing balances specifically - plus the actual postings behind the movement and, where there's no aged listing, a movement-by-contact view - see below |
+| Control accounts - possible miscoding | Postings coded to the wrong balance-sheet control account, found by contact identity - see below |
 | Nominal analysis matrix | Every transaction against an account allocated to its contra nominal code; multi-way splits and unallocated amounts flagged for manual review |
 | Bank reconciliation | Statement closing balance vs TB |
 | VAT cross-check | VAT return boxes vs P&L turnover and VAT control account |
@@ -563,6 +564,49 @@ Every generated CT schedule also states the rates used and when they were
 last verified, so a stale config is visible on the workbook itself even
 between routine checks.
 
+## Control account rollforwards
+
+Built from `app/control_accounts.py`: for every balance-sheet account
+with nominal-ledger detail, balance b/fwd + movements during the year
+should equal balance c/fwd per the current year TB - any difference is
+exactly what needs journalling or investigating. Debtors/creditors
+control accounts also carry the full aged listing as a breakdown of the
+closing balance, so a reader sees what the balance is actually made up
+of, not just its total.
+
+Two features - the same "read the GL in depth, surface the assumption"
+philosophy applied to FAR above - make this more robust:
+
+**The actual postings, not just the movement total**: every rollforward
+now attaches the real nominal-activity transactions behind its single
+"MOVEMENTS DURING YEAR" figure as `extra_detail`, so a preparer can check
+real postings instead of trusting an aggregate.
+
+**Movement-by-contact, for control accounts with no aged listing**: only
+debtors/creditors get the authoritative closing-balance-by-party
+breakdown (there's no independent aged listing for a Directors Loan or
+Wages Control account). Every *other* control account now gets a
+different, honestly-scoped view instead: the year's net movement grouped
+by contact - explicitly labelled as the movement only, not the closing
+balance make-up (there's no opening-balance-by-contact data to add to
+it), and never checked against the TB the way the aged-listing breakdown
+is, since it isn't a claim about the full balance.
+
+**Possible postings coded to the wrong control account**
+(`suggest_control_account_miscoding`): scans nominal activity for a
+contact known to one control account (from its own postings this year,
+plus - for debtors/creditors - the aged listing itself, independent
+ground truth that doesn't depend on this year's postings at all) turning
+up on a *different* balance-sheet control-account-shaped account above
+materiality - e.g. a director's loan repayment coded to "Other
+Creditors" instead of "Directors Loan Account". Deliberately never looks
+at Bank or P&L accounts: in a double-entry export, a genuine transaction
+already shows the same contact under at least one other account (an
+invoice's contra is Sales, a receipt's contra is Bank) - that's normal,
+not a miscoding, and flagging it would just be noise on every correctly-
+coded posting. Runs as its own check with a candidate table of exactly
+what matched and why; never reclassifies anything itself.
+
 ## Fixed asset register
 
 Built from `app/fixed_assets.py`, in two parts that work independently,
@@ -786,6 +830,24 @@ automatically unless that dev-only dependency is installed:
 pip install -r requirements-dev.txt
 pytest tests/ -v
 ```
+
+`tests/test_fixed_assets.py` covers the fixed asset register robustness
+features directly (in-memory DataFrames, no database): the transaction-
+level additions detail behind a category's total, the system-estimated
+depreciation columns (specific-before-generic keyword matching, period
+proration, never itself flagging a category "review"), and the capex-
+miscoding suggestion (client's-own-category vocabulary, the generic
+fallback vocabulary for a client with no fixed asset categories yet,
+threshold filtering, and correctly ignoring postings already coded to a
+fixed asset account).
+
+`tests/test_control_accounts.py` covers the control account rollforward
+robustness features directly (in-memory DataFrames, no database): the
+movement transaction detail, the movement-by-contact breakdown appearing
+only when there's no aged-listing breakdown to conflict with, and the
+control-account miscoding suggestion - including the regression case
+that matters most, that a normal double-entry contra-leg (a receipt
+through Bank, an invoice's Sales leg) is never mistaken for a miscoding.
 
 `tests/test_document_detection.py` covers the auto-detection/PDF-extraction
 unit logic directly (no database needed): Xero-native matching, the

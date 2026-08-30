@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from app.recon import ReconResult
+
 MATERIALITY_AMOUNT = 500.0
 
 ROLLFORWARD_ACCOUNT_TYPES = {"current asset", "current liability", "liability"}
@@ -42,6 +44,22 @@ class ControlAccountResult:
     schedule: pd.DataFrame = field(default_factory=pd.DataFrame)
     breakdown: pd.DataFrame = field(default_factory=pd.DataFrame)
     breakdown_label: str = ""
+    # The actual nominal-activity postings behind the schedule's single
+    # "MOVEMENTS DURING YEAR" total - same purpose as fixed_assets.py's
+    # far_additions_detail: a preparer can check real transactions, not
+    # just trust an aggregate.
+    extra_detail: pd.DataFrame = field(default_factory=pd.DataFrame)
+    extra_detail_label: str = ""
+    # Only populated when `breakdown` isn't (i.e. no aged debtors/creditors
+    # listing applies to this account) - the year's net movement grouped
+    # by contact, so every control account gets *some* view of what's
+    # driving it, not just debtors/creditors. Deliberately kept separate
+    # from `breakdown`: this is the year's movement only, not the closing
+    # balance make-up (no opening-balance-by-contact data exists to add to
+    # it), so it's never checked against the TB balance the way the aged-
+    # listing breakdown is - stated as such in movement_breakdown_label.
+    movement_breakdown: pd.DataFrame = field(default_factory=pd.DataFrame)
+    movement_breakdown_label: str = ""
 
 
 def find_control_accounts(tb_current: pd.DataFrame, nominal_activity: pd.DataFrame) -> list[tuple[str, str]]:
@@ -129,6 +147,34 @@ def build_rollforward(
             ]),
         ], ignore_index=True)
 
+    extra_detail = pd.DataFrame()
+    extra_detail_label = ""
+    if not movement.empty:
+        extra_detail = movement[["date", "reference", "description", "contact", "debit", "credit"]].rename(columns={
+            "date": "Date", "reference": "Reference", "description": "Description", "contact": "Contact",
+            "debit": "Debit £", "credit": "Credit £",
+        }).sort_values("Date").reset_index(drop=True)
+        extra_detail_label = "Postings behind the year's movement (per nominal activity)"
+
+    # Only every control account that has NO aged-listing breakdown gets
+    # this - debtors/creditors already have an authoritative party-level
+    # view (the aged listing), so adding a second, differently-scoped one
+    # there would just be confusing.
+    movement_breakdown = pd.DataFrame()
+    movement_breakdown_label = ""
+    if breakdown_out.empty and not movement.empty and movement["contact"].astype(str).str.strip().ne("").any():
+        net_by_contact = movement.groupby("contact")["debit"].sum() - movement.groupby("contact")["credit"].sum()
+        by_contact = net_by_contact.round(2).reset_index()
+        by_contact.columns = ["Party", "Net movement £"]
+        by_contact = by_contact[by_contact["Party"].astype(str).str.strip() != ""]
+        if not by_contact.empty:
+            movement_breakdown = by_contact.sort_values("Net movement £", key=abs, ascending=False).reset_index(drop=True)
+            movement_breakdown_label = (
+                "Net movement during the year by contact - NOT the closing balance make-up (no opening-"
+                "balance-by-contact data is available), shown so a preparer can see what's driving this "
+                "account without an aged listing to check it against."
+            )
+
     breakdown_ok = breakdown_diff is None or abs(breakdown_diff) <= MATERIALITY_AMOUNT
     status = "ok" if rollforward_ties and breakdown_ok else ("n/a" if movement.empty and breakdown_diff is None else "review")
 
@@ -144,7 +190,10 @@ def build_rollforward(
     else:
         msg = "; ".join(parts).capitalize() + " - review and correct as needed."
 
-    return ControlAccountResult(account_code, account_name, status, msg, schedule, breakdown_out, breakdown_label)
+    return ControlAccountResult(
+        account_code, account_name, status, msg, schedule, breakdown_out, breakdown_label,
+        extra_detail, extra_detail_label, movement_breakdown, movement_breakdown_label,
+    )
 
 
 def build_all_rollforwards(
@@ -174,3 +223,90 @@ def build_all_rollforwards(
         build_rollforward(code, name, tb_current, tb_comparative, nominal_activity, aged_debtors, aged_creditors)
         for code, name in accounts.items()
     ]
+
+
+# --- Possible postings coded to the wrong control account ----------------
+#
+# Same idea as fixed_assets.suggest_capital_expenditure_reclassification:
+# read the GL in depth and surface likely mis-postings using the client's
+# own data, rather than trust the TB's totals in isolation. The naive
+# version of this - "flag any other account this contact also posts to" -
+# is far too noisy to be useful: in a double-entry export every genuine
+# transaction naturally shows the contact under at least one OTHER
+# account too (an invoice's contra is Sales/a P&L account, a receipt's
+# contra is Bank) - that's completely normal, not a miscoding. So this
+# only ever looks at a contact's postings to a DIFFERENT balance-sheet
+# control-account-shaped account (ROLLFORWARD_ACCOUNT_TYPES) - never
+# Bank, never a P&L account - since a customer/supplier/director's name
+# turning up on an unrelated balance-sheet account, never their own
+# control account, is the shape of a posting that bypassed the control
+# account it should have cleared through.
+
+def suggest_control_account_miscoding(
+    tb_current: pd.DataFrame | None,
+    nominal_activity: pd.DataFrame | None,
+    control_accounts: list[tuple[str, str]],
+    aged_debtors: pd.DataFrame | None = None,
+    aged_creditors: pd.DataFrame | None = None,
+    threshold: float = MATERIALITY_AMOUNT,
+) -> ReconResult:
+    name = "Control accounts - possible postings coded to the wrong control account"
+    if tb_current is None or tb_current.empty or nominal_activity is None or nominal_activity.empty or not control_accounts:
+        return ReconResult(name, "n/a", "No trial balance / nominal activity / control accounts available to scan.")
+
+    tb = tb_current.copy()
+    tb["account_code"] = tb["account_code"].astype(str)
+    type_by_code = dict(zip(tb["account_code"], tb["account_type"].astype(str).str.lower().str.strip()))
+
+    activity = nominal_activity.copy()
+    activity["account_code"] = activity["account_code"].astype(str)
+    activity["_contact_key"] = activity["contact"].astype(str).str.strip().str.lower()
+    activity = activity[activity["_contact_key"] != ""]
+
+    # Which control account a contact "belongs to": wherever they already
+    # post within it this year, plus - for debtors/creditors specifically
+    # - the aged listing's own party names, an independent ground truth
+    # that doesn't depend on this year's postings at all.
+    contact_home: dict[str, tuple[str, str]] = {}
+    for code, acc_name in control_accounts:
+        contacts_here = set(activity.loc[activity["account_code"] == code, "_contact_key"])
+        name_l = acc_name.lower()
+        if any(k in name_l for k in DEBTOR_KEYWORDS) and aged_debtors is not None and not aged_debtors.empty:
+            contacts_here |= set(aged_debtors["customer"].astype(str).str.strip().str.lower())
+        if any(k in name_l for k in CREDITOR_KEYWORDS) and aged_creditors is not None and not aged_creditors.empty:
+            contacts_here |= set(aged_creditors["supplier"].astype(str).str.strip().str.lower())
+        for contact_key in contacts_here:
+            if contact_key and contact_key not in contact_home:
+                contact_home[contact_key] = (code, acc_name)
+
+    ok_message = f"No postings above £{threshold:,.2f} found on another balance-sheet control account for a contact known to a different one."
+    if not contact_home:
+        return ReconResult(name, "n/a", "No contacts found on any control account to check against.")
+
+    candidates = activity[
+        activity["_contact_key"].isin(contact_home)
+        & activity["account_code"].map(type_by_code).fillna("").isin(ROLLFORWARD_ACCOUNT_TYPES)
+    ].copy()
+    if candidates.empty:
+        return ReconResult(name, "ok", ok_message)
+
+    candidates["_home"] = candidates["_contact_key"].map(contact_home)
+    candidates = candidates[candidates["account_code"] != candidates["_home"].map(lambda h: h[0])]
+    candidates = candidates[(candidates["debit"].astype(float) > threshold) | (candidates["credit"].astype(float) > threshold)]
+    if candidates.empty:
+        return ReconResult(name, "ok", ok_message)
+
+    candidates["Normally clears through"] = candidates["_home"].map(lambda h: h[1])
+    candidates["Amount"] = candidates["debit"].astype(float) - candidates["credit"].astype(float)
+    detail = candidates[["date", "account_code", "account_name", "reference", "description", "contact", "Amount", "Normally clears through"]].rename(columns={
+        "date": "Date", "account_code": "Nominal Code", "account_name": "Coded to",
+        "reference": "Reference", "description": "Description", "contact": "Contact",
+    }).sort_values("Date").reset_index(drop=True)
+
+    msg = (
+        f"{len(detail)} posting(s) above £{threshold:,.2f} were coded to a different balance-sheet control "
+        f"account for a contact who normally clears through another one - review and check whether these "
+        f"should be coded through that control account instead. Nothing here is moved automatically; this "
+        f"is a candidate to check, not proof of a coding error."
+    )
+    return ReconResult(name, "review", msg, detail)
