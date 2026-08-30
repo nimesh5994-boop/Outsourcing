@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, fixed_assets, mapping, nominal_matrix, parsers, paye_reconciliation, recon, reconciliation_agent, statutory_deadlines, storage, vat_reconciliation, xero_reports
+from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, fixed_assets, mapping, nominal_matrix, parsers, paye_reconciliation, recon, reconciliation_agent, statutory_deadlines, storage, vat_reconciliation, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
 from app.models import PAYE_RECON_TYPES, PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS, VAT_RECON_TYPES
 
@@ -1016,6 +1016,9 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     )
     results = results + [fixed_assets.suggest_capital_expenditure_reclassification(
         data.get("tb_current"), data.get("nominal_current"), data.get("fixed_asset_register"),
+    )]
+    results = results + [accruals_prepayments.build_schedule(
+        data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
     )]
     yield event(9, "done")
 

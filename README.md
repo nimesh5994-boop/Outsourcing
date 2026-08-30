@@ -269,6 +269,7 @@ PDF, in any order), and the system works out what each one is:
 | Statutory filing deadlines | Companies House accounts filing, CT600 filing, and CT payment deadlines - computed purely from the job's period end, no upload needed - see below |
 | Fixed asset register (category) | Cost/depreciation rollforward per asset category, derived from TB + nominal activity, checked against the TB |
 | Fixed asset register (asset detail) | Prior-year register rolled forward asset-by-asset, new additions/possible disposals flagged from nominal activity, totals checked against TB |
+| Accruals & Prepayments schedule | Every Prepayment-typed and accrual-named account, side by side in one table, b/fwd + movement = c/fwd checked against TB - see below |
 | Contact coding consistency | A contact whose postings are mostly on one nominal code but a small minority land on a different one - the "BT: 10 postings to Telephone, 2 to Light & Heat" pattern - flags the minority transactions with the likely correct code |
 | Duplicate transaction check | Same contact+date+amount posted more than once, or the same reference/invoice number reused on the same nominal code for the same amount - excludes the natural double-entry legs of one transaction (same reference on different codes, or an invoice and its later payment, which share a reference but have opposite signs) |
 | Unusual posting date check | Manual journals (not bank feed or trading transactions, which legitimately happen any day) posted on a weekend |
@@ -786,6 +787,36 @@ with a candidate table of exactly what matched and why - never
 reclassifies anything itself, since a keyword match on a description is
 a starting point for the preparer to check, not proof of capital nature.
 
+## Accruals & Prepayments schedule
+
+Built from `app/accruals_prepayments.py` - a section every real working
+paper file has, that this system had no equivalent of at all until now.
+Widening `control_accounts.py`'s account-type coverage to include
+Prepayment (see "Control account rollforwards" above) already gives a
+prepayment account its own individual rollforward tab; this is the
+other view a preparer also expects - every prepayment and accrual line
+side by side in **one consolidated table**, not scattered one-tab-per-
+account, the same two-views relationship fixed_assets.py already has
+between its category summary and its asset-level detail.
+
+Two categories, found differently since Xero doesn't have a distinct
+"Accrual" account type the way it has a genuine "Prepayment" one:
+**Prepayments** are TB accounts of that exact Xero account type - no
+ambiguity, the platform already says what these are. **Accruals** are
+Current Liability accounts whose name reads like one (specific keyword
+phrases - "accrued expenses", "accruals", and similar - the same
+reasoning as `control_accounts.py`'s debtor/creditor keyword matching:
+a loose "accrue" substring would also catch "Accrued Corporation Tax",
+which already has its own dedicated CT schedule and is deliberately
+excluded here to avoid double-counting the same balance under two
+schedules).
+
+Each line rolls forward - balance b/fwd + movement = balance c/fwd,
+checked against the TB, flagged if it doesn't tie - and the actual
+nominal-activity postings behind every line's movement are attached as
+`extra_detail`, the same "real transactions, not just a trusted total"
+treatment as the rest of this session's robustness work.
+
 ## Upload safety
 
 Two checks run automatically on every upload, so a wrong file doesn't
@@ -834,6 +865,7 @@ app/
   corporation_tax.py            UK Corporation Tax computation (marginal relief etc.)
   tax_rates.py                   the current CT rates config, monitored for HMRC changes
   statutory_deadlines.py           Companies House / HMRC filing deadline calculator (period dates only)
+  accruals_prepayments.py           consolidated Accruals & Prepayments schedule (one table, not one tab per account)
   data_sheets.py                  writes hidden DATA_* raw-data sheets for the formula engine
   xlformulas.py                    Excel formula-string builders (SUMPRODUCT-based, see above)
   excel_builder.py                  builds the final .xlsx: house-style headers, numbered index,
@@ -953,10 +985,13 @@ fixed asset account).
 `tests/test_control_accounts.py` covers the control account rollforward
 robustness features directly (in-memory DataFrames, no database): the
 movement transaction detail, the movement-by-contact breakdown appearing
-only when there's no aged-listing breakdown to conflict with, and the
+only when there's no aged-listing breakdown to conflict with, the
 control-account miscoding suggestion - including the regression case
 that matters most, that a normal double-entry contra-leg (a receipt
-through Bank, an invoice's Sales leg) is never mistaken for a miscoding.
+through Bank, an invoice's Sales leg) is never mistaken for a miscoding
+- and account-type discovery covering Prepayment/Inventory/Non-current
+Asset/Non-current Liability while still excluding Fixed Asset (which
+gets its own dedicated treatment elsewhere).
 
 `tests/test_nominal_matrix.py` covers the nominal analysis matrix
 robustness features directly (in-memory DataFrames, no database): the
@@ -976,6 +1011,14 @@ case for a period end that IS the last day of its calendar month
 the target month rather than the same day-of-month, the plain case where
 it isn't, and that HMRC's CT600/CT payment deadlines don't share that
 special case.
+
+`tests/test_accruals_prepayments.py` covers the consolidated Accruals &
+Prepayments schedule directly (in-memory DataFrames, no database):
+discovering Prepayment-typed and accrual-named accounts, excluding an
+account already covered by its own dedicated schedule ("Accrued
+Corporation Tax") to avoid double-counting the same balance, flagging a
+line that doesn't tie to the TB, and the transaction-level detail behind
+each line's movement.
 
 `tests/test_document_detection.py` covers the auto-detection/PDF-extraction
 unit logic directly (no database needed): Xero-native matching, the
