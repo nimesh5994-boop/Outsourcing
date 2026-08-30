@@ -845,3 +845,138 @@ def test_upload_route_rejects_confirm_with_no_report_type(http_client):
     job = storage.get_job(job_id)
     upload = next(iter(job["uploads"].values()))
     assert upload["confirmed"] is False
+
+
+def _vat_recon_workbook(rows: list[list]) -> bytes:
+    """A simple single-sheet Excel file with headers that match the VAT
+    reconciliation alias dictionaries (mapping.ALIASES["vat_gl"] etc.)
+    closely enough for auto-suggestion to map every column on its own."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Date", "Reference", "Contact", "Description", "Net Amount", "VAT Amount"])
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _confirm_all_pending_uploads(c: TestClient, job_id: str) -> None:
+    """Walks every unconfirmed upload's mapping-confirm page and resubmits
+    its auto-suggested mapping (real column headers here match the alias
+    dictionaries, so nothing needs a manual override) - same pattern as
+    the other tests that need a confirmed upload before generating."""
+    from app import storage as storage_module
+
+    while True:
+        job = storage_module.get_job(job_id)
+        pending = next((u for u in job["uploads"].values() if not u["confirmed"]), None)
+        if not pending:
+            return
+        confirm_data = {"action": "confirm"}
+        confirm_data.update({f"col__{col}": field for col, field in (pending["mapping"] or {}).items() if field})
+        resp = c.post(f"/jobs/{job_id}/uploads/{pending['id']}/mapping", data=confirm_data, follow_redirects=False)
+        assert resp.status_code == 303
+
+
+def test_vat_reconciliation_end_to_end_through_http_and_into_the_workbook(http_client):
+    """Full VAT Reconciliation workspace flow over real HTTP requests: a
+    General Ledger upload, two Filed VAT Return detail uploads (Box 1 and
+    Box 4, each simulating the "combine multiple files" case with two
+    files apiece), settings, the standalone Run button, and finally that
+    the same results land in the generated workbook (see main.py's step
+    2, which folds vat_reconciliation.reconcile() into the main results
+    list) - proving this section works both on its own and as part of
+    the full pipeline."""
+    c = http_client
+    practice_id = _signup(c, admin_email="vat-recon@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "VAT Recon Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    gl_bytes = _vat_recon_workbook([
+        ["2025-01-15", "INV-100", "Acme Ltd", "Sale", 1000, 200],   # matches Box 1 filed item exactly
+        ["2025-01-20", "INV-101", "Beta Ltd", "Sale", 500, 100],    # matches by reference, VAT amount differs (variance)
+        ["2025-02-01", "BILL-200", "Gamma Supplies", "Purchase", 800, 160],  # matches Box 4 filed item exactly
+        ["2025-03-01", "MYSTERY-1", "Nobody Ltd", "Unexplained", 50, 10],    # neither box's filed return mentions this
+    ])
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "vat_gl"},
+        files={"files": ("gl.xlsx", gl_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    filed_sales_q1 = _vat_recon_workbook([["2025-01-15", "INV-100", "Acme Ltd", "", 1000, 200]])
+    filed_sales_q2 = _vat_recon_workbook([["2025-01-20", "INV-101", "Beta Ltd", "", 500, 105]])  # £5 variance vs GL
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "vat_filed_sales"},
+        files=[
+            ("files", ("filed_sales_q1.xlsx", filed_sales_q1, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+            ("files", ("filed_sales_q2.xlsx", filed_sales_q2, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+        ],
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    filed_purchases = _vat_recon_workbook([["2025-02-01", "BILL-200", "Gamma Supplies", "", 800, 160]])
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "vat_filed_purchases"},
+        files={"files": ("filed_purchases.xlsx", filed_purchases, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    from app import storage
+    job = storage.get_job(job_id)
+    assert len(job["uploads"]) == 4  # 1 GL + 2 filed sales files + 1 filed purchases file
+    by_type = {}
+    for u in job["uploads"].values():
+        by_type.setdefault(u["report_type"], []).append(u)
+    assert len(by_type["vat_gl"]) == 1
+    assert len(by_type["vat_filed_sales"]) == 2
+    assert len(by_type["vat_filed_purchases"]) == 1
+
+    _confirm_all_pending_uploads(c, job_id)
+    job = storage.get_job(job_id)
+    assert all(u["confirmed"] for u in job["uploads"].values())
+
+    resp = c.post(f"/jobs/{job_id}/vat-recon-settings", data={"vat_recon_basis": "accrual", "vat_recon_tolerance": "0.0"}, follow_redirects=False)
+    assert resp.status_code == 303
+
+    resp = c.post(f"/jobs/{job_id}/vat-recon/run", follow_redirects=False)
+    assert resp.status_code == 303
+
+    job = storage.get_job(job_id)
+    results = {r["name"]: r for r in job["vat_recon_results"]}
+    assert set(results) == {"VAT Recon - Box 1 (Sales)", "VAT Recon - Box 4 (Purchases)", "VAT Recon - General Ledger Coverage"}
+    assert results["VAT Recon - Box 1 (Sales)"]["status"] == "review"  # INV-101 variance
+    assert results["VAT Recon - Box 4 (Purchases)"]["status"] == "ok"
+    assert results["VAT Recon - General Ledger Coverage"]["status"] == "review"  # MYSTERY-1 unaccounted for
+    box1_review = results["VAT Recon - Box 1 (Sales)"]["extra_detail"]
+    assert any(row["Reference"] == "INV-101" and row["Exception type"] == "Matched but VAT amount differs" for row in box1_review)
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    assert "VAT Reconciliation" in resp.text
+    assert "INV-101" in resp.text
+
+    resp = c.post(f"/jobs/{job_id}/generate", follow_redirects=False)
+    assert resp.status_code == 303
+
+    job = storage.get_job(job_id)
+    summary_by_name = {s["name"]: s for s in job["summary"]}
+    assert summary_by_name["VAT Recon - Box 1 (Sales)"]["status"] == "review"
+    assert summary_by_name["VAT Recon - Box 4 (Purchases)"]["status"] == "ok"
+
+    import openpyxl as _openpyxl
+    resp = c.get(f"/jobs/{job_id}/download")
+    assert resp.status_code == 200
+    wb = _openpyxl.load_workbook(io.BytesIO(resp.content))
+    assert any("VAT Recon - Box 1" in name for name in wb.sheetnames)
+    assert any("VAT Recon - Box 4" in name for name in wb.sheetnames)

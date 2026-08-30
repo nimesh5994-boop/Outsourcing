@@ -4,14 +4,15 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pandas as pd
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import anomaly_detection, auth, compliance_checks, control_accounts, corporation_tax, document_detection, fixed_assets, mapping, nominal_matrix, parsers, recon, reconciliation_agent, storage, xero_reports
+from app import anomaly_detection, auth, compliance_checks, control_accounts, corporation_tax, document_detection, fixed_assets, mapping, nominal_matrix, parsers, recon, reconciliation_agent, storage, vat_reconciliation, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
-from app.models import PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS
+from app.models import PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS, VAT_RECON_TYPES
 
 BASE_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Working Paper Automation")
@@ -71,7 +72,21 @@ DATA_KEY = {
     ("balance_sheet", "comparative"): "bs_comparative",
     ("fixed_asset_register", "current"): "fixed_asset_register",
     ("fixed_asset_register", "comparative"): "fixed_asset_register",
+    # vat_gl / vat_filed_sales / vat_filed_purchases are handled separately
+    # in _load_canonical_data - every confirmed upload of one of those
+    # types is concatenated (not just the latest one under a single key),
+    # since the VAT Reconciliation workspace expects up to 10 filed-return
+    # files combined into one dataset.
 }
+
+# section_report_type type_hints accepted on /jobs/{id}/uploads - the
+# generic per-report-type sections (REPORT_TYPES) plus the VAT
+# Reconciliation workspace's three dedicated upload zones. Kept as a
+# separate list rather than folding VAT_RECON_TYPES into REPORT_TYPES so
+# the general auto-detect classifier (document_detection.classify_report_type,
+# only reached when no type_hint is given) never scores an unclassified
+# bulk upload against these VAT-specific schemas.
+UPLOADABLE_TYPES = REPORT_TYPES + VAT_RECON_TYPES
 
 
 @app.get("/")
@@ -315,6 +330,7 @@ def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_
         "uploads_by_type": uploads_by_type,
         "report_notes": client.get("report_notes", {}),
         "progress_summary": _summarize_progress(job.get("progress")),
+        "vat_recon_types": VAT_RECON_TYPES,
     })
 
 
@@ -332,6 +348,71 @@ def save_tax_inputs(
     job["ct_capital_allowances"] = ct_capital_allowances
     storage.save_job(job)
     return RedirectResponse(f"/jobs/{job_id}", status_code=303)
+
+
+@app.post("/jobs/{job_id}/vat-recon-settings")
+def save_vat_recon_settings(
+    job_id: str,
+    vat_recon_basis: str = Form("accrual"),
+    vat_recon_tolerance: float = Form(0.0),
+    user: dict = Depends(auth.current_user_dep),
+):
+    job, _client = _authorize_job(user, job_id)
+    job["vat_recon_basis"] = vat_recon_basis if vat_recon_basis in ("accrual", "cash") else "accrual"
+    job["vat_recon_tolerance"] = max(0.0, vat_recon_tolerance)
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#vat-recon", status_code=303)
+
+
+def _jsonable(value):
+    """A DataFrame cell can hold a pandas Timestamp, a numpy scalar, NaN/NaT,
+    or a plain Python value - job["..."] is stored as Postgres JSONB (see
+    storage._put_entity), which only accepts the plain kind, same reason
+    job["summary"]/job["progress"] are built from plain dicts rather than
+    passing DataFrame rows straight through."""
+    if value is None:
+        return None
+    if isinstance(value, pd.Timestamp):
+        return value.strftime("%Y-%m-%d") if not pd.isna(value) else None
+    if hasattr(value, "item"):  # numpy scalar (float64/int64/bool_)
+        value = value.item()
+    if isinstance(value, float) and pd.isna(value):
+        return None
+    return value
+
+
+def _df_to_records(df: pd.DataFrame) -> list[dict]:
+    if df is None or df.empty:
+        return []
+    return [{col: _jsonable(v) for col, v in row.items()} for row in df.to_dict(orient="records")]
+
+
+def _recon_result_to_dict(result) -> dict:
+    return {
+        "name": result.name, "status": result.status, "message": result.message,
+        "detail": _df_to_records(result.detail),
+        "extra_detail": _df_to_records(result.extra_detail),
+        "extra_detail_label": result.extra_detail_label,
+    }
+
+
+@app.post("/jobs/{job_id}/vat-recon/run")
+def run_vat_reconciliation(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Computes the VAT Reconciliation independently of the main Generate
+    pipeline - this is its own section, testable and reviewable on its
+    own, before a full working paper is even ready to build (see
+    app/vat_reconciliation.py for the matching logic itself)."""
+    job, _client = _authorize_job(user, job_id)
+    data = _load_canonical_data(job)
+    settings = vat_reconciliation.VatReconSettings(
+        accounting_basis=job.get("vat_recon_basis", "accrual"),
+        tolerance=job.get("vat_recon_tolerance", 0.0),
+    )
+    results = vat_reconciliation.reconcile(data, settings)
+    job["vat_recon_results"] = [_recon_result_to_dict(r) for r in results]
+    job["vat_recon_computed_at"] = datetime.now(timezone.utc).isoformat()
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#vat-recon", status_code=303)
 
 
 @app.post("/clients/{client_id}/notes/{report_type}")
@@ -513,7 +594,7 @@ async def upload_files(job_id: str, files: list[UploadFile] = File(...),
                         section_report_type: str = Form(""),
                         user: dict = Depends(auth.current_user_dep)):
     job, _client = _authorize_job(user, job_id)
-    type_hint = section_report_type if section_report_type in REPORT_TYPES else None
+    type_hint = section_report_type if section_report_type in UPLOADABLE_TYPES else None
 
     for file in files:
         content = await file.read()
@@ -640,11 +721,26 @@ def _load_canonical_data(job: dict) -> dict:
                 data["aged_creditors"] = xero_reports.parse_aged_report(source, "supplier")
             continue
 
+        if report_type in VAT_RECON_TYPES:
+            # Every confirmed upload of these three types is concatenated,
+            # not just the latest one under a single key - the VAT
+            # Reconciliation workspace expects up to 10 filed-return files
+            # (and a multi-sheet General Ledger) combined into one dataset,
+            # each row tagged with the file it came from.
+            df = parsers.apply_mapping(source, report_type, upload["mapping"] or {})
+            df["source_file"] = upload.get("display_name") or upload["filename"]
+            data.setdefault(report_type, []).append(df)
+            continue
+
         key = DATA_KEY.get((report_type, upload["period"]))
         if not key:
             continue
         df = parsers.apply_mapping(source, report_type, upload["mapping"] or {})
         data[key] = df
+
+    for rt in VAT_RECON_TYPES:
+        frames = data.get(rt)
+        data[rt] = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
     # Xero's TB already categorises every account (Sales/Direct Costs/Overhead
     # = P&L, Bank/Current Asset/Current Liability/Equity/etc. = B/S), so P&L
@@ -785,6 +881,11 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
 
     yield event(2, "running")
     results = recon.run_all_recons(data)
+    vat_settings = vat_reconciliation.VatReconSettings(
+        accounting_basis=job.get("vat_recon_basis", "accrual"),
+        tolerance=job.get("vat_recon_tolerance", 0.0),
+    )
+    results = results + vat_reconciliation.reconcile(data, vat_settings)
     yield event(2, "done")
 
     yield event(3, "running")

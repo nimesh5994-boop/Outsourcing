@@ -28,6 +28,9 @@ REPORT_LABELS = {
     "profit_and_loss": "Profit & Loss",
     "balance_sheet": "Balance Sheet",
     "fixed_asset_register": "Fixed Asset Register (prior year closing)",
+    "vat_gl": "VAT Reconciliation - General Ledger",
+    "vat_filed_sales": "VAT Reconciliation - Filed Return, Sales Detail (Box 1)",
+    "vat_filed_purchases": "VAT Reconciliation - Filed Return, Purchases Detail (Box 4)",
 }
 
 # canonical column -> friendly label, used to drive the mapping UI
@@ -110,7 +113,41 @@ REPORT_SCHEMAS = {
         "accumulated_depreciation_b_fwd": "Accumulated Depreciation Brought Forward",
         "disposed": "Disposed? (Yes/No)",
     },
+    "vat_gl": {
+        "date": "Transaction / Invoice Date",
+        "reference": "Invoice / Reference Number",
+        "contact": "Customer / Supplier",
+        "description": "Description / Narrative",
+        "net_amount": "Net Amount (ex VAT)",
+        "vat_amount": "VAT Amount",
+        "payment_date": "Payment Date (optional - only used for Cash basis matching)",
+    },
+    "vat_filed_sales": {
+        "date": "Invoice Date",
+        "reference": "Invoice / Reference Number",
+        "contact": "Customer",
+        "description": "Description",
+        "net_amount": "Net Amount (ex VAT)",
+        "vat_amount": "VAT Amount (Box 1 - output tax)",
+    },
+    "vat_filed_purchases": {
+        "date": "Invoice / Bill Date",
+        "reference": "Invoice / Reference Number",
+        "contact": "Supplier",
+        "description": "Description",
+        "net_amount": "Net Amount (ex VAT)",
+        "vat_amount": "VAT Amount (Box 4 - input tax)",
+    },
 }
+
+# The VAT Reconciliation workspace (see app/vat_reconciliation.py) - its own
+# dedicated section on the job page, not one of the generic per-report-type
+# cards above. Deliberately excluded from REPORT_TYPES so the general
+# auto-detect classifier (document_detection.classify_report_type) never
+# scores a plain nominal-activity upload against these near-identical
+# schemas; these three are only ever reached via an explicit type_hint from
+# their own dedicated upload zones.
+VAT_RECON_TYPES = ["vat_gl", "vat_filed_sales", "vat_filed_purchases"]
 
 # Fields required for a period upload to be usable in reconciliation.
 REQUIRED_FIELDS = {
@@ -123,6 +160,9 @@ REQUIRED_FIELDS = {
     "profit_and_loss": ["account_name", "amount"],
     "balance_sheet": ["account_name", "amount"],
     "fixed_asset_register": ["description", "cost"],
+    "vat_gl": ["date", "net_amount", "vat_amount"],
+    "vat_filed_sales": ["date", "net_amount", "vat_amount"],
+    "vat_filed_purchases": ["date", "net_amount", "vat_amount"],
 }
 
 PLATFORMS = ["xero", "qbo", "sage", "other"]

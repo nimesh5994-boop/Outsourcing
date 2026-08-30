@@ -94,9 +94,10 @@ NUMERIC_FIELDS = {
     "debit", "credit", "current", "bucket_1", "bucket_2", "bucket_3", "bucket_4", "older", "total",
     "box1", "box2", "box3", "box4", "box5", "box6", "box7", "box8", "box9",
     "closing_balance", "amount", "cost", "depreciation_rate", "accumulated_depreciation_b_fwd",
+    "net_amount", "vat_amount",
 }
 
-DATE_FIELDS = {"date", "date_acquired"}
+DATE_FIELDS = {"date", "date_acquired", "payment_date"}
 
 
 def _to_numeric(series: pd.Series) -> pd.Series:

@@ -96,6 +96,35 @@ ALIASES = {
         "accumulated_depreciation_b_fwd": {"accumulateddepreciation", "accumulateddepreciationbfwd", "depreciationbfwd", "accdepbfwd", "nbvbfwd", "wdvbfwd"},
         "disposed": {"disposed", "disposal", "soldwrittenoff"},
     },
+    # VAT Reconciliation workspace (app/vat_reconciliation.py) - General
+    # Ledger side. Shares most header vocabulary with nominal_activity
+    # (it's the same kind of export), plus VAT-specific net/vat amount
+    # columns and an optional payment date for Cash-basis matching.
+    "vat_gl": {
+        "date": {"date", "transactiondate", "txndate", "invoicedate"},
+        "reference": {"reference", "refno", "docnum", "num", "invoiceno", "invoicenumber", "billno"},
+        "contact": {"contact", "name", "payee", "customer", "supplier", "vendor"},
+        "description": {"description", "narrative", "memo", "memodescription", "details"},
+        "net_amount": {"netamount", "net", "amountexvat", "exvat", "netgbp", "netvalue"},
+        "vat_amount": {"vatamount", "vat", "taxamount", "gst", "vatgbp"},
+        "payment_date": {"paymentdate", "datepaid", "paiddate", "dateofpayment"},
+    },
+    "vat_filed_sales": {
+        "date": {"date", "invoicedate", "transactiondate"},
+        "reference": {"reference", "invoiceno", "invoicenumber", "refno", "docnum"},
+        "contact": {"customer", "contact", "name", "payee"},
+        "description": {"description", "narrative", "details", "memo"},
+        "net_amount": {"netamount", "net", "amountexvat", "exvat", "netvalue"},
+        "vat_amount": {"vatamount", "vat", "outputvat", "vatdue", "box1", "taxamount"},
+    },
+    "vat_filed_purchases": {
+        "date": {"date", "invoicedate", "transactiondate", "billdate"},
+        "reference": {"reference", "invoiceno", "invoicenumber", "refno", "billno", "docnum"},
+        "contact": {"supplier", "vendor", "contact", "name", "payee"},
+        "description": {"description", "narrative", "details", "memo"},
+        "net_amount": {"netamount", "net", "amountexvat", "exvat", "netvalue"},
+        "vat_amount": {"vatamount", "vat", "inputvat", "vatreclaimed", "box4", "taxamount"},
+    },
 }
 
 

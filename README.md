@@ -262,6 +262,7 @@ PDF, in any order), and the system works out what each one is:
 | Nominal analysis matrix | Every transaction against an account allocated to its contra nominal code; multi-way splits and unallocated amounts flagged for manual review |
 | Bank reconciliation | Statement closing balance vs TB |
 | VAT cross-check | VAT return boxes vs P&L turnover and VAT control account |
+| VAT Reconciliation (Box 1 & 4) | General Ledger matched transaction-by-transaction against the filed return's Sales and Purchases detail - a dedicated workspace, see below |
 | Corporation Tax computation | Current UK rates (small profits/marginal relief/main rate) applied to accounting profit, checked against the booked tax charge |
 | Fixed asset register (category) | Cost/depreciation rollforward per asset category, derived from TB + nominal activity, checked against the TB |
 | Fixed asset register (asset detail) | Prior-year register rolled forward asset-by-asset, new additions/possible disposals flagged from nominal activity, totals checked against TB |
@@ -285,6 +286,63 @@ exclusion above, found by running this against real sample data and
 noticing every ordinary invoice was getting flagged as its own duplicate).
 They surface candidates for a human to confirm, the same as every other
 check in this system - not an auto-fixer.
+
+### VAT Reconciliation workspace
+
+The VAT cross-check above compares totals (VAT return boxes vs the P&L
+and the VAT control account) - good for a first sanity check, but it
+can't tell you *which* transaction is missing when it doesn't tie out.
+The VAT Reconciliation workspace (its own card on the job page, `app/
+vat_reconciliation.py`) does that at transaction level: it matches the
+General Ledger against the filed VAT return's actual Sales (Box 1) and
+Purchases (Box 4) detail, one invoice/bill at a time, and reconciles
+each box independently - runnable on its own, with its own "Run VAT
+Reconciliation" button, before a full working paper is ready to
+generate (and it's also folded into the main results list during
+Generate, so it shows on the Index sheet and gets its own tabs in the
+workbook either way).
+
+**Three upload zones**, each accepting Excel/CSV/PDF and multi-sheet
+workbooks (same auto-expansion as the rest of the app - a file with
+separate Summary/Detail tabs becomes two uploads automatically):
+
+- **General Ledger** - the QBO/Xero general ledger for the period.
+- **Filed Return, Sales Detail (Box 1)** and **Filed Return, Purchases
+  Detail (Box 4)** - each accepts up to 10 files together (e.g. one per
+  VAT quarter across the year); every file's rows are combined into one
+  dataset for that box, with each row kept tagged with the file it came
+  from (`Source File`) so a finding can be traced back to a specific
+  return.
+
+**Matching** cascades through three passes per box, strongest first:
+invoice/reference number alone (deliberately not gated on amount, so a
+real invoice with the *wrong* VAT amount posted against it is still
+recognised as the same transaction and its variance reported, rather
+than showing up as two unrelated "unmatched" rows); then date + amount
+(within the configured tolerance) + contact; then amount + contact
+alone, flagged `(verify)` since it's the least certain. Box 1 is
+matched first and claims its General Ledger rows before Box 4 runs
+against what's left, so a sales transaction can never also get claimed
+as a purchase; whatever General Ledger activity neither box's filed
+return accounts for is reported once, as its own **General Ledger
+Coverage** check - not duplicated as a false "exception" under both
+boxes just because a sale doesn't appear in the purchases detail (or
+vice versa).
+
+**Settings** (saved per job): **VAT Accounting Basis** (Accrual - the
+General Ledger's own transaction/invoice date; Cash - a payment date
+column when the export actually has one, falling back to the
+transaction date row-by-row where it doesn't) picks which date the
+date-based matching pass compares against. **VAT Matching Tolerance**
+(Exact Match, or a small £ tolerance) sets how close two amounts need
+to be to count as the same transaction - and doubles as the threshold
+below which a found match's residual difference isn't worth flagging
+as a variance in the first place.
+
+This is the first of what's meant to be a small family of these -
+PAYE reconciliation (General Ledger vs the filed FPS/EPS submissions)
+is the planned next one, same shape: its own dedicated section, its
+own settings, testable on its own before it's relied on.
 
 ### AI-assisted reconciliation notes (opt-in)
 
@@ -481,6 +539,8 @@ app/
   document_detection.py   auto-detects report type/platform/period for an upload
   pdf_extraction.py        pdfplumber-based table extraction for PDF uploads
   recon.py                 the reconciliation/cross-check engine
+  vat_reconciliation.py     VAT Reconciliation workspace - General Ledger vs Filed VAT
+                             Return, Box 1/Box 4 transaction matching (see above)
   reconciliation_agent.py    opt-in LLM explanation for flagged checks (no API calls from recon.py itself)
   anomaly_detection.py       cross-transaction checks (miscoding, duplicates, unusual posting dates)
   compliance_checks.py        data-driven checklist checks (DLA/S455, dividends, petty cash, loans)
@@ -611,6 +671,17 @@ reconciling-items enhancement in isolation (in-memory DataFrames, no
 database) - flagged vs. ok, with/without nominal activity, matching vs.
 non-matching postings.
 
+`tests/test_vat_reconciliation.py` covers the VAT Reconciliation
+workspace's matching engine directly (in-memory DataFrames, no
+database): the three-pass cascade in isolation (reference match
+ignoring amount tolerance and still surfacing the variance, the date/
+amount/contact and amount/contact fallback passes, tolerance absorbing
+small differences without hiding genuine ones), cash vs accrual basis
+changing which pass a match resolves through, each General Ledger row
+claimed at most once, Box 1/Box 4 sharing one pool without cross-box
+false positives, and multi-file `Source File` tagging surviving into
+the unmatched-items table.
+
 `tests/test_reconciliation_agent.py` covers the AI-assisted-notes agent
 directly, with the Anthropic client mocked throughout - no test in this
 suite ever calls the real API. Verifies the contract that must hold no
@@ -625,9 +696,12 @@ generate -> download HTTP flow (including a bulk upload of mixed Xero/
 CSV/PDF files walked through the auto-detect confirm chain, a multi-sheet
 workbook expanding into one upload per sheet, the SSE progress stream
 reporting all ten generate steps in order and leaving the job in the same
-generated state as the classic POST route, and - with a mocked Anthropic
-client - an AI-assisted note actually reaching the downloaded workbook
-end to end), and the access-control model (signup, login, wrong
+generated state as the classic POST route, the VAT Reconciliation
+workspace end to end (General Ledger + two multi-file Filed Return
+uploads, settings, the standalone Run button, and the same results
+landing in the generated workbook's own tabs), and - with a mocked
+Anthropic client - an AI-assisted note actually reaching the downloaded
+workbook end to end), and the access-control model (signup, login, wrong
 password, unauthenticated redirect, a preparer scoped to only their
 granted clients, a manager blocked from user management, and cross-
 practice access denied) against a real (throwaway) Postgres schema
