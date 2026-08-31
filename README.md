@@ -943,6 +943,31 @@ directly. `_parse_disposed_flag` now recognises actual affirmative text
 insensitive) as disposed and treats everything else (including "No",
 blank, and an already-Python `False`) as not disposed.
 
+**Suggested asset ID for a possible disposal**
+(`_suggest_disposal_matches`): a credit movement on a fixed asset cost
+code only tells a preparer *that* something was disposed, not *which*
+register line it was - until now that meant reading the posting's own
+description/reference text and comparing it against the register by eye,
+every time. This does that comparison automatically, using the same
+"client's own data as vocabulary" idea as the capex-reclassification
+check below: it takes each still-held asset's own description in the
+register, and checks whether that description's significant words show
+up in the disposal posting's own description/reference text. A clean,
+unique match ("Disposal - Ford Transit Van AB12 CDE sold at auction"
+against a register line literally described "Ford Transit Van AB12
+CDE") fills in a "Suggested asset ID" column with the match's reasoning
+alongside it, right next to the existing preparer-owned "Matched to
+asset ID (to complete)" column. Left blank - never a guess - whenever
+nothing clears the match threshold, or whenever two or more still-held
+assets score comparably well against the same posting (e.g. a fleet with
+two near-identical "Ford Transit Van" entries distinguished only by
+registration plate: if the disposal text doesn't repeat the plate, this
+correctly can't tell which one was sold and says nothing rather than
+picking one). Purely advisory: it never writes to "Matched to asset ID
+(to complete)" and never marks anything disposed in the register itself
+- that stays a preparer decision, same as the underlying "possible
+disposals" flag always has been.
+
 **Capital expenditure coded elsewhere**
 (`suggest_capital_expenditure_reclassification`): the other direction -
 scans nominal activity coded to an ordinary expense account (Xero's
@@ -1256,9 +1281,13 @@ proration, never itself flagging a category "review"), the capex-
 miscoding suggestion (client's-own-category vocabulary, the generic
 fallback vocabulary for a client with no fixed asset categories yet,
 threshold filtering, and correctly ignoring postings already coded to a
-fixed asset account), and the "Disposed?" text-column regression above -
+fixed asset account), the "Disposed?" text-column regression above -
 "No"/"Yes"/"Y"/"true"/"1" and a real Python `bool` all parsed correctly
-in either direction.
+in either direction - and the disposal asset-ID suggestion above: a
+clean unique match, the ambiguous-between-two-similar-assets case left
+blank, the no-match case left blank, the preparer-owned "Matched to
+asset ID (to complete)" column staying untouched, and the full
+`asset_level_rollforward` wiring end-to-end.
 
 `tests/test_bank_reconciliation.py` covers `recon.bank_reconciliation`'s
 account-name matching directly (in-memory DataFrames, no database): an
@@ -1535,6 +1564,10 @@ role and database) to run it.
   reference text and date/source-type signals, so it can still be wrong
   on a client whose posting habits don't match either signal (e.g. a
   migration journal with no identifying text, posted well after the
-  period start). It also doesn't try to match a specific flagged
-  disposal to a specific register line automatically - that needs the
-  asset description reviewed by a preparer.
+  period start). It now also suggests which specific register line a
+  flagged disposal likely corresponds to (see "Suggested asset ID for a
+  possible disposal" above), but only when the posting's own text
+  clearly and uniquely names one still-held asset - a disposal with no
+  identifying text at all, or one that could equally be either of two
+  similar assets, is still left for the preparer to match by hand, same
+  as before.

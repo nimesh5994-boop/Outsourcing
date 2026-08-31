@@ -375,6 +375,78 @@ def _parse_disposed_flag(value) -> bool:
     return str(value).strip().lower() in _DISPOSED_TRUTHY
 
 
+# --- Suggested asset ID for a possible disposal --------------------------
+#
+# Same "client's own data as vocabulary" approach as suggest_capital_
+# expenditure_reclassification below and control_accounts.py's/
+# nominal_matrix.py's own suggestion checks: a credit movement on a fixed
+# asset cost code is a candidate disposal, but which specific still-held
+# register line it corresponds to isn't knowable from the movement alone
+# - the preparer has always had to read the posting's own description/
+# reference text and compare it against the register by eye. This does
+# exactly that comparison automatically: if a still-held asset's own
+# description shows up (as significant words) in the disposal posting's
+# own description/reference text, and no OTHER asset's description
+# matches comparably well, that's a strong enough signal to suggest -
+# never strong enough to act on, so it only ever fills in an advisory
+# "Suggested asset ID" column, next to the "Matched to asset ID (to
+# complete)" column the preparer still fills in themselves.
+_DISPOSAL_MATCH_MIN_SCORE = 0.6  # same threshold as DOMINANT_SHARE_THRESHOLD elsewhere in this codebase
+_DISPOSAL_WORD_RE = re.compile(r"[a-z0-9]+")
+_DISPOSAL_STOPWORDS = {"and", "the", "for", "of", "a", "an", "to", "in", "on", "with"}
+
+
+def _disposal_keywords(text) -> set[str]:
+    words = _DISPOSAL_WORD_RE.findall(str(text).lower())
+    return {w for w in words if len(w) >= 3 and w not in _DISPOSAL_STOPWORDS}
+
+
+def _suggest_disposal_matches(possible_disposals: pd.DataFrame, still_held: pd.DataFrame) -> pd.DataFrame:
+    """Adds "Suggested asset ID" / "Suggested match reason" columns to
+    possible_disposals: for each disposal, the still-held register line
+    whose own description's significant words appear (a real majority -
+    at least _DISPOSAL_MATCH_MIN_SCORE of them) in the disposal's own
+    description/reference text - and no other asset's description scores
+    just as well. Left blank when nothing clears the threshold, or when
+    two or more assets tie for the best score (e.g. two near-identical
+    "Dell Latitude laptop" units - the posting alone can't say which one
+    was actually disposed, so this never guesses between them)."""
+    if possible_disposals.empty or still_held.empty:
+        return possible_disposals
+
+    assets = still_held[["asset_id", "description"]].copy()
+    assets["_keywords"] = assets["description"].apply(_disposal_keywords)
+    assets = assets[assets["_keywords"].apply(len) > 0]
+    if assets.empty:
+        return possible_disposals
+
+    suggested_ids, reasons = [], []
+    for _, row in possible_disposals.iterrows():
+        text_keywords = _disposal_keywords(f"{row.get('Description', '')} {row.get('Reference', '')}")
+        scores = []
+        if text_keywords:
+            for _, asset in assets.iterrows():
+                overlap = asset["_keywords"] & text_keywords
+                score = len(overlap) / len(asset["_keywords"])
+                if score >= _DISPOSAL_MATCH_MIN_SCORE:
+                    scores.append((asset["asset_id"], asset["description"], score))
+        if scores:
+            top_score = max(s[2] for s in scores)
+            top_matches = [s for s in scores if s[2] == top_score]
+            if len(top_matches) == 1:
+                asset_id, description, score = top_matches[0]
+                suggested_ids.append(asset_id)
+                reasons.append(f"'{description}' matched in the posting's own description/reference")
+                continue
+        suggested_ids.append("")
+        reasons.append("")
+
+    possible_disposals = possible_disposals.copy()
+    possible_disposals["Suggested asset ID"] = suggested_ids
+    possible_disposals["Suggested match reason"] = reasons
+    return possible_disposals
+
+
 def asset_level_rollforward(
     prior_register: pd.DataFrame,
     nominal_activity: pd.DataFrame | None,
@@ -440,6 +512,7 @@ def asset_level_rollforward(
                     columns={"credit": "Cost removed", "account_name": "Account", "date": "Date", "reference": "Reference", "description": "Description", "contact": "Contact", "account_code": "Nominal Code"}
                 )
                 possible_disposals["Matched to asset ID (to complete)"] = ""
+                possible_disposals = _suggest_disposal_matches(possible_disposals, still_held)
 
     # Closing register: same canonical shape as the prior-year upload, so
     # next year's job can take this sheet's contents straight back in as

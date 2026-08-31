@@ -239,3 +239,104 @@ def test_asset_rollforward_recognises_various_not_disposed_spellings(disposed_va
     prior_register = pd.DataFrame([_prior_register_row(disposed_value)])
     result = fa.asset_level_rollforward(prior_register, None, None, period_days=365)
     assert len(result.asset_schedule) == 1
+
+
+# --- suggest disposal asset ID -------------------------------------------
+#
+# asset_level_rollforward flags any credit posting to a fixed asset cost
+# code as a "possible disposal" for a preparer to match to a register
+# line by hand. _suggest_disposal_matches adds an advisory suggestion -
+# using the client's own still-held asset descriptions as vocabulary -
+# so the preparer has a head start, without ever auto-marking anything
+# disposed itself (the "Matched to asset ID (to complete)" column stays
+# blank and preparer-owned either way).
+
+def _still_held_row(asset_id, description):
+    return {"asset_id": asset_id, "description": description}
+
+
+def test_suggest_disposal_matches_finds_unique_clear_match():
+    still_held = pd.DataFrame([
+        _still_held_row("FA-001", "Ford Transit Van AB12 CDE"),
+        _still_held_row("FA-002", "Dell Laptop Computer"),
+    ])
+    possible_disposals = pd.DataFrame([
+        {"Description": "Disposal - Ford Transit Van AB12 CDE sold at auction", "Reference": "INV-100"},
+    ])
+    out = fa._suggest_disposal_matches(possible_disposals, still_held)
+    assert out.iloc[0]["Suggested asset ID"] == "FA-001"
+    assert "Ford Transit Van AB12 CDE" in out.iloc[0]["Suggested match reason"]
+
+
+def test_suggest_disposal_matches_leaves_blank_when_ambiguous_between_two_similar_assets():
+    still_held = pd.DataFrame([
+        _still_held_row("FA-001", "Ford Transit Van AB12 CDE"),
+        _still_held_row("FA-002", "Ford Transit Van XY99 ZZZ"),
+    ])
+    possible_disposals = pd.DataFrame([
+        {"Description": "Disposal - Ford Transit Van sold", "Reference": "INV-101"},
+    ])
+    out = fa._suggest_disposal_matches(possible_disposals, still_held)
+    assert out.iloc[0]["Suggested asset ID"] == ""
+    assert out.iloc[0]["Suggested match reason"] == ""
+
+
+def test_suggest_disposal_matches_leaves_blank_when_no_asset_scores_above_threshold():
+    still_held = pd.DataFrame([
+        _still_held_row("FA-001", "Ford Transit Van AB12 CDE"),
+    ])
+    possible_disposals = pd.DataFrame([
+        {"Description": "Disposal of old photocopier", "Reference": "INV-102"},
+    ])
+    out = fa._suggest_disposal_matches(possible_disposals, still_held)
+    assert out.iloc[0]["Suggested asset ID"] == ""
+    assert out.iloc[0]["Suggested match reason"] == ""
+
+
+def test_suggest_disposal_matches_never_auto_marks_matched_to_asset_id_column():
+    # the preparer-owned "Matched to asset ID (to complete)" column must
+    # stay untouched by the advisory suggestion - it's a separate column
+    still_held = pd.DataFrame([_still_held_row("FA-001", "Ford Transit Van AB12 CDE")])
+    possible_disposals = pd.DataFrame([
+        {"Description": "Disposal - Ford Transit Van AB12 CDE sold", "Reference": "INV-100",
+         "Matched to asset ID (to complete)": ""},
+    ])
+    out = fa._suggest_disposal_matches(possible_disposals, still_held)
+    assert out.iloc[0]["Matched to asset ID (to complete)"] == ""
+    assert out.iloc[0]["Suggested asset ID"] == "FA-001"
+
+
+def test_suggest_disposal_matches_returns_unchanged_when_no_still_held_assets():
+    possible_disposals = pd.DataFrame([{"Description": "Disposal of something", "Reference": "INV-1"}])
+    out = fa._suggest_disposal_matches(possible_disposals, pd.DataFrame())
+    assert "Suggested asset ID" not in out.columns
+
+
+def test_suggest_disposal_matches_returns_unchanged_when_no_disposals():
+    still_held = pd.DataFrame([_still_held_row("FA-001", "Ford Transit Van AB12 CDE")])
+    out = fa._suggest_disposal_matches(pd.DataFrame(), still_held)
+    assert out.empty
+
+
+def test_asset_rollforward_wires_disposal_suggestion_into_possible_disposals():
+    # full asset_level_rollforward flow: a credit posting to the cost code
+    # for an asset still in the register should come back with a
+    # suggested asset ID, using the register's own descriptions
+    prior_register = pd.DataFrame([
+        {"asset_id": "FA-001", "description": "Ford Transit Van AB12 CDE", "category": "Motor Vehicles",
+         "date_acquired": pd.Timestamp("2022-03-15"), "cost": 12000.0,
+         "depreciation_method": "Reducing Balance", "depreciation_rate": 25.0,
+         "accumulated_depreciation_b_fwd": 7000.0, "disposed": "No"},
+    ])
+    tb_current = pd.DataFrame([
+        _fa_tb_row("6350", "MOTOR VEHICLES - COST", "Fixed Asset", 0.0, 12000.0),
+    ])
+    nominal = pd.DataFrame([
+        _nom_row("2025-08-01", "6350", "MOTOR VEHICLES - COST", credit=12000.0,
+                 description="Disposal - Ford Transit Van AB12 CDE sold at auction", reference="INV-200"),
+    ])
+    result = fa.asset_level_rollforward(prior_register, nominal, tb_current, period_days=365)
+    assert len(result.possible_disposals) == 1
+    row = result.possible_disposals.iloc[0]
+    assert row["Suggested asset ID"] == "FA-001"
+    assert row["Matched to asset ID (to complete)"] == ""
