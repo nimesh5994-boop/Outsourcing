@@ -3,11 +3,25 @@
 {# Shared results renderer for every standalone, run-on-its-own section
    (VAT/PAYE Reconciliation, Control Accounts, Debtors & Creditors, and
    any future section built the same way) - each passes a list of
-   {name, status, message, detail, extra_detail, extra_detail_label,
-   matched_detail, matched_detail_label} dicts (see main.py's
+   {name, status, message, detail, detail_columns, extra_detail,
+   extra_detail_columns, extra_detail_label, matched_detail,
+   matched_detail_columns, matched_detail_label} dicts (see main.py's
    _recon_result_to_dict / _control_account_result_to_dict) plus its own
    "last run" timestamp, so results look identical everywhere regardless
-   of which check module actually produced them. #}
+   of which check module actually produced them.
+
+   The *_columns lists matter, not just the *_columns-less records
+   themselves: Postgres jsonb does NOT preserve an object's key
+   insertion order on a save/reload round trip (it re-orders keys by
+   length, then lexicographically), so iterating a stored record's own
+   .keys()/.values() renders a visibly scrambled column order (TOTAL/
+   DIFF ahead of Date, contra-account columns out of the rank-by-value
+   order the check itself put them in) even though each row's values
+   still line up correctly under their own equally-scrambled keys -
+   found live via a nominal matrix table with several similar-length
+   column names, not caught by any test that only checked cell values.
+   Falls back to a record's own .keys() only for a result saved before
+   this fix shipped, where no *_columns list was stored at all. #}
 {% macro render_standalone_results(results, computed_at) %}
 {% if results %}
 <div style="margin-top:20px">
@@ -16,31 +30,34 @@
   <h3 style="margin-top:16px; font-size:15px;">{{ r.name }} <span class="badge {{ r.status }}">{{ r.status }}</span></h3>
   <p class="muted">{{ r.message }}</p>
   {% if r.detail %}
+  {% set detail_cols = r.detail_columns if r.detail_columns else r.detail[0].keys() %}
   <table>
-    <tr>{% for k in r.detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
+    <tr>{% for k in detail_cols %}<th>{{ k }}</th>{% endfor %}</tr>
     {% for row in r.detail %}
-    <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
+    <tr>{% for k in detail_cols %}<td>{{ row[k] }}</td>{% endfor %}</tr>
     {% endfor %}
   </table>
   {% endif %}
   {% if r.extra_detail %}
+  {% set extra_cols = r.extra_detail_columns if r.extra_detail_columns else r.extra_detail[0].keys() %}
   <details style="margin-top:10px">
     <summary style="cursor:pointer; color:var(--muted); font-size:13px;">{{ r.extra_detail_label }} ({{ r.extra_detail|length }})</summary>
     <table style="margin-top:8px">
-      <tr>{% for k in r.extra_detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
+      <tr>{% for k in extra_cols %}<th>{{ k }}</th>{% endfor %}</tr>
       {% for row in r.extra_detail %}
-      <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
+      <tr>{% for k in extra_cols %}<td>{{ row[k] }}</td>{% endfor %}</tr>
       {% endfor %}
     </table>
   </details>
   {% endif %}
   {% if r.matched_detail %}
+  {% set matched_cols = r.matched_detail_columns if r.matched_detail_columns else r.matched_detail[0].keys() %}
   <details style="margin-top:10px">
     <summary style="cursor:pointer; color:var(--muted); font-size:13px;">{{ r.matched_detail_label }} ({{ r.matched_detail|length }})</summary>
     <table style="margin-top:8px">
-      <tr>{% for k in r.matched_detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
+      <tr>{% for k in matched_cols %}<th>{{ k }}</th>{% endfor %}</tr>
       {% for row in r.matched_detail %}
-      <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
+      <tr>{% for k in matched_cols %}<td>{{ row[k] }}</td>{% endfor %}</tr>
       {% endfor %}
     </table>
   </details>
@@ -59,6 +76,8 @@
   <a href="#debtors-creditors">Debtors &amp; Creditors</a>
   <a href="#fixed-asset-register">Fixed Assets</a>
   <a href="#bank-recon">Bank</a>
+  <a href="#nominal-matrix">Nominal Matrix</a>
+  <a href="#accruals-prepayments">Accruals &amp; Prepayments</a>
   <a href="#source-documents" class="muted-link">Source Documents &darr;</a>
 </nav>
 
@@ -333,6 +352,34 @@
   </div>
 
   {{ render_standalone_results(job.bank_recon_results, job.bank_recon_computed_at) }}
+</div>
+
+<div class="card" id="nominal-matrix">
+  <h2>Nominal Analysis Matrix</h2>
+  <p class="muted">Every transaction against your busiest nominal codes allocated to its contra nominal code as a matrix column, so you can see at a glance where the money went (or came from) and what still needs allocating &mdash; plus a suggested contra account for unallocated transactions, based on that contact's own allocation history. Needs a Xero-native Nominal Activity / Account Transactions export specifically (the contra-account detail this schedule is built from only comes from Xero's own "Related account" field) &mdash; a generic-mapped upload won't produce it.</p>
+
+  <div style="margin-top:20px">
+    <form method="post" action="/jobs/{{ job.id }}/nominal-matrix/run">
+      <button type="submit">Run Nominal Matrix</button>
+    </form>
+    <p class="muted" style="margin-top:8px">Uses the Trial Balance / Nominal Activity sections below &mdash; no separate upload here. Runs independently of Generate, so you can test and refine those inputs on their own before building the full working paper.</p>
+  </div>
+
+  {{ render_standalone_results(job.nominal_matrix_results, job.nominal_matrix_computed_at) }}
+</div>
+
+<div class="card" id="accruals-prepayments">
+  <h2>Accruals &amp; Prepayments</h2>
+  <p class="muted">Every prepayment (Xero's own "Prepayment" account type) and accrual-named Current Liability account, side by side in one consolidated table &mdash; brought forward, movement, carried forward, checked against the Trial Balance.</p>
+
+  <div style="margin-top:20px">
+    <form method="post" action="/jobs/{{ job.id }}/accruals-prepayments/run">
+      <button type="submit">Run Accruals &amp; Prepayments</button>
+    </form>
+    <p class="muted" style="margin-top:8px">Uses the Trial Balance / Nominal Activity sections below &mdash; no separate upload here. Runs independently of Generate, so you can test and refine those inputs on their own before building the full working paper.</p>
+  </div>
+
+  {{ render_standalone_results(job.accruals_prepayments_results, job.accruals_prepayments_computed_at) }}
 </div>
 
 <h2 class="section-group-heading" id="source-documents">Source documents &mdash; uploads by report type</h2>

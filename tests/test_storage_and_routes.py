@@ -1247,6 +1247,112 @@ def test_nominal_matrix_and_accruals_prepayments_through_full_generate(http_clie
     assert "OK" in motor_rows[4][0]
 
 
+def test_nominal_matrix_and_accruals_prepayments_standalone_run_through_http(http_client):
+    """Nominal Analysis Matrix and Accruals & Prepayments as their own
+    standalone sections, same treatment as Control Accounts/Debtors &
+    Creditors/Fixed Asset Register/Bank Reconciliation above - each with
+    its own independent "Run" button, reusing the job's existing Trial
+    Balance/Nominal Activity uploads. MatrixResult (nominal_matrix.
+    build_all_matrices) has no `name` field, unlike ReconResult, so
+    _matrix_result_to_dict synthesises one from account_code/account_name
+    - same shape decision as _control_account_result_to_dict."""
+    c = http_client
+    practice_id = _signup(c, admin_email="matrix-standalone@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Matrix Standalone Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+        "comparative_period_start": "2024-01-01", "comparative_period_end": "2024-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "nominal_activity"},
+        files={"files": ("gl.xlsx", _make_nominal_matrix_gl_workbook(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    from openpyxl import Workbook
+
+    def _make_tb(rows):
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Account Code", "Account Name", "Account Type", "Debit", "Credit"])
+        for r in rows:
+            ws.append(r)
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    tb_current = _make_tb([
+        ["6200", "Repairs and Maintenance", "Overhead", 30270, 0],
+        ["6300", "Motor Expenses", "Overhead", 300, 0],
+        ["1400", "Prepaid Insurance", "Prepayment", 2000, 0],
+        ["1410", "Prepaid Rent", "Prepayment", 1200, 0],
+        ["2400", "Accrued Expenses", "Current Liability", 0, 800],
+        ["2410", "Accruals - Other", "Current Liability", 0, 1200],
+        ["2420", "Accrued Expenses - VAT", "Current Liability", 0, 300],
+    ])
+    tb_comparative = _make_tb([
+        ["1400", "Prepaid Insurance", "Prepayment", 1500, 0],
+        ["1410", "Prepaid Rent", "Prepayment", 2000, 0],
+        ["2400", "Accrued Expenses", "Current Liability", 0, 600],
+        ["2410", "Accruals - Other", "Current Liability", 0, 1000],
+    ])
+    _upload_and_confirm_with_period(c, job_id, "trial_balance", "tb.xlsx", tb_current, "current")
+    _upload_and_confirm_with_period(c, job_id, "trial_balance", "tb_comparative.xlsx", tb_comparative, "comparative")
+    _confirm_all_pending_uploads(c, job_id)
+
+    resp = c.post(f"/jobs/{job_id}/nominal-matrix/run", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/jobs/{job_id}#nominal-matrix"
+
+    resp = c.post(f"/jobs/{job_id}/accruals-prepayments/run", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/jobs/{job_id}#accruals-prepayments"
+
+    from app import storage
+    job = storage.get_job(job_id)
+
+    mx_results = {r["name"]: r for r in job["nominal_matrix_results"]}
+    repairs_name = next(n for n in mx_results if "Repairs and Maintenance" in n)
+    repairs = mx_results[repairs_name]
+    assert repairs["status"] == "review"
+    assert "multi-code split" in repairs["message"]
+    assert repairs["extra_detail"], "expected the OTHER-bucket breakdown"
+    # Regression check for a real bug found via this exact standalone
+    # section (screenshot of the rendered table): Postgres jsonb does NOT
+    # preserve object key order on a save/reload round trip - it
+    # re-orders keys by length, then lexicographically - so several
+    # similar-length contra-account column names ("3000 - Alpha Supplies
+    # Contra", "3004 - Echo Supplies Contra", ...) came back visibly
+    # scrambled unless detail_columns is stored and used explicitly. This
+    # asserts the real Postgres-stored order, not just an in-memory dict.
+    assert repairs["detail_columns"][:4] == ["date", "reference", "description", "contact"]
+    assert repairs["detail_columns"][-2:] == ["TOTAL", "DIFF"]
+    assert repairs["detail_columns"].index("1200 - Bank Current Account") < repairs["detail_columns"].index("3000 - Alpha Supplies Contra")
+    motor_name = next(n for n in mx_results if "Motor Expenses" in n)
+    assert mx_results[motor_name]["status"] == "ok"
+    suggestion_name = next(n for n in mx_results if "suggested allocations" in n.lower())
+    assert mx_results[suggestion_name]["status"] == "review"
+    assert mx_results[suggestion_name]["detail"][0]["Contact"] == "Fix It Ltd"
+
+    ap_results = job["accruals_prepayments_results"]
+    assert len(ap_results) == 1
+    ap = ap_results[0]
+    assert ap["status"] == "review"
+    assert "Accrued Expenses - VAT" not in ap["message"]
+    codes = {row["Nominal code"] for row in ap["detail"]}
+    assert codes == {"1400", "1410", "2400", "2410"}, "the VAT-related accrual account should never appear"
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    assert "Nominal Analysis Matrix" in resp.text
+    assert "Accruals &amp; Prepayments" in resp.text or "Accruals & Prepayments" in resp.text
+    assert "Repairs and Maintenance" in resp.text
+
+
 def _make_payroll_gl_workbook() -> bytes:
     """A minimal but genuinely Xero-native 'Account Transactions' export
     (title rows + one section per account + a Total row per section,

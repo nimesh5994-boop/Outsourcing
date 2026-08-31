@@ -41,8 +41,9 @@ already used.
 
 The job page itself is the one page in the system with many independent
 sections on it (Generate, VAT/PAYE/Control Accounts/Debtors & Creditors/
-Fixed Asset Register/Bank Reconciliation, then every report type's
-upload area) - a sticky jump-link bar (`.section-nav`, pinned to the top
+Fixed Asset Register/Bank Reconciliation/Nominal Analysis Matrix/
+Accruals & Prepayments, then every report type's upload area) - a sticky
+jump-link bar (`.section-nav`, pinned to the top
 of the viewport on scroll) sits right below the breadcrumb with one link
 per section, so any one of them is one click away regardless of how far
 down the page it sits. The standalone-check cards and the upload cards
@@ -313,7 +314,7 @@ PDF, in any order), and the system works out what each one is:
 | Debtors/creditors control recon | Aged listing total vs TB control account balance, with the full client-wise listing (every customer/supplier, every ageing bucket, exactly as submitted) attached - runnable and viewable on its own as its own "Debtors & Creditors" card, same treatment as VAT/PAYE - see below |
 | Control account rollforwards | B/fwd + movements = c/fwd for any balance-sheet account with nominal detail, with the aged listing attached as a breakdown of debtors/creditors closing balances specifically - plus the actual postings behind the movement and, where there's no aged listing, a movement-by-contact view - runnable and viewable on its own as its own "Control Accounts" card, same treatment as VAT/PAYE - see below |
 | Control accounts - possible miscoding | Postings coded to the wrong balance-sheet control account, found by contact identity - see below |
-| Nominal analysis matrix | Every transaction against an account allocated to its contra nominal code; multi-way splits and unallocated amounts flagged for manual review - plus what's actually inside the OTHER catch-all, and suggested allocations for unallocated items based on that contact's own history - see below |
+| Nominal analysis matrix | Every transaction against an account allocated to its contra nominal code; multi-way splits and unallocated amounts flagged for manual review - plus what's actually inside the OTHER catch-all, and suggested allocations for unallocated items based on that contact's own history - runnable and viewable on its own as its own "Nominal Analysis Matrix" card, same treatment as VAT/PAYE - see below |
 | Bank reconciliation | Statement closing balance vs TB - runnable and viewable on its own as its own "Bank Reconciliation" card, same treatment as VAT/PAYE - see below |
 | VAT cross-check | VAT return boxes vs P&L turnover and VAT control account |
 | VAT Reconciliation (Box 1 & 4) | General Ledger matched transaction-by-transaction against the filed return's Sales and Purchases detail - a dedicated workspace, see below |
@@ -322,7 +323,7 @@ PDF, in any order), and the system works out what each one is:
 | Statutory filing deadlines | Companies House accounts filing, CT600 filing, and CT payment deadlines - computed purely from the job's period end, no upload needed - see below |
 | Fixed asset register (category) | Cost/depreciation rollforward per asset category, derived from TB + nominal activity, checked against the TB - runnable and viewable on its own as its own "Fixed Asset Register" card, same treatment as VAT/PAYE - see below |
 | Fixed asset register (asset detail) | Prior-year register rolled forward asset-by-asset, new additions/possible disposals flagged from nominal activity, totals checked against TB - same standalone card as above |
-| Accruals & Prepayments schedule | Every Prepayment-typed and accrual-named account, side by side in one table, b/fwd + movement = c/fwd checked against TB - see below |
+| Accruals & Prepayments schedule | Every Prepayment-typed and accrual-named account, side by side in one table, b/fwd + movement = c/fwd checked against TB - runnable and viewable on its own as its own "Accruals & Prepayments" card, same treatment as VAT/PAYE - see below |
 | Contact coding consistency | A contact whose postings are mostly on one nominal code but a small minority land on a different one - the "BT: 10 postings to Telephone, 2 to Light & Heat" pattern - flags the minority transactions with the likely correct code |
 | Duplicate transaction check | Same contact+date+amount posted more than once, or the same reference/invoice number reused on the same nominal code for the same amount - excludes the natural double-entry legs of one transaction (same reference on different codes, or an invoice and its later payment, which share a reference but have opposite signs) |
 | Unusual posting date check | Manual journals (not bank feed or trading transactions, which legitimately happen any day) posted on a weekend |
@@ -750,6 +751,16 @@ left as a genuine unallocated item with no guess attached. Runs as its
 own check across every matrix account with a candidate table of exactly
 what's suggested and why; never allocates anything itself.
 
+**Runnable and viewable on its own**, same treatment as every other
+standalone section: a "Nominal Analysis Matrix" card on the job page
+reuses whatever Trial Balance/Nominal Activity uploads are already
+confirmed for the job and has its own "Run Nominal Matrix" button,
+computing and showing every account's matrix - plus the suggested-
+reallocations check - independently of the full Generate pipeline and
+of every other section. Still needs the Xero-native Nominal Activity
+export described above; a generic-mapped one comes back with no
+matrices to show rather than erroring.
+
 ## Control account rollforwards
 
 Built from `app/control_accounts.py`: for every balance-sheet account
@@ -1021,6 +1032,34 @@ checked against the TB, flagged if it doesn't tie - and the actual
 nominal-activity postings behind every line's movement are attached as
 `extra_detail`, the same "real transactions, not just a trusted total"
 treatment as the rest of this session's robustness work.
+
+**Runnable and viewable on its own**, same treatment as every other
+standalone section: an "Accruals & Prepayments" card on the job page
+reuses whatever Trial Balance/Nominal Activity uploads are already
+confirmed for the job and has its own "Run Accruals & Prepayments"
+button, independent of the full Generate pipeline and of every other
+section. Unlike the Nominal Matrix, this one works off ordinary generic-
+mapped uploads - no Xero-native export required.
+
+**A standalone table's column order used to come back scrambled** - a
+real bug found live via a screenshot of the Nominal Matrix's own
+standalone section, not caught by any test that only checked cell
+values: PostgreSQL's `jsonb` type does NOT preserve an object's key
+insertion order on a save/reload round trip - it silently re-orders keys
+by length, then lexicographically - so a wide table like the nominal
+matrix's contra-account pivot (several columns of a similar name length)
+came back with Date/Reference/Contact no longer first, TOTAL/DIFF no
+longer last, and contra-account columns out of the rank-by-value order
+the check itself put them in. Every row's *values* still lined up
+correctly under their own equally-scrambled keys - only the *column
+order* was wrong, easy to miss unless you're actually looking at the
+rendered table rather than just its numbers. Fixed by storing each
+table's real column order alongside its records (`_df_columns` in
+`main.py`) and having the results-rendering macro in `job_detail.html`
+render columns in that stored order rather than trusting a JSONB-
+reloaded record's own key order - this fix applies to every standalone
+section's on-screen tables, not just the Nominal Matrix, since all of
+them round-trip through the same Postgres JSONB storage.
 
 ## Upload safety
 
@@ -1361,11 +1400,14 @@ rather than silence, an API error degrades to a note rather than a raise,
 and the "nothing useful to add" marker becomes an empty note rather than
 clutter.
 
-`tests/test_jsonable.py` covers main.py's `_jsonable`/`_df_to_records`
-conversion directly (no database needed - importing `app.main` doesn't
-connect to one): a real Timestamp, NaN, and numpy scalars all convert
-correctly, and the `pd.NaT` regression above - a bare `NaT` now converts
-to `None` instead of reaching `json.dumps()` unconverted.
+`tests/test_jsonable.py` covers main.py's `_jsonable`/`_df_to_records`/
+`_df_columns` conversion directly (no database needed - importing
+`app.main` doesn't connect to one): a real Timestamp, NaN, and numpy
+scalars all convert correctly, the `pd.NaT` regression above - a bare
+`NaT` now converts to `None` instead of reaching `json.dumps()`
+unconverted - and the jsonb key-order regression below: `_df_columns`
+captures a DataFrame's real column order, and `_recon_result_to_dict`
+stores it alongside every one of its three tables.
 
 `tests/test_storage_and_routes.py` exercises the Postgres-backed storage
 layer, the full practice -> template -> client -> job -> upload ->
@@ -1391,19 +1433,22 @@ Register/Bank Closing Statement uploads rather than needing any of their
 own, each with its own independent "Run" button and results shown on the
 job page - the Fixed Asset Register test also confirms a disposed asset
 from a real upload is correctly excluded from the still-held schedule,
-the regression case for the "Disposed?" text-column bug above), and
-- with a mocked Anthropic client - an AI-assisted note actually reaching the downloaded
-workbook end to end), the Nominal Analysis Matrix and Accruals &
-Prepayments schedule through a full Generate run (neither has a
-standalone section - see below - so this drives the whole pipeline: a
-Xero-native "Account Transactions" export with 14 rows against one
-account exercises the OTHER-bucket top-10 cap, a multi-code-split
-"and N more" related-account entry, an unallocated entry, and a
-dominant-history suggestion, alongside a clean single-row account as an
+the regression case for the "Disposed?" text-column bug above), the
+Nominal Analysis Matrix and Accruals & Prepayments schedule first through
+a full Generate run (a Xero-native "Account Transactions" export with 14
+rows against one account exercises the OTHER-bucket top-10 cap, a multi-
+code-split "and N more" related-account entry, an unallocated entry, and
+a dominant-history suggestion, alongside a clean single-row account as an
 "ok" contrast; a generic-mapped TB/nominal activity pair exercises
 Accruals & Prepayments' prepayment/accrual discovery and its exclude-
 keyword logic - an "Accrued Expenses" account that's actually a VAT
-account correctly left out of the schedule entirely), the Practice/
+account correctly left out of the schedule entirely) and then as their
+own standalone sections (same reused-fixture data, now via their own
+"Run" buttons - this test also asserts the real Postgres-stored
+`detail_columns` order directly, the regression case for the jsonb key-
+order bug below, not just that the right cell values are present), and
+- with a mocked Anthropic client - an AI-assisted note actually reaching the downloaded
+workbook end to end), the Practice/
 Clients/Client/Job breadcrumb chain
 and the job page's sticky section-jump nav (see "Navigation" above), and
 the access-control model (signup, login, wrong

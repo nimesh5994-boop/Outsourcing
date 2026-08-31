@@ -414,13 +414,31 @@ def _df_to_records(df: pd.DataFrame) -> list[dict]:
     return [{col: _jsonable(v) for col, v in row.items()} for row in df.to_dict(orient="records")]
 
 
+def _df_columns(df: pd.DataFrame) -> list[str]:
+    """The DataFrame's own column order, stored alongside its records so
+    job_detail.html's results table can render columns in that order
+    rather than a stored record's own key order - Postgres jsonb does
+    NOT preserve object key insertion order on a save/reload round trip
+    (it re-orders keys by length, then lexicographically), so a table
+    with several similar-length column names came back visibly scrambled
+    (TOTAL/DIFF ahead of Date, contra-account columns out of the rank-by-
+    value order build_matrix put them in) even though every row's VALUES
+    still lined up correctly under their own (equally scrambled) keys -
+    found live via a screenshot of a standalone section's results, not
+    caught by any test that only checked cell values, never column order."""
+    if df is None or df.empty:
+        return []
+    return [str(c) for c in df.columns]
+
+
 def _recon_result_to_dict(result) -> dict:
     return {
         "name": result.name, "status": result.status, "message": result.message,
-        "detail": _df_to_records(result.detail),
-        "extra_detail": _df_to_records(result.extra_detail),
+        "detail": _df_to_records(result.detail), "detail_columns": _df_columns(result.detail),
+        "extra_detail": _df_to_records(result.extra_detail), "extra_detail_columns": _df_columns(result.extra_detail),
         "extra_detail_label": result.extra_detail_label,
         "matched_detail": _df_to_records(getattr(result, "matched_detail", None)),
+        "matched_detail_columns": _df_columns(getattr(result, "matched_detail", None)),
         "matched_detail_label": getattr(result, "matched_detail_label", ""),
     }
 
@@ -442,10 +460,10 @@ def _control_account_result_to_dict(result) -> dict:
         breakdown, breakdown_label = result.movement_breakdown, result.movement_breakdown_label
     return {
         "name": f"{result.account_code} – {result.account_name}", "status": result.status, "message": result.message,
-        "detail": _df_to_records(result.schedule),
-        "extra_detail": _df_to_records(breakdown),
+        "detail": _df_to_records(result.schedule), "detail_columns": _df_columns(result.schedule),
+        "extra_detail": _df_to_records(breakdown), "extra_detail_columns": _df_columns(breakdown),
         "extra_detail_label": breakdown_label,
-        "matched_detail": _df_to_records(result.extra_detail),
+        "matched_detail": _df_to_records(result.extra_detail), "matched_detail_columns": _df_columns(result.extra_detail),
         "matched_detail_label": result.extra_detail_label,
     }
 
@@ -463,11 +481,28 @@ def _asset_register_result_to_dict(result) -> dict:
     its own table."""
     return {
         "name": "Fixed asset register (asset detail)", "status": result.status, "message": result.message,
-        "detail": _df_to_records(result.asset_schedule),
-        "extra_detail": _df_to_records(result.new_additions),
+        "detail": _df_to_records(result.asset_schedule), "detail_columns": _df_columns(result.asset_schedule),
+        "extra_detail": _df_to_records(result.new_additions), "extra_detail_columns": _df_columns(result.new_additions),
         "extra_detail_label": "New additions found in nominal activity, not yet in the register",
-        "matched_detail": _df_to_records(result.possible_disposals),
+        "matched_detail": _df_to_records(result.possible_disposals), "matched_detail_columns": _df_columns(result.possible_disposals),
         "matched_detail_label": "Possible disposals (credit movements on fixed asset cost codes)",
+    }
+
+
+def _matrix_result_to_dict(result) -> dict:
+    """MatrixResult (nominal_matrix.build_all_matrices) has no `name`
+    field, same reasoning as _control_account_result_to_dict - synthesised
+    from account_code/account_name instead. `matrix` (the date/reference/
+    description/contact x contra-account pivot) maps to `detail`;
+    `extra_detail` (what's actually inside the OTHER column) carries
+    straight across. No matched_detail slot - this result never had a
+    third table."""
+    return {
+        "name": f"{result.account_code} – {result.account_name}", "status": result.status, "message": result.message,
+        "detail": _df_to_records(result.matrix), "detail_columns": _df_columns(result.matrix),
+        "extra_detail": _df_to_records(result.extra_detail), "extra_detail_columns": _df_columns(result.extra_detail),
+        "extra_detail_label": result.extra_detail_label,
+        "matched_detail": [], "matched_detail_columns": [], "matched_detail_label": "",
     }
 
 
@@ -636,6 +671,51 @@ def run_bank_reconciliation(job_id: str, user: dict = Depends(auth.current_user_
     job["bank_recon_computed_at"] = datetime.now(timezone.utc).isoformat()
     storage.save_job(job)
     return RedirectResponse(f"/jobs/{job_id}#bank-recon", status_code=303)
+
+
+@app.post("/jobs/{job_id}/nominal-matrix/run")
+def run_nominal_matrix(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Computes the Nominal Analysis Matrix independently of the main
+    Generate pipeline, same "test this section on its own" treatment as
+    every other standalone section above (see app/nominal_matrix.py).
+    Needs a Xero-native Nominal Activity upload specifically - the
+    contra_code/contra_name/contra_needs_review detail this schedule is
+    built from only comes from Xero's own "Related account" field
+    (parsed by xero_reports.py), never from a generic-mapped upload - so
+    it comes back empty rather than erroring when that detail isn't
+    available yet."""
+    job, client = _authorize_job(user, job_id)
+    data = _load_canonical_data(job)
+    template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
+    materiality, _ = _job_materiality(template)
+    mx_results = nominal_matrix.build_all_matrices(data.get("tb_current"), data.get("nominal_current"), materiality=materiality)
+    suggestion = nominal_matrix.suggest_unallocated_reallocations(
+        data.get("nominal_current"), [r.account_code for r in mx_results] or None,
+    )
+    job["nominal_matrix_results"] = [_matrix_result_to_dict(r) for r in mx_results] + [_recon_result_to_dict(suggestion)]
+    job["nominal_matrix_computed_at"] = datetime.now(timezone.utc).isoformat()
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#nominal-matrix", status_code=303)
+
+
+@app.post("/jobs/{job_id}/accruals-prepayments/run")
+def run_accruals_prepayments(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Computes the Accruals & Prepayments schedule independently of the
+    main Generate pipeline, same "test this section on its own" treatment
+    as every other standalone section above (see
+    accruals_prepayments.build_schedule) - reuses whatever Trial Balance/
+    Nominal Activity uploads are already confirmed for this job."""
+    job, client = _authorize_job(user, job_id)
+    data = _load_canonical_data(job)
+    template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
+    materiality, _ = _job_materiality(template)
+    result = accruals_prepayments.build_schedule(
+        data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"), materiality,
+    )
+    job["accruals_prepayments_results"] = [_recon_result_to_dict(result)]
+    job["accruals_prepayments_computed_at"] = datetime.now(timezone.utc).isoformat()
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#accruals-prepayments", status_code=303)
 
 
 @app.post("/clients/{client_id}/notes/{report_type}")
