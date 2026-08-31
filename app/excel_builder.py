@@ -1595,10 +1595,23 @@ def _generate_schedules(
             else:
                 place("control_account_rollforward", lambda r=r: build_control_account_sheet(wb, client_name, current_label, ca_refs[r.account_code], r, header_cells=header_cells))
 
+    # The formula-linked matrix sheet needs contra_code/contra_name/
+    # contra_needs_review on the raw nominal activity - only present when
+    # it came through xero_reports.parse_account_transactions' Xero-
+    # native structural parse, never through the generic column-mapping
+    # path (nominal_activity's canonical schema has no such fields - see
+    # models.py). nominal_matrix.build_matrix already guards on exactly
+    # this and returns "n/a" instead of crashing; the formula path needs
+    # the same guard, or a non-Xero-native upload takes down the whole
+    # workbook build the moment ANY nominal activity was provided at all
+    # (found live: a generic-mapped GL crashed with a bare KeyError deep
+    # in nominal_matrix._label_rows).
+    nominal_current_raw = data.get("nominal_current")
+    has_contra_detail = nominal_current_raw is not None and "contra_code" in nominal_current_raw.columns
     if mx_on:
         for r in matrix_results:
-            if refs.nominal_current is not None:
-                place("nominal_matrix", lambda r=r: build_matrix_sheet_formulas(wb, client_name, current_label, mx_refs[r.account_code], r, refs, data.get("nominal_current"), header_cells=header_cells))
+            if refs.nominal_current is not None and has_contra_detail:
+                place("nominal_matrix", lambda r=r: build_matrix_sheet_formulas(wb, client_name, current_label, mx_refs[r.account_code], r, refs, nominal_current_raw, header_cells=header_cells))
             else:
                 place("nominal_matrix", lambda r=r: build_matrix_sheet(wb, client_name, current_label, mx_refs[r.account_code], r, header_cells=header_cells))
 

@@ -135,7 +135,11 @@ def _latest_date_in_columns(source: DataSource, report_type: str) -> "pd.Timesta
     raw = source.raw_dataframe()
     best = None
     for col in date_columns:
-        parsed = pd.to_datetime(raw[col], errors="coerce", dayfirst=True)
+        # format="mixed": see the identical fix/comment in
+        # parsers.apply_mapping - without it, a mixed-format or even a
+        # single-column-but-multi-row ISO date series can have day/month
+        # silently swapped on some rows.
+        parsed = pd.to_datetime(raw[col], errors="coerce", dayfirst=True, format="mixed")
         col_max = parsed.max()
         if pd.notna(col_max) and (best is None or col_max > best):
             best = col_max

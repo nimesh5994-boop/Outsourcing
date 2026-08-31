@@ -1131,3 +1131,145 @@ def test_paye_reconciliation_end_to_end_through_http_and_into_the_workbook(http_
     assert any("PAYE Recon - Net Pay" in name for name in wb.sheetnames)
     assert any("PAYE Recon - HMRC" in name for name in wb.sheetnames)
     assert any("PAYE Recon - Pension" in name for name in wb.sheetnames)
+
+
+def _control_accounts_tb_workbook() -> bytes:
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Account Code", "Account Name", "Account Type", "Debit", "Credit"])
+    ws.append(["1100", "DEBTORS CONTROL", "Current Asset", 5000, 0])
+    ws.append(["2100", "CREDITORS CONTROL", "Current Liability", 0, 3000])
+    ws.append(["1200", "BANK", "Bank", 0, 2000])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _control_accounts_nominal_workbook() -> bytes:
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Date", "Account Code", "Account Name", "Reference", "Description", "Contact", "Source Type", "Debit", "Credit"])
+    ws.append(["2025-06-01", "1100", "DEBTORS CONTROL", "INV-1", "Sale", "Acme Ltd", "Invoice", 5000, 0])
+    ws.append(["2025-06-15", "2100", "CREDITORS CONTROL", "BILL-1", "Purchase", "Gamma Supplies", "Bill", 0, 3000])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _aged_debtors_workbook() -> bytes:
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Customer", "Current", "1-30 days", "31-60 days", "61-90 days", "90 days plus", "Total"])
+    ws.append(["Acme Ltd", 5000, 0, 0, 0, 0, 5000])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _aged_creditors_workbook() -> bytes:
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Supplier", "Current", "1-30 days", "31-60 days", "61-90 days", "90 days plus", "Total"])
+    ws.append(["Gamma Supplies", 3000, 0, 0, 0, 0, 3000])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _upload_control_accounts_fixture(c: TestClient, job_id: str) -> None:
+    for section_report_type, filename, content in [
+        ("trial_balance", "tb.xlsx", _control_accounts_tb_workbook()),
+        ("nominal_activity", "gl.xlsx", _control_accounts_nominal_workbook()),
+        ("aged_debtors", "aged_debtors.xlsx", _aged_debtors_workbook()),
+        ("aged_creditors", "aged_creditors.xlsx", _aged_creditors_workbook()),
+    ]:
+        resp = c.post(
+            f"/jobs/{job_id}/uploads", data={"section_report_type": section_report_type},
+            files={"files": (filename, content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+    _confirm_all_pending_uploads(c, job_id)
+
+
+def test_control_accounts_standalone_run_through_http(http_client):
+    """Control Accounts as its own standalone, run-on-its-own section
+    (same "test one section before the full pipeline" treatment as VAT/
+    PAYE Reconciliation) - reuses the job's existing Trial Balance/
+    Nominal Activity/Aged Debtors/Aged Creditors uploads rather than
+    needing any of its own, runs independently via its own button, and
+    the results land under job["control_accounts_results"] in the same
+    generic {name/status/message/detail/extra_detail/matched_detail}
+    shape every other standalone section uses."""
+    c = http_client
+    practice_id = _signup(c, admin_email="control-accounts@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Control Accounts Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    _upload_control_accounts_fixture(c, job_id)
+
+    resp = c.post(f"/jobs/{job_id}/control-accounts/run", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/jobs/{job_id}#control-accounts"
+
+    from app import storage
+    job = storage.get_job(job_id)
+    results = job["control_accounts_results"]
+    assert results, "expected at least one control account result"
+    names = {r["name"] for r in results}
+    assert any("DEBTORS CONTROL" in n for n in names)
+    assert any("CREDITORS CONTROL" in n for n in names)
+    assert any("wrong control account" in n.lower() for n in names)  # suggest_control_account_miscoding's check
+    debtors_result = next(r for r in results if "DEBTORS CONTROL" in r["name"])
+    assert debtors_result["status"] in ("ok", "review")
+    assert debtors_result["detail"]  # the b/fwd + movement + c/fwd schedule
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    assert "Control Accounts" in resp.text
+    assert "DEBTORS CONTROL" in resp.text
+
+
+def test_debtors_creditors_standalone_run_through_http(http_client):
+    """Debtors & Creditors as its own standalone section, same treatment
+    as Control Accounts above - the aged listing vs Trial Balance control
+    account check, with the full customer/supplier-wise listing attached
+    (see recon.debtors_creditors_control_recon), independent of Control
+    Accounts, VAT/PAYE Reconciliation, and the full Generate pipeline."""
+    c = http_client
+    practice_id = _signup(c, admin_email="debtors-creditors@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Debtors Creditors Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    _upload_control_accounts_fixture(c, job_id)
+
+    resp = c.post(f"/jobs/{job_id}/debtors-creditors/run", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/jobs/{job_id}#debtors-creditors"
+
+    from app import storage
+    job = storage.get_job(job_id)
+    results = {r["name"]: r for r in job["debtors_creditors_results"]}
+    assert set(results) == {"Debtors control account reconciliation", "Creditors control account reconciliation"}
+    # aged debtors total (5000) ties exactly to the TB Debtors Control debit balance (5000)
+    assert results["Debtors control account reconciliation"]["status"] == "ok"
+    assert results["Creditors control account reconciliation"]["status"] == "ok"
+    debtors_listing = results["Debtors control account reconciliation"]["extra_detail"]
+    assert debtors_listing and debtors_listing[0]["Customer"] == "Acme Ltd"
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    assert "Debtors &amp; Creditors" in resp.text or "Debtors & Creditors" in resp.text
+    assert "Acme Ltd" in resp.text

@@ -1,4 +1,55 @@
 {% extends "base.html" %}
+
+{# Shared results renderer for every standalone, run-on-its-own section
+   (VAT/PAYE Reconciliation, Control Accounts, Debtors & Creditors, and
+   any future section built the same way) - each passes a list of
+   {name, status, message, detail, extra_detail, extra_detail_label,
+   matched_detail, matched_detail_label} dicts (see main.py's
+   _recon_result_to_dict / _control_account_result_to_dict) plus its own
+   "last run" timestamp, so results look identical everywhere regardless
+   of which check module actually produced them. #}
+{% macro render_standalone_results(results, computed_at) %}
+{% if results %}
+<div style="margin-top:20px">
+  <p class="muted" style="font-size:13px;">Last run: {{ computed_at }}</p>
+  {% for r in results %}
+  <h3 style="margin-top:16px; font-size:15px;">{{ r.name }} <span class="badge {{ r.status }}">{{ r.status }}</span></h3>
+  <p class="muted">{{ r.message }}</p>
+  {% if r.detail %}
+  <table>
+    <tr>{% for k in r.detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
+    {% for row in r.detail %}
+    <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
+    {% endfor %}
+  </table>
+  {% endif %}
+  {% if r.extra_detail %}
+  <details style="margin-top:10px">
+    <summary style="cursor:pointer; color:var(--muted); font-size:13px;">{{ r.extra_detail_label }} ({{ r.extra_detail|length }})</summary>
+    <table style="margin-top:8px">
+      <tr>{% for k in r.extra_detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
+      {% for row in r.extra_detail %}
+      <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
+      {% endfor %}
+    </table>
+  </details>
+  {% endif %}
+  {% if r.matched_detail %}
+  <details style="margin-top:10px">
+    <summary style="cursor:pointer; color:var(--muted); font-size:13px;">{{ r.matched_detail_label }} ({{ r.matched_detail|length }})</summary>
+    <table style="margin-top:8px">
+      <tr>{% for k in r.matched_detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
+      {% for row in r.matched_detail %}
+      <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
+      {% endfor %}
+    </table>
+  </details>
+  {% endif %}
+  {% endfor %}
+</div>
+{% endif %}
+{% endmacro %}
+
 {% block content %}
 <div class="card">
   <h1>{{ job.client_name }} &mdash; {{ job.current_label }}</h1>
@@ -135,45 +186,7 @@
     <p class="muted" style="margin-top:8px">Runs independently of Generate &mdash; use this to test and refine the VAT inputs on their own before building the full working paper.</p>
   </div>
 
-  {% if job.vat_recon_results %}
-  <div style="margin-top:20px">
-    <p class="muted" style="font-size:13px;">Last run: {{ job.vat_recon_computed_at }}</p>
-    {% for r in job.vat_recon_results %}
-    <h3 style="margin-top:16px; font-size:15px;">{{ r.name }} <span class="badge {{ r.status }}">{{ r.status }}</span></h3>
-    <p class="muted">{{ r.message }}</p>
-    {% if r.detail %}
-    <table>
-      <tr>{% for k in r.detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
-      {% for row in r.detail %}
-      <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
-      {% endfor %}
-    </table>
-    {% endif %}
-    {% if r.extra_detail %}
-    <details style="margin-top:10px">
-      <summary style="cursor:pointer; color:var(--muted); font-size:13px;">{{ r.extra_detail_label }} ({{ r.extra_detail|length }})</summary>
-      <table style="margin-top:8px">
-        <tr>{% for k in r.extra_detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
-        {% for row in r.extra_detail %}
-        <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
-        {% endfor %}
-      </table>
-    </details>
-    {% endif %}
-    {% if r.matched_detail %}
-    <details style="margin-top:10px">
-      <summary style="cursor:pointer; color:var(--muted); font-size:13px;">{{ r.matched_detail_label }} ({{ r.matched_detail|length }})</summary>
-      <table style="margin-top:8px">
-        <tr>{% for k in r.matched_detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
-        {% for row in r.matched_detail %}
-        <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
-        {% endfor %}
-      </table>
-    </details>
-    {% endif %}
-    {% endfor %}
-  </div>
-  {% endif %}
+  {{ render_standalone_results(job.vat_recon_results, job.vat_recon_computed_at) }}
 </div>
 
 <div class="card" id="paye-recon">
@@ -249,34 +262,35 @@
     <p class="muted" style="margin-top:8px">Runs independently of Generate &mdash; use this to test and refine the PAYE inputs on their own before building the full working paper.</p>
   </div>
 
-  {% if job.paye_recon_results %}
+  {{ render_standalone_results(job.paye_recon_results, job.paye_recon_computed_at) }}
+</div>
+
+<div class="card" id="control-accounts">
+  <h2>Control Accounts</h2>
+  <p class="muted">Brought forward + net movement = carried forward, cross-checked to the Trial Balance, for every control account (debtors, creditors, VAT, PAYE, directors' loan, and any other current asset/liability code with nominal activity against it) &mdash; with the full nominal-activity postings behind each account's movement, an aged-listing tie-out or a net-movement-by-contact breakdown depending on what applies, and a scan for postings that may have bypassed the right control account entirely.</p>
+
   <div style="margin-top:20px">
-    <p class="muted" style="font-size:13px;">Last run: {{ job.paye_recon_computed_at }}</p>
-    {% for r in job.paye_recon_results %}
-    <h3 style="margin-top:16px; font-size:15px;">{{ r.name }} <span class="badge {{ r.status }}">{{ r.status }}</span></h3>
-    <p class="muted">{{ r.message }}</p>
-    {% if r.detail %}
-    <table>
-      <tr>{% for k in r.detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
-      {% for row in r.detail %}
-      <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
-      {% endfor %}
-    </table>
-    {% endif %}
-    {% if r.extra_detail %}
-    <details style="margin-top:10px">
-      <summary style="cursor:pointer; color:var(--muted); font-size:13px;">{{ r.extra_detail_label }} ({{ r.extra_detail|length }})</summary>
-      <table style="margin-top:8px">
-        <tr>{% for k in r.extra_detail[0].keys() %}<th>{{ k }}</th>{% endfor %}</tr>
-        {% for row in r.extra_detail %}
-        <tr>{% for v in row.values() %}<td>{{ v }}</td>{% endfor %}</tr>
-        {% endfor %}
-      </table>
-    </details>
-    {% endif %}
-    {% endfor %}
+    <form method="post" action="/jobs/{{ job.id }}/control-accounts/run">
+      <button type="submit">Run Control Accounts</button>
+    </form>
+    <p class="muted" style="margin-top:8px">Uses the Trial Balance / Nominal Activity / Aged Debtors / Aged Creditors sections below &mdash; no separate upload here. Runs independently of Generate, so you can test and refine those inputs on their own before building the full working paper.</p>
   </div>
-  {% endif %}
+
+  {{ render_standalone_results(job.control_accounts_results, job.control_accounts_computed_at) }}
+</div>
+
+<div class="card" id="debtors-creditors">
+  <h2>Debtors &amp; Creditors</h2>
+  <p class="muted">The aged debtors and aged creditors listings, each summed and compared to their Trial Balance control account balance &mdash; with the full customer-wise or supplier-wise listing exactly as submitted in the aged report attached below, not just the aggregate total.</p>
+
+  <div style="margin-top:20px">
+    <form method="post" action="/jobs/{{ job.id }}/debtors-creditors/run">
+      <button type="submit">Run Debtors &amp; Creditors</button>
+    </form>
+    <p class="muted" style="margin-top:8px">Uses the Aged Debtors / Aged Creditors / Trial Balance sections below &mdash; no separate upload here. Runs independently of Generate, so you can test and refine those inputs on their own before building the full working paper.</p>
+  </div>
+
+  {{ render_standalone_results(job.debtors_creditors_results, job.debtors_creditors_computed_at) }}
 </div>
 
 {% for rt in report_types %}

@@ -138,7 +138,16 @@ def apply_mapping(source: DataSource, report_type: str, mapping: dict) -> pd.Dat
 
     for field in canonical_fields:
         if field in DATE_FIELDS:
-            out[field] = pd.to_datetime(out[field], errors="coerce", dayfirst=True)
+            # format="mixed" makes pandas infer each row's format
+            # individually rather than guessing ONE format from the first
+            # row and forcing every other row through it - without it, an
+            # unambiguous ISO date in row 1 (e.g. "2025-06-01") can make
+            # pandas commit to day-first parsing for the whole column,
+            # silently swapping day/month on every later ISO-format row
+            # (found live: "2025-06-15" became NaT, "2025-06-01" became
+            # 6 Jan) instead of raising or leaving it alone. dayfirst=True
+            # still governs genuinely ambiguous rows (UK-style D/M/Y).
+            out[field] = pd.to_datetime(out[field], errors="coerce", dayfirst=True, format="mixed")
 
     if report_type == "trial_balance":
         out["balance"] = out["debit"] - out["credit"]

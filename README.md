@@ -182,6 +182,22 @@ debtors/creditors/bank/VAT recon, nominal review), the asset-level fixed
 asset register (prior-year rollforward), and the closing fixed asset
 register - these still write Python-computed values today.
 
+The nominal activity matrix's formula-linked sheet is Xero-native-only:
+its contra-account bucketing (`contra_code`/`contra_name`) is only ever
+derived by `xero_reports.parse_account_transactions`' structural parse of
+a genuine Xero "Account Transactions" export - the canonical
+`nominal_activity` schema itself has no such fields, so a generically-
+mapped upload (QBO/Sage/manual export, or any Xero file whose columns
+didn't structurally match) never has them. `build_workbook`/
+`build_workbook_into_template` check for that column before choosing the
+formula-linked builder over the plain one, falling back to the same
+Python-computed matrix sheet `nominal_matrix.build_matrix` already shows
+for that case - a real crash found live where the formula-linked path
+crashed the *entire* workbook build with a bare `KeyError('contra_code')`
+the moment any generically-mapped nominal activity was present at all,
+not just left that one schedule showing "n/a" the way the Python path
+already correctly did.
+
 ## Status
 
 This is a working MVP built and validated against real Xero exports for a
@@ -273,8 +289,8 @@ PDF, in any order), and the system works out what each one is:
 | Balance Sheet balance check | Net Assets vs Total Equity, with the current year's profit/(loss) explicitly bridged in (it isn't closed to retained earnings in the TB itself) - shown on the B/S sheet, not just the Index. Any account whose Account Type this system doesn't recognise as one of the five B/S categories is named explicitly as a likely cause, since it's excluded from every total, not just one side of the check |
 | Variance analysis | Every nominal code, current vs comparative, flagged if it moves >10% and >£500 |
 | Nominal activity review | Flags suspense postings, round-sum manual journals, and descriptions that read like pending corrections |
-| Debtors/creditors control recon | Aged listing total vs TB control account balance, with the full client-wise listing (every customer/supplier, every ageing bucket, exactly as submitted) attached |
-| Control account rollforwards | B/fwd + movements = c/fwd for any balance-sheet account with nominal detail, with the aged listing attached as a breakdown of debtors/creditors closing balances specifically - plus the actual postings behind the movement and, where there's no aged listing, a movement-by-contact view - see below |
+| Debtors/creditors control recon | Aged listing total vs TB control account balance, with the full client-wise listing (every customer/supplier, every ageing bucket, exactly as submitted) attached - runnable and viewable on its own as its own "Debtors & Creditors" card, same treatment as VAT/PAYE - see below |
+| Control account rollforwards | B/fwd + movements = c/fwd for any balance-sheet account with nominal detail, with the aged listing attached as a breakdown of debtors/creditors closing balances specifically - plus the actual postings behind the movement and, where there's no aged listing, a movement-by-contact view - runnable and viewable on its own as its own "Control Accounts" card, same treatment as VAT/PAYE - see below |
 | Control accounts - possible miscoding | Postings coded to the wrong balance-sheet control account, found by contact identity - see below |
 | Nominal analysis matrix | Every transaction against an account allocated to its contra nominal code; multi-way splits and unallocated amounts flagged for manual review - plus what's actually inside the OTHER catch-all, and suggested allocations for unallocated items based on that contact's own history - see below |
 | Bank reconciliation | Statement closing balance vs TB |
@@ -731,6 +747,21 @@ shipped with. Fixed Asset accounts are deliberately excluded here - they
 get their own, more sophisticated treatment in `fixed_assets.py` (see
 below).
 
+**Runnable and viewable on its own**, same treatment as VAT/PAYE
+Reconciliation: a "Control Accounts" card on the job page reuses whatever
+Trial Balance/Nominal Activity/Aged Debtors/Aged Creditors uploads are
+already confirmed for the job (no separate upload for this section) and
+has its own "Run Control Accounts" button, computing and showing every
+account's rollforward - plus the possible-miscoding scan below -
+independently of the full Generate pipeline and of every other section,
+so a preparer can upload just the accounts they're working on and see
+this specific check's real output straight away, rather than having to
+wait through the whole 10-step pipeline (or have every other section's
+inputs ready) just to look at one. The Debtors & Creditors aged-listing-
+vs-TB check (below "What gets checked") gets the identical treatment as
+its own card, separate from Control Accounts since it's a different
+check on the same underlying accounts.
+
 Two features - the same "read the GL in depth, surface the assumption"
 philosophy applied to FAR above - make this more robust:
 
@@ -902,6 +933,19 @@ silently produce a wrong working paper:
   December 2025`, `For the period 1 January 2025 to 31 December 2025`) -
   extracted and compared against the job's declared period, flagging a
   mismatch if someone uploads the wrong year/quarter.
+
+Generic-mapped date columns are parsed with `pandas.to_datetime(...,
+dayfirst=True, format="mixed")` (`parsers.apply_mapping`,
+`document_detection._latest_date_in_columns`) - the `format="mixed"` part
+matters: without it, `pd.to_datetime` infers ONE format from a column's
+first row and forces every other row through it, so an unambiguous ISO
+date in row 1 (`2025-06-01`) could make it commit to day-first parsing
+for the *whole column*, silently corrupting later ISO-format rows (a
+real bug found live: `2025-06-15` became a blank date entirely, and
+`2025-06-01` itself became 6 January instead of 1 June). `format="mixed"`
+infers each row's format individually, so both an ISO export and a
+genuinely ambiguous UK-style `D/M/Y` export in the same column parse
+correctly.
 
 ## Reusable client mapping profiles
 
@@ -1122,7 +1166,11 @@ for every later use on the same upload), report-type/platform/period
 guessing, and PDF table extraction (including a scanned/no-table PDF
 raising a clear error). Its PDF cases build a real test PDF via
 `reportlab`, a dev-only dependency (`requirements-dev.txt`) - they skip
-automatically if it isn't installed.
+automatically if it isn't installed. Also covers the `format="mixed"`
+date-parsing regression (see "Upload safety" above): an ISO date in a
+generic-mapped upload's first row no longer swaps day/month on later
+rows in the same column, and a genuinely ambiguous UK-style date still
+reads day-first as intended.
 
 `tests/test_recon_vat.py` covers the VAT cross-check's candidate-
 reconciling-items enhancement in isolation (in-memory DataFrames, no
@@ -1194,8 +1242,12 @@ uploads, settings, the standalone Run button, and the same results
 landing in the generated workbook's own tabs), the PAYE Reconciliation
 workspace end to end (a Xero-native General Ledger upload plus three
 auto-detected BrightPay uploads, settings, the standalone Run button,
-results landing in the generated workbook's own tabs), and - with a
-mocked Anthropic client - an AI-assisted note actually reaching the downloaded
+results landing in the generated workbook's own tabs), Control Accounts
+and Debtors & Creditors as their own standalone sections end to end
+(reusing the job's existing Trial Balance/Nominal Activity/Aged Debtors/
+Aged Creditors uploads rather than needing any of their own, each with
+its own independent "Run" button and results shown on the job page), and
+- with a mocked Anthropic client - an AI-assisted note actually reaching the downloaded
 workbook end to end), and the access-control model (signup, login, wrong
 password, unauthenticated redirect, a preparer scoped to only their
 granted clients, a manager blocked from user management, and cross-

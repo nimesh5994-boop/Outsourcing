@@ -399,6 +399,31 @@ def _recon_result_to_dict(result) -> dict:
     }
 
 
+def _control_account_result_to_dict(result) -> dict:
+    """Same {name/status/message/detail/extra_detail/matched_detail} shape
+    _recon_result_to_dict produces, so job_detail.html's one results-
+    rendering macro handles both without knowing the difference - even
+    though ControlAccountResult is a different dataclass with its own
+    field names (schedule/breakdown/extra_detail, not detail/extra_detail/
+    matched_detail). breakdown (the aged-listing tie-out) is preferred for
+    the "extra_detail" slot when present; movement_breakdown (the net-
+    movement-by-contact view every OTHER control account gets instead)
+    fills the same slot when there's no aged listing to show - a control
+    account always has one or the other, never both, so nothing is lost
+    picking whichever is populated."""
+    breakdown, breakdown_label = result.breakdown, result.breakdown_label
+    if breakdown is None or breakdown.empty:
+        breakdown, breakdown_label = result.movement_breakdown, result.movement_breakdown_label
+    return {
+        "name": f"{result.account_code} – {result.account_name}", "status": result.status, "message": result.message,
+        "detail": _df_to_records(result.schedule),
+        "extra_detail": _df_to_records(breakdown),
+        "extra_detail_label": breakdown_label,
+        "matched_detail": _df_to_records(result.extra_detail),
+        "matched_detail_label": result.extra_detail_label,
+    }
+
+
 @app.post("/jobs/{job_id}/vat-recon/run")
 def run_vat_reconciliation(job_id: str, user: dict = Depends(auth.current_user_dep)):
     """Computes the VAT Reconciliation independently of the main Generate
@@ -449,6 +474,63 @@ def run_paye_reconciliation(job_id: str, user: dict = Depends(auth.current_user_
     job["paye_recon_computed_at"] = datetime.now(timezone.utc).isoformat()
     storage.save_job(job)
     return RedirectResponse(f"/jobs/{job_id}#paye-recon", status_code=303)
+
+
+@app.post("/jobs/{job_id}/control-accounts/run")
+def run_control_accounts(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Computes Control Account rollforwards independently of the main
+    Generate pipeline, same "test this section on its own" treatment as
+    VAT/PAYE Reconciliation above - reuses whatever Trial Balance/Nominal
+    Activity/Aged Debtors/Aged Creditors uploads are already confirmed
+    for this job rather than needing uploads of its own (see
+    app/control_accounts.py)."""
+    job, client = _authorize_job(user, job_id)
+    data = _load_canonical_data(job)
+    template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
+    materiality, _ = _job_materiality(template)
+    results = control_accounts.build_all_rollforwards(
+        data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
+        data.get("aged_debtors"), data.get("aged_creditors"), materiality,
+    )
+    miscoding = control_accounts.suggest_control_account_miscoding(
+        data.get("tb_current"), data.get("nominal_current"),
+        [(r.account_code, r.account_name) for r in results],
+        data.get("aged_debtors"), data.get("aged_creditors"), materiality,
+    )
+    job["control_accounts_results"] = [_control_account_result_to_dict(r) for r in results] + [_recon_result_to_dict(miscoding)]
+    job["control_accounts_computed_at"] = datetime.now(timezone.utc).isoformat()
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#control-accounts", status_code=303)
+
+
+@app.post("/jobs/{job_id}/debtors-creditors/run")
+def run_debtors_creditors_recon(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Computes the aged debtors/creditors listing vs Trial Balance
+    control-account check independently of the main Generate pipeline,
+    same "test this section on its own" treatment as VAT/PAYE
+    Reconciliation and Control Accounts above - reuses whatever Aged
+    Debtors/Aged Creditors/Trial Balance uploads are already confirmed
+    for this job (see recon.debtors_creditors_control_recon)."""
+    job, client = _authorize_job(user, job_id)
+    data = _load_canonical_data(job)
+    template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
+    materiality, _ = _job_materiality(template)
+    results = [
+        recon.debtors_creditors_control_recon(
+            data.get("aged_debtors"), data.get("tb_current"),
+            ["debtors control", "trade debtors", "accounts receivable", "sales ledger control"],
+            "customer", "Debtors control account reconciliation", materiality,
+        ),
+        recon.debtors_creditors_control_recon(
+            data.get("aged_creditors"), data.get("tb_current"),
+            ["creditors control", "trade creditors", "accounts payable", "purchase ledger control"],
+            "supplier", "Creditors control account reconciliation", materiality,
+        ),
+    ]
+    job["debtors_creditors_results"] = [_recon_result_to_dict(r) for r in results]
+    job["debtors_creditors_computed_at"] = datetime.now(timezone.utc).isoformat()
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#debtors-creditors", status_code=303)
 
 
 @app.post("/clients/{client_id}/notes/{report_type}")
@@ -836,6 +918,20 @@ def _period_start(job: dict) -> date | None:
     return date.fromisoformat(start) if start else None
 
 
+def _job_materiality(template: dict | None) -> tuple[float, float]:
+    """(materiality, variance_pct_threshold) from a template's own config
+    (storage.DEFAULT_TEMPLATE_CONFIG's "materiality" block), falling back
+    to each check module's own constant when there's no template or no
+    override set. Shared by the full Generate pipeline and every
+    standalone per-section "Run" route (VAT/PAYE/Control Accounts/
+    Debtors & Creditors/...), so a template's chosen threshold reaches a
+    section whether it's tested on its own or as part of a full run."""
+    materiality_cfg = template["config"].get("materiality", {}) if template else {}
+    materiality = float(materiality_cfg.get("default_amount", recon.MATERIALITY_AMOUNT))
+    variance_pct_threshold = float(materiality_cfg.get("variance_pct_threshold", recon.VARIANCE_PCT_THRESHOLD))
+    return materiality, variance_pct_threshold
+
+
 def _build_ct_computation(job: dict, data: dict, materiality: float = corporation_tax.MATERIALITY_AMOUNT) -> corporation_tax.CTComputation | None:
     pl = data.get("pl_current")
     if pl is None or pl.empty:
@@ -945,9 +1041,7 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
         return record({"step": n, "total": total, "label": GENERATE_STEPS[n - 1], "status": status, **extra})
 
     template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
-    materiality_cfg = template["config"].get("materiality", {}) if template else {}
-    materiality = float(materiality_cfg.get("default_amount", recon.MATERIALITY_AMOUNT))
-    variance_pct_threshold = float(materiality_cfg.get("variance_pct_threshold", recon.VARIANCE_PCT_THRESHOLD))
+    materiality, variance_pct_threshold = _job_materiality(template)
 
     def _step1():
         step_data = _load_canonical_data(job)

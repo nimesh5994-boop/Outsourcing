@@ -356,6 +356,47 @@ def test_full_workbook_builds_and_saves(tmp_path, canonical_data):
     assert len(reopened.sheetnames) > 10
 
 
+def test_full_workbook_falls_back_gracefully_for_generic_mapped_nominal_activity(tmp_path):
+    """Regression test for a real crash: nominal_current parsed through
+    the generic column-mapping path (QBO/Sage/manual export, or any Xero
+    file whose columns didn't structurally match the native parser) has
+    no contra_code/contra_name/contra_needs_review columns at all - those
+    only exist when xero_reports.parse_account_transactions derived them
+    from a genuine Xero "Account Transactions" export. The formula-linked
+    nominal matrix sheet builder assumes they're always present and used
+    to raise a bare KeyError deep inside nominal_matrix._label_rows the
+    moment ANY nominal activity was supplied, taking down the entire
+    workbook build - not just that one schedule. build_workbook must
+    instead fall back to the plain (non-formula) matrix sheet, the same
+    way nominal_matrix.build_matrix itself already degrades to "n/a"
+    rather than crash."""
+    tb_current = pd.DataFrame([
+        {"account_code": "1100", "account_name": "DEBTORS CONTROL", "account_type": "Current Asset", "debit": 5000.0, "credit": 0.0, "balance": 5000.0},
+    ])
+    nominal_current = pd.DataFrame([
+        {"date": pd.Timestamp("2025-06-01"), "account_code": "1100", "account_name": "DEBTORS CONTROL",
+         "reference": "INV-1", "description": "Sale", "contact": "Acme Ltd", "source_type": "Invoice",
+         "debit": 5000.0, "credit": 0.0},
+    ])
+    assert "contra_code" not in nominal_current.columns  # the exact condition that used to crash
+
+    data = {"tb_current": tb_current, "tb_comparative": None, "nominal_current": nominal_current}
+    results = recon.run_all_recons(data)
+    mx_results = nominal_matrix.build_all_matrices(tb_current, nominal_current)
+    assert mx_results and mx_results[0].status == "n/a"  # the Python-computed path already degrades correctly
+
+    wb = build_workbook(
+        "Generic Mapping Client Ltd", "Year ended 31 December 2025", "Year ended 31 December 2024",
+        data, results, matrix_results=mx_results,
+    )
+    out = tmp_path / "generic_mapping_working_paper.xlsx"
+    wb.save(out)  # would have raised KeyError('contra_code') before the fix
+
+    reopened = openpyxl.load_workbook(out)
+    assert "Index" in reopened.sheetnames
+    assert any("Analysis" in s for s in reopened.sheetnames)
+
+
 def test_full_workbook_includes_anomaly_and_compliance_checks(tmp_path, canonical_data):
     results = (
         recon.run_all_recons(canonical_data)
