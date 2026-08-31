@@ -1393,7 +1393,18 @@ job page - the Fixed Asset Register test also confirms a disposed asset
 from a real upload is correctly excluded from the still-held schedule,
 the regression case for the "Disposed?" text-column bug above), and
 - with a mocked Anthropic client - an AI-assisted note actually reaching the downloaded
-workbook end to end), the Practice/Clients/Client/Job breadcrumb chain
+workbook end to end), the Nominal Analysis Matrix and Accruals &
+Prepayments schedule through a full Generate run (neither has a
+standalone section - see below - so this drives the whole pipeline: a
+Xero-native "Account Transactions" export with 14 rows against one
+account exercises the OTHER-bucket top-10 cap, a multi-code-split
+"and N more" related-account entry, an unallocated entry, and a
+dominant-history suggestion, alongside a clean single-row account as an
+"ok" contrast; a generic-mapped TB/nominal activity pair exercises
+Accruals & Prepayments' prepayment/accrual discovery and its exclude-
+keyword logic - an "Accrued Expenses" account that's actually a VAT
+account correctly left out of the schedule entirely), the Practice/
+Clients/Client/Job breadcrumb chain
 and the job page's sticky section-jump nav (see "Navigation" above), and
 the access-control model (signup, login, wrong
 password, unauthenticated redirect, a preparer scoped to only their

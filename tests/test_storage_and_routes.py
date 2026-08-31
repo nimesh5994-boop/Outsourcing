@@ -1096,6 +1096,157 @@ def test_vat_reconciliation_cash_basis_combination_matching_through_http(http_cl
     assert box4["matched_detail"][0]["Filed reference"] == "PINV-1; PINV-2"
 
 
+def _make_nominal_matrix_gl_workbook() -> bytes:
+    """A Xero-native 'Account Transactions' export with two sections:
+    'Repairs and Maintenance' (the nominal matrix's subject, 14 rows
+    exercising the OTHER-bucket top-10 cap, a multi-code-split 'and N
+    more' related-account entry, an unallocated entry, and a contact with
+    a dominant allocation history for the suggestion engine) and 'Motor
+    Expenses' (one clean row, a contrast that should come back "ok")."""
+    from datetime import datetime as _dt
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Account Transactions"
+    ws.append(["Account Transactions"])
+    ws.append(["Matrix Test Co"])
+    ws.append(["For the period 1 January 2025 to 31 December 2025"])
+    ws.append(["Date", "Source", "Contact", "Contact Group", "Description", "Invoice Number", "Reference",
+                "Debit", "Credit", "Running Balance", "Gross", "Net", "VAT", "VAT Rate", "VAT Rate Name",
+                "Account Code", "Account Type", "Related account"])
+
+    def row(date, contact, ref, debit, code, related):
+        ws.append([date, "Spend Money", contact, None, contact, None, ref, debit, 0, None, None, None, None,
+                    None, "No VAT", code, "Overhead", related])
+
+    ws.append(["Repairs and Maintenance"])
+    row(_dt(2025, 2, 1), "Fix It Ltd", "R-1", 600, "6200", "1200 - Bank Current Account")
+    row(_dt(2025, 3, 1), "Fix It Ltd", "R-2", 620, "6200", "1200 - Bank Current Account")
+    row(_dt(2025, 4, 1), "Fix It Ltd", "R-3", 550, "6200", "")  # unallocated
+    row(_dt(2025, 4, 15), "Mixed Vendor", "R-4", 700, "6200",
+        "1200 - Bank Current Account, 1250 - Petty Cash and 2 more")  # multi-code split
+    suppliers = [
+        ("Alpha Supplies", 5000), ("Bravo Supplies", 4500), ("Charlie Supplies", 4000), ("Delta Supplies", 3500),
+        ("Echo Supplies", 3000), ("Foxtrot Supplies", 2500), ("Golf Supplies", 2000), ("Hotel Supplies", 1500),
+        ("India Supplies", 1000),
+    ]
+    for i, (name, amount) in enumerate(suppliers):
+        row(_dt(2025, 5, 1 + i), name, f"S-{i}", amount, "6200", f"30{i:02d} - {name} Contra")
+    row(_dt(2025, 6, 1), "Juliet Supplies", "S-J", 800, "6200", "3010 - Juliet Supplies Contra")
+    ws.append(["Total Repairs and Maintenance", None, None, None, None, None, None, 0, 0, 0, 0, 0, 0, None, None, None, None, None])
+
+    ws.append(["Motor Expenses"])
+    row(_dt(2025, 3, 10), "Motor Supplies Ltd", "M-1", 300, "6300", "1200 - Bank Current Account")
+    ws.append(["Total Motor Expenses", None, None, None, None, None, None, 0, 0, 0, 0, 0, 0, None, None, None, None, None])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_nominal_matrix_and_accruals_prepayments_through_full_generate(http_client):
+    """Neither Nominal Analysis Matrix nor Accruals & Prepayments has a
+    standalone run-on-its-own section (unlike VAT/PAYE/Control Accounts/
+    Debtors & Creditors/FAR/Bank) - both only run inside the full Generate
+    pipeline, so this drives that pipeline end to end rather than a
+    dedicated "Run" route. Nominal Matrix needs Xero-native nominal
+    activity specifically (contra_code/contra_name/contra_needs_review -
+    see app/nominal_matrix.py's own docstring on why generic-mapped
+    uploads can't produce this schedule); Accruals & Prepayments works
+    off ordinary generic-mapped TB/nominal activity."""
+    c = http_client
+    practice_id = _signup(c, admin_email="matrix-accruals@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Matrix Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+        "comparative_period_start": "2024-01-01", "comparative_period_end": "2024-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "nominal_activity"},
+        files={"files": ("gl.xlsx", _make_nominal_matrix_gl_workbook(), "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    from openpyxl import Workbook
+
+    def _make_tb(rows):
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Account Code", "Account Name", "Account Type", "Debit", "Credit"])
+        for r in rows:
+            ws.append(r)
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
+    tb_current = _make_tb([
+        ["6200", "Repairs and Maintenance", "Overhead", 30270, 0],
+        ["6300", "Motor Expenses", "Overhead", 300, 0],
+        ["1400", "Prepaid Insurance", "Prepayment", 2000, 0],
+        ["1410", "Prepaid Rent", "Prepayment", 1200, 0],
+        ["2400", "Accrued Expenses", "Current Liability", 0, 800],
+        ["2410", "Accruals - Other", "Current Liability", 0, 1200],
+        ["2420", "Accrued Expenses - VAT", "Current Liability", 0, 300],
+    ])
+    tb_comparative = _make_tb([
+        ["1400", "Prepaid Insurance", "Prepayment", 1500, 0],
+        ["1410", "Prepaid Rent", "Prepayment", 2000, 0],
+        ["2400", "Accrued Expenses", "Current Liability", 0, 600],
+        ["2410", "Accruals - Other", "Current Liability", 0, 1000],
+    ])
+    # Explicit period on confirm - a bare TB has no date column for
+    # guess_period to key off, and its "second upload of this type is
+    # probably comparative" fallback only kicks in once the FIRST is
+    # already confirmed, which it isn't yet when both are uploaded
+    # back to back before either is confirmed.
+    _upload_and_confirm_with_period(c, job_id, "trial_balance", "tb.xlsx", tb_current, "current")
+    _upload_and_confirm_with_period(c, job_id, "trial_balance", "tb_comparative.xlsx", tb_comparative, "comparative")
+    _confirm_all_pending_uploads(c, job_id)
+
+    resp = c.post(f"/jobs/{job_id}/generate", follow_redirects=False)
+    assert resp.status_code == 303
+
+    from app import storage
+    job = storage.get_job(job_id)
+    summary_by_name = {row["name"]: row for row in job["summary"]}
+
+    ap = summary_by_name["Accruals & Prepayments schedule"]
+    assert ap["status"] == "review"
+    assert "Accrued Expenses - VAT" not in ap["message"]  # excluded (accrued expenses that's actually a VAT account)
+
+    sugg = summary_by_name["Nominal activity - suggested allocations for unallocated transactions"]
+    assert sugg["status"] == "review"
+
+    resp = c.get(f"/jobs/{job_id}/download")
+    assert resp.status_code == 200
+    import openpyxl as _openpyxl
+    wb_out = _openpyxl.load_workbook(io.BytesIO(resp.content))
+    matrix_sheet_name = next(n for n in wb_out.sheetnames if "Repairs and Maintenance" in n)
+    ws_matrix = wb_out[matrix_sheet_name]
+    rows_out = list(ws_matrix.iter_rows(values_only=True))
+
+    status_row_text = rows_out[4][0]
+    assert "REVIEW" in status_row_text
+    assert "multi-code split" in status_row_text
+    assert "550" in status_row_text
+    assert "folded into" in status_row_text
+
+    header_row = next(r for r in rows_out if r and "TOTAL" in [str(c) for c in r])
+    headers = [str(c) for c in header_row if c is not None]
+    assert "1200 - Bank Current Account" in headers, "Bank Current Account should survive as its own top-10 column"
+    assert "OTHER (see nominal activity detail)" in headers, "expected an OTHER column given >10 distinct contra labels"
+
+    motor_sheet_name = next(n for n in wb_out.sheetnames if "Motor Expenses" in n)
+    motor_rows = list(wb_out[motor_sheet_name].iter_rows(values_only=True))
+    assert "OK" in motor_rows[4][0]
+
+
 def _make_payroll_gl_workbook() -> bytes:
     """A minimal but genuinely Xero-native 'Account Transactions' export
     (title rows + one section per account + a Total row per section,
