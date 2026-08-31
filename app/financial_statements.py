@@ -33,6 +33,13 @@ class StatementResult:
     message: str
     statement: pd.DataFrame = field(default_factory=pd.DataFrame)
     net_profit: float = 0.0
+    # Balance Sheet accounts whose Account Type this system doesn't
+    # recognize as one of the five categories above - silently excluded
+    # from every total on the statement (assets, liabilities, AND equity),
+    # so a nonzero one is almost always the reason CHECK isn't zero. Named
+    # explicitly here rather than left for a preparer to spot by scanning
+    # the Category column of every row.
+    unrecognized_detail: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def build_pl_statement(pl: pd.DataFrame) -> StatementResult:
@@ -86,6 +93,27 @@ def build_bs_statement(bs: pd.DataFrame, net_profit: float, materiality: float =
              f"(wrong Account Type in the source data), or a B/S movement not captured in the TB supplied."
     )
 
+    # Accounts with an Account Type outside the five recognised categories
+    # are excluded from EVERY total above (assets, liabilities, and
+    # equity alike) - not just one side of the check - so a nonzero one is
+    # almost always the concrete cause of a gap, not just "some account
+    # somewhere". Named explicitly rather than left for the preparer to
+    # find by scanning the Category column of every row on the sheet.
+    known_categories = _BS_FIXED_ASSETS | _BS_CURRENT_ASSETS | _BS_CURRENT_LIABILITIES | _BS_LONG_TERM_LIABILITIES | _BS_EQUITY
+    unrecognized = bs.loc[~cat.isin(known_categories) & (bs["amount"].round(2) != 0)]
+    unrecognized_detail = pd.DataFrame()
+    if not unrecognized.empty:
+        unrecognized_detail = unrecognized[["account_code", "account_name", "category", "amount"]].rename(columns={
+            "account_code": "Account Code", "account_name": "Account Name", "category": "Category", "amount": "Amount",
+        }).sort_values("Amount", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
+        names = ", ".join(unrecognized_detail["Account Name"].head(3).astype(str))
+        more = f" (+{len(unrecognized_detail) - 3} more)" if len(unrecognized_detail) > 3 else ""
+        message += (
+            f" {len(unrecognized_detail)} account(s) have an Account Type this system doesn't recognise as "
+            f"Fixed Asset/Current Asset/Bank/Current Liability/Liability/Equity, and are excluded from every "
+            f"total above (not just one side of the check) - likely cause: {names}{more}. See the detail below."
+        )
+
     rows = [
         {"Line": "Fixed assets", "Amount": round(fixed_assets, 2)},
         {"Line": "Current assets", "Amount": round(current_assets, 2)},
@@ -99,4 +127,4 @@ def build_bs_statement(bs: pd.DataFrame, net_profit: float, materiality: float =
         {"Line": "TOTAL EQUITY", "Amount": round(-total_equity, 2)},
         {"Line": "CHECK: Net Assets - Total Equity (should be £0)", "Amount": check},
     ]
-    return StatementResult(status, message, pd.DataFrame(rows), net_profit)
+    return StatementResult(status, message, pd.DataFrame(rows), net_profit, unrecognized_detail)

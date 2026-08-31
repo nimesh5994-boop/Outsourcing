@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 
 pytest.importorskip("formulas")
 import formulas  # noqa: E402
@@ -202,6 +202,53 @@ def test_pl_bs_formulas_match_python_ground_truth_and_tie_out(tmp_path, canonica
 
     check_row = bs_line_to_row["CHECK: Net Assets - Total Equity (should be £0)"]
     assert _cell(sol, out.name, bs_sheet_name, f"B{check_row}") == pytest.approx(0.0, abs=0.01)
+
+
+def test_bs_statement_formulas_render_unrecognised_category_note(tmp_path):
+    # a Suspense-type account outside the five recognised B/S categories -
+    # excluded from every SUMPRODUCT total, so the CHECK row shows a real
+    # gap - and the note/table naming it should be written into the sheet
+    # without disturbing the DETAIL BY ACCOUNT formulas below it
+    bs = pd.DataFrame([
+        {"account_code": "1", "account_name": "Bank", "category": "Current Asset", "amount": 5000.0},
+        {"account_code": "2", "account_name": "Share Capital", "category": "Equity", "amount": -100.0},
+        {"account_code": "3", "account_name": "Retained Earnings", "category": "Equity", "amount": -9900.0},
+        {"account_code": "4", "account_name": "Suspense Account", "category": "Unclassified", "amount": 5000.0},
+    ])
+    bs_result = fs.build_bs_statement(bs, net_profit=0.0)
+    assert bs_result.status == "review"
+    assert not bs_result.unrecognized_detail.empty
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, {"bs_current": bs})
+    bs_sheet_name = build_bs_statement_sheet_formulas(
+        wb, "Test Client Ltd", "Year ended 31 December 2025", "1", bs_result, refs, None, None,
+    )
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / "bs_unrecognised_category.xlsx"
+    wb.save(out)
+
+    sol = _evaluate(out)
+    errors = [k for k, v in sol.items() if f"[{out.name}]{bs_sheet_name.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value))]
+    assert not errors, f"formula errors on {bs_sheet_name}: {errors}"
+
+    bs_line_to_row = {line: 8 + i for i, line in enumerate(bs_result.statement["Line"])}
+    check_row = bs_line_to_row["CHECK: Net Assets - Total Equity (should be £0)"]
+    assert _cell(sol, out.name, bs_sheet_name, f"B{check_row}") == pytest.approx(-5000.0, abs=0.01)
+
+    ws = load_workbook(out)[bs_sheet_name]
+    found_note = any(cell.value and "UNRECOGNISED ACCOUNT TYPE" in str(cell.value) for row in ws.iter_rows() for cell in row)
+    found_account_name = any(cell.value == "Suspense Account" for row in ws.iter_rows() for cell in row)
+    found_amount = any(cell.value == 5000.0 for row in ws.iter_rows() for cell in row)
+    assert found_note, "unrecognised-account note not written to the sheet"
+    assert found_account_name, "Suspense Account not named in the unrecognised-account detail table"
+    assert found_amount, "the unrecognised account's £5,000 amount not written to the detail table"
+
+    # DETAIL BY ACCOUNT still lists every account, including the
+    # unrecognised one - the note is additive, not a replacement
+    detail_labels = [cell.value for row in ws.iter_rows() for cell in row if cell.value == "DETAIL BY ACCOUNT"]
+    assert detail_labels, "DETAIL BY ACCOUNT header missing after the unrecognised-account note block"
 
 
 def _fa_tb_row(code, name, account_type, debit, credit):

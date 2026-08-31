@@ -764,6 +764,16 @@ def build_bs_statement_sheet_formulas(
             ws.cell(row=r, column=c).fill = PatternFill("solid", fgColor=AMBER)
 
     r += 2
+    if bs_result.unrecognized_detail is not None and not bs_result.unrecognized_detail.empty:
+        # Points straight at the account(s) most likely causing the gap
+        # above, instead of leaving a preparer to scan every row of
+        # DETAIL BY ACCOUNT for an unrecognised Category value.
+        note_cell = ws.cell(row=r, column=1, value="ACCOUNTS WITH AN UNRECOGNISED ACCOUNT TYPE (excluded from every total above)")
+        note_cell.font = SCHEDULE_FONT
+        note_cell.fill = PatternFill("solid", fgColor=AMBER)
+        ws.merge_cells(start_row=r, start_column=1, end_row=r, end_column=4)
+        r = _write_dataframe(ws, bs_result.unrecognized_detail, start_row=r + 1) + 1
+
     ws.cell(row=r, column=1, value="DETAIL BY ACCOUNT").font = SCHEDULE_FONT
     r += 1
     detail_headers = ["Account Code", "Account Name", "Category", "Amount"]

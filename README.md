@@ -270,7 +270,7 @@ PDF, in any order), and the system works out what each one is:
 | Check | What it does |
 |---|---|
 | TB self-balance | Debits = credits for both years |
-| Balance Sheet balance check | Net Assets vs Total Equity, with the current year's profit/(loss) explicitly bridged in (it isn't closed to retained earnings in the TB itself) - shown on the B/S sheet, not just the Index |
+| Balance Sheet balance check | Net Assets vs Total Equity, with the current year's profit/(loss) explicitly bridged in (it isn't closed to retained earnings in the TB itself) - shown on the B/S sheet, not just the Index. Any account whose Account Type this system doesn't recognise as one of the five B/S categories is named explicitly as a likely cause, since it's excluded from every total, not just one side of the check |
 | Variance analysis | Every nominal code, current vs comparative, flagged if it moves >10% and >£500 |
 | Nominal activity review | Flags suspense postings, round-sum manual journals, and descriptions that read like pending corrections |
 | Debtors/creditors control recon | Aged listing total vs TB control account balance, with the full client-wise listing (every customer/supplier, every ageing bucket, exactly as submitted) attached |
@@ -1181,7 +1181,16 @@ role and database) to run it.
   Liability/Equity) holds for every account - a genuinely miscategorised
   account in the source TB will show up as an unexplained gap in the
   check, which is the intended behaviour (it's real, not a false
-  positive), but the message doesn't yet point at which specific account.
+  positive). When the miscategorisation is an Account Type this system
+  doesn't recognise as one of the five B/S categories at all (rather than
+  a P&L account wrongly typed as a B/S one, which still balances
+  correctly on the wrong side and can't be told apart from a genuine
+  reclassification), `financial_statements.build_bs_statement` now names
+  the specific account(s) responsible - they're excluded from every total
+  on the statement, not just one side of the check, so a nonzero one is
+  almost always the concrete cause. Surfaced in the check's own message
+  and as a highlighted detail table on the generated Balance Sheet sheet
+  (`StatementResult.unrecognized_detail`).
 - **Bank movement analysis** (a receipts/payments-style matrix, like the
   bank schedules in a full audit file) needs a separate Xero bank
   transactions export - not built yet, no sample data to build it against.

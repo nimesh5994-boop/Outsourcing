@@ -142,6 +142,43 @@ def test_balance_sheet_check_flags_a_genuine_gap():
     assert "does not balance" in result.message
 
 
+def test_balance_sheet_check_names_the_account_with_an_unrecognised_category():
+    # an account whose Account Type doesn't map to any of the five
+    # recognised B/S categories vanishes from every total (assets,
+    # liabilities, AND equity alike) - the check should name it, not just
+    # report an unexplained gap
+    bs = pd.DataFrame([
+        # deliberately balances to zero WITHOUT the Suspense account below -
+        # so its exclusion is the entire, exact cause of the gap
+        {"account_code": "1", "account_name": "Bank", "category": "Current Asset", "amount": 5000.0},
+        {"account_code": "2", "account_name": "Share Capital", "category": "Equity", "amount": -100.0},
+        {"account_code": "3", "account_name": "Retained Earnings", "category": "Equity", "amount": -9900.0},
+        # a genuinely mistyped Account Type in the source data - not one of
+        # Fixed Asset/Current Asset/Bank/Current Liability/Liability/Equity
+        {"account_code": "4", "account_name": "Suspense Account", "category": "Unclassified", "amount": 5000.0},
+    ])
+    result = financial_statements.build_bs_statement(bs, net_profit=0.0)
+    assert result.status == "review"
+    assert "Suspense Account" in result.message
+    assert "doesn't recognise" in result.message
+    assert not result.unrecognized_detail.empty
+    assert list(result.unrecognized_detail["Account Name"]) == ["Suspense Account"]
+    assert result.unrecognized_detail.iloc[0]["Amount"] == pytest.approx(5000.0)
+
+
+def test_balance_sheet_check_ignores_a_zero_balance_unrecognised_account():
+    # a zero-balance account with an odd category isn't contributing to
+    # any gap - no point flagging it
+    bs = pd.DataFrame([
+        {"account_code": "1", "account_name": "Bank", "category": "Current Asset", "amount": 10000.0},
+        {"account_code": "2", "account_name": "Share Capital", "category": "Equity", "amount": -10000.0},
+        {"account_code": "3", "account_name": "Dormant Suspense", "category": "Unclassified", "amount": 0.0},
+    ])
+    result = financial_statements.build_bs_statement(bs, net_profit=0.0)
+    assert result.status == "ok"
+    assert result.unrecognized_detail.empty
+
+
 def _fa_tb_row(code, name, account_type, debit, credit):
     return {"account_code": code, "account_name": name, "account_type": account_type,
             "debit": debit, "credit": credit, "balance": debit - credit}
