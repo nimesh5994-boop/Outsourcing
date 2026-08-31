@@ -1432,6 +1432,55 @@ def test_bank_reconciliation_standalone_run_through_http(http_client):
     assert "BANK CURRENT ACCOUNT" in resp.text
 
 
+def test_navigation_breadcrumbs_and_section_nav(http_client):
+    """The Practice -> Clients -> Client -> Job breadcrumb chain, and the
+    job page's sticky jump-link section nav - added after real user
+    feedback that opening a client and going into a job left no way to
+    move back up or jump between the many standalone-check sections
+    without scrolling. Every level of the practice hierarchy should
+    carry a breadcrumb back to its parent; the job page additionally
+    gets a "Back to {client}" link and a jump-nav bar across every
+    standalone section plus the source-documents upload area."""
+    c = http_client
+    practice_id = _signup(c, admin_email="nav@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Nav Test Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.get(f"/practices/{practice_id}")
+    assert resp.status_code == 200
+    assert 'class="breadcrumb"' in resp.text
+
+    resp = c.get(f"/practices/{practice_id}/clients")
+    assert resp.status_code == 200
+    assert 'class="breadcrumb"' in resp.text
+    assert f'href="/practices/{practice_id}"' in resp.text
+
+    resp = c.get(f"/clients/{client_id}")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'class="breadcrumb"' in html
+    assert f'href="/practices/{practice_id}"' in html
+    assert f'href="/practices/{practice_id}/clients"' in html
+    assert "Nav Test Client" in html
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    html = resp.text
+    assert 'class="breadcrumb"' in html
+    assert f'href="/practices/{practice_id}"' in html
+    assert f'href="/practices/{practice_id}/clients"' in html
+    assert f'href="/clients/{client_id}"' in html
+    assert "Back to Nav Test Client" in html
+    assert 'class="section-nav"' in html
+    for anchor in ("#generate", "#vat-recon", "#paye-recon", "#control-accounts",
+                   "#debtors-creditors", "#fixed-asset-register", "#bank-recon", "#source-documents"):
+        assert f'href="{anchor}"' in html
+
+
 def test_debtors_creditors_standalone_run_through_http(http_client):
     """Debtors & Creditors as its own standalone section, same treatment
     as Control Accounts above - the aged listing vs Trial Balance control

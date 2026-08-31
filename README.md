@@ -29,6 +29,27 @@ the default, and every client created under that practice inherits it
 (overridable per client). Each client is then processed job-by-job,
 period-by-period, building up history over time.
 
+## Navigation
+
+Every page in the Practice → Client → Job hierarchy carries a breadcrumb
+back to its parents (`base.html`, driven by a `breadcrumbs` list each
+route passes in) - added after real usage feedback that opening a client
+and going into a job left no way to move back up without the browser's
+own back button. The job page additionally gets a "← Back to {client}"
+link at the top, matching the pattern the client and clients-list pages
+already used.
+
+The job page itself is the one page in the system with many independent
+sections on it (Generate, VAT/PAYE/Control Accounts/Debtors & Creditors/
+Fixed Asset Register/Bank Reconciliation, then every report type's
+upload area) - a sticky jump-link bar (`.section-nav`, pinned to the top
+of the viewport on scroll) sits right below the breadcrumb with one link
+per section, so any one of them is one click away regardless of how far
+down the page it sits. The standalone-check cards and the upload cards
+are also visually split into two labelled groups ("Reconciliation checks
+— run independently, any time" and "Source documents — uploads by report
+type") so it's clear which cards run a check and which just hold a file.
+
 ## Access control
 
 Every user belongs to exactly one practice, with one of three roles:
@@ -1315,7 +1336,9 @@ job page - the Fixed Asset Register test also confirms a disposed asset
 from a real upload is correctly excluded from the still-held schedule,
 the regression case for the "Disposed?" text-column bug above), and
 - with a mocked Anthropic client - an AI-assisted note actually reaching the downloaded
-workbook end to end), and the access-control model (signup, login, wrong
+workbook end to end), the Practice/Clients/Client/Job breadcrumb chain
+and the job page's sticky section-jump nav (see "Navigation" above), and
+the access-control model (signup, login, wrong
 password, unauthenticated redirect, a preparer scoped to only their
 granted clients, a manager blocked from user management, and cross-
 practice access denied) against a real (throwaway) Postgres schema

@@ -17,6 +17,14 @@
     </span>
     {% endif %}
   </header>
+  {% if breadcrumbs %}
+  <nav class="breadcrumb">
+    {% for crumb in breadcrumbs %}
+    {% if crumb.url and not loop.last %}<a href="{{ crumb.url }}">{{ crumb.label }}</a><span class="crumb-sep">&rsaquo;</span>
+    {% else %}<span class="crumb-current">{{ crumb.label }}</span>{% endif %}
+    {% endfor %}
+  </nav>
+  {% endif %}
   <main>
     {% block content %}{% endblock %}
   </main>

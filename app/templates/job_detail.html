@@ -51,7 +51,19 @@
 {% endmacro %}
 
 {% block content %}
+<nav class="section-nav">
+  <a href="#generate">Generate</a>
+  <a href="#vat-recon">VAT</a>
+  <a href="#paye-recon">PAYE</a>
+  <a href="#control-accounts">Control Accounts</a>
+  <a href="#debtors-creditors">Debtors &amp; Creditors</a>
+  <a href="#fixed-asset-register">Fixed Assets</a>
+  <a href="#bank-recon">Bank</a>
+  <a href="#source-documents" class="muted-link">Source Documents &darr;</a>
+</nav>
+
 <div class="card">
+  <p class="muted"><a href="/clients/{{ client.id }}">&larr; Back to {{ client.name }}</a></p>
   <h1>{{ job.client_name }} &mdash; {{ job.current_label }}</h1>
   <p class="muted">Current period: {{ job.current_period_start }} to {{ job.current_period_end }}
     {% if job.comparative_period_end %} | Comparative period: {{ job.comparative_period_start }} to {{ job.comparative_period_end }}{% else %} | No comparative period set{% endif %}
@@ -75,7 +87,7 @@
   {% endif %}
 </div>
 
-<div class="card">
+<div class="card" id="generate">
   <h2>Generate</h2>
   <a class="button" href="/jobs/{{ job.id }}/generate/progress">Generate working paper</a>
   <p class="muted">You can generate at any time &mdash; unconfirmed uploads are skipped, so any report type you haven't provided just shows as "no data" on its schedule. Shows live progress through the ten build steps.</p>
@@ -106,6 +118,8 @@
   </details>
   {% endif %}
 </div>
+
+<h2 class="section-group-heading">Reconciliation checks &mdash; run independently, any time</h2>
 
 <div class="card" id="vat-recon">
   <h2>VAT Reconciliation</h2>
@@ -320,6 +334,8 @@
 
   {{ render_standalone_results(job.bank_recon_results, job.bank_recon_computed_at) }}
 </div>
+
+<h2 class="section-group-heading" id="source-documents">Source documents &mdash; uploads by report type</h2>
 
 {% for rt in report_types %}
 <div class="card">

@@ -157,6 +157,7 @@ def practice_detail(request: Request, practice_id: str, user: dict = Depends(aut
     templates_list = storage.list_templates(practice_id)
     return templates.TemplateResponse("practice_detail.html", {
         "request": request, "current_user": user, "practice": practice, "templates_list": templates_list,
+        "breadcrumbs": [{"label": practice["name"]}],
     })
 
 
@@ -172,6 +173,7 @@ def practice_clients(request: Request, practice_id: str, user: dict = Depends(au
     return templates.TemplateResponse("practice_clients.html", {
         "request": request, "current_user": user, "practice": practice, "templates_list": templates_list,
         "clients": clients, "template_names": template_names,
+        "breadcrumbs": [{"label": practice["name"], "url": f"/practices/{practice_id}"}, {"label": "Clients"}],
     })
 
 
@@ -188,12 +190,13 @@ async def upload_template(practice_id: str, name: str = Form(...), file: UploadF
 @app.get("/practices/{practice_id}/templates/{template_id}")
 def template_detail(request: Request, practice_id: str, template_id: str, user: dict = Depends(auth.current_user_dep)):
     import json as _json
-    _authorize_practice(user, practice_id)
+    practice = _authorize_practice(user, practice_id)
     auth.require_role(user, "partner", "manager")
     template = storage.get_template(practice_id, template_id)
     return templates.TemplateResponse("template_detail.html", {
         "request": request, "current_user": user, "practice_id": practice_id, "template": template,
         "config_json": _json.dumps(template["config"], indent=2),
+        "breadcrumbs": [{"label": practice["name"], "url": f"/practices/{practice_id}"}, {"label": template["name"]}],
     })
 
 
@@ -237,7 +240,7 @@ def create_client(practice_id: str, name: str = Form(...), template_id: str = Fo
 
 @app.get("/practices/{practice_id}/users")
 def list_users(request: Request, practice_id: str, user: dict = Depends(auth.current_user_dep)):
-    _authorize_practice(user, practice_id)
+    practice = _authorize_practice(user, practice_id)
     auth.require_role(user, "partner")
     practice_users = storage.list_users(practice_id)
     clients = storage.list_clients(practice_id)
@@ -246,6 +249,7 @@ def list_users(request: Request, practice_id: str, user: dict = Depends(auth.cur
         "request": request, "current_user": user, "practice_id": practice_id,
         "practice_users": practice_users, "clients": clients, "access_by_user": access_by_user,
         "roles": auth.ROLES,
+        "breadcrumbs": [{"label": practice["name"], "url": f"/practices/{practice_id}"}, {"label": "Users"}],
     })
 
 
@@ -295,8 +299,14 @@ def delete_user(practice_id: str, user_id: str, user: dict = Depends(auth.curren
 def client_detail(request: Request, client_id: str, user: dict = Depends(auth.current_user_dep)):
     client = _authorize_client(user, client_id)
     jobs = storage.list_jobs(client_id)
+    practice = storage.get_practice(client["practice_id"])
     return templates.TemplateResponse("client_detail.html", {
         "request": request, "current_user": user, "client": client, "jobs": jobs,
+        "breadcrumbs": [
+            {"label": practice["name"], "url": f"/practices/{client['practice_id']}"},
+            {"label": "Clients", "url": f"/practices/{client['practice_id']}/clients"},
+            {"label": client["name"]},
+        ],
     })
 
 
@@ -319,6 +329,7 @@ def create_job(
 @app.get("/jobs/{job_id}")
 def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_user_dep)):
     job, client = _authorize_job(user, job_id)
+    practice = storage.get_practice(client["practice_id"])
     uploads_by_type = {rt: [] for rt in REPORT_TYPES}
     uploads_by_type.setdefault("", [])  # couldn't be classified at all
     for upload in job["uploads"].values():
@@ -332,6 +343,12 @@ def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_
         "progress_summary": _summarize_progress(job.get("progress")),
         "vat_recon_types": VAT_RECON_TYPES,
         "paye_recon_types": PAYE_RECON_TYPES,
+        "breadcrumbs": [
+            {"label": practice["name"], "url": f"/practices/{client['practice_id']}"},
+            {"label": "Clients", "url": f"/practices/{client['practice_id']}/clients"},
+            {"label": client["name"], "url": f"/clients/{client['id']}"},
+            {"label": job["current_label"]},
+        ],
     })
 
 
