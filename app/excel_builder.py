@@ -30,7 +30,7 @@ from app.financial_statements import (
     build_bs_statement,
     build_pl_statement,
 )
-from app.fixed_assets import AssetRegisterResult, FixedAssetResult, group_fixed_asset_codes
+from app.fixed_assets import STRAIGHT_LINE, AssetRegisterResult, FixedAssetResult, group_fixed_asset_codes
 from app.nominal_matrix import MatrixResult, build_matrix_row_groups
 from app.recon import MATERIALITY_AMOUNT, VARIANCE_PCT_THRESHOLD, ReconResult
 from app.xlformulas import cell_ref, literal, quote, sum_of_values, sumifs_exact
@@ -1019,6 +1019,168 @@ def build_matrix_sheet_formulas(
     return sheet_name
 
 
+def build_asset_register_sheet_formulas(
+    wb: Workbook, client_name: str, current_label: str, ref: str, result: AssetRegisterResult, refs: DataRefs,
+    header_cells: dict | None = None, materiality: float = MATERIALITY_AMOUNT,
+):
+    """Formula-linked version of the asset-level fixed asset register: each
+    still-held asset's cost, brought-forward accumulated depreciation and
+    depreciation rate are live SUMPRODUCT lookups against
+    DATA_FixedAssetRegister keyed on the asset's own Asset ID (unique per
+    row, same assumption a rollforward already has to make for the ID to
+    mean anything), and every downstream figure - this year's depreciation
+    charge, accumulated depreciation c/fwd, NBV b/fwd and c/fwd, and the
+    register-vs-TB total/variance in the summary block - recalculates from
+    those looked-up cells and from DATA_TB_Current rather than a
+    Python-computed literal.
+
+    Python still decides which assets are still held (parsing the
+    register's own free-text "Disposed?" column - see
+    _parse_disposed_flag - is exactly the kind of text decision this
+    codebase always keeps in Python, same as category grouping and contra
+    bucketing elsewhere) and which depreciation method applies
+    (straight_line vs reducing_balance, written as a plain value, same
+    treatment as the category-level sheet's "System est. method" column) -
+    the IF() branch on that Python-decided method is the only place this
+    sheet's formulas make a choice at all; the depreciation maths itself is
+    fully live, prorated by the same period_fraction Python used (embedded
+    as a literal - a per-job constant fixed for the whole generate() run,
+    not row data, so there's nothing for a formula to look up).
+
+    New additions and possible disposals (including the disposal asset-ID
+    suggestion) stay Python-computed values, same as the category-level
+    sheet's system-estimate columns - they're either not yet real register
+    entries (additions) or free-text advisory content (disposal
+    suggestions), neither is a number an Excel formula should derive."""
+    ws = wb.create_sheet(f"{ref} Fixed Asset Register"[:31])
+    row = _write_title(ws, client_name, current_label, "FIXED ASSET REGISTER (ASSET DETAIL)", ref, header_cells=header_cells)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
+    status_cell.font = _status_font(result.status)
+    status_cell.fill = _status_fill(result.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=8)
+    ws.row_dimensions[row].height = 30
+
+    r = row + 2
+    if result.asset_schedule.empty or refs.fixed_asset_register is None:
+        if not result.summary.empty:
+            r = _write_dataframe(ws, result.summary, start_row=r)
+        if not result.asset_schedule.empty:
+            ws.cell(row=r, column=1, value="ASSET SCHEDULE").font = SCHEDULE_FONT
+            r = _write_dataframe(ws, result.asset_schedule, start_row=r + 1)
+        if result.summary.empty and result.asset_schedule.empty:
+            ws.cell(row=r, column=1, value="No data available.")
+        ws.freeze_panes = f"A{row + 1}"
+        return
+
+    fa_id = refs.fixed_asset_register.col_range("asset_id")
+    fa_cost = refs.fixed_asset_register.col_range("cost")
+    fa_rate = refs.fixed_asset_register.col_range("depreciation_rate")
+    fa_acc_dep = refs.fixed_asset_register.col_range("accumulated_depreciation_b_fwd")
+
+    def lookup(value_range: str, asset_id) -> str:
+        return sumifs_exact(value_range, (fa_id, quote(asset_id)))
+
+    table_row = r + 2
+    headers = [
+        "Asset ID", "Description", "Category", "Date Acquired", "Cost", "Method", "Rate %",
+        "Acc. Dep. b/fwd", "Depreciation Charge", "Acc. Dep. c/fwd", "NBV b/fwd", "NBV c/fwd",
+    ]
+    for j, h in enumerate(headers):
+        ws.cell(row=table_row, column=1 + j, value=h)
+    _style_header_row(ws, table_row, len(headers))
+
+    first_data_row = table_row + 1
+    rr = first_data_row
+    for _, asset in result.asset_schedule.iterrows():
+        asset_id = asset["Asset ID"]
+        ws.cell(row=rr, column=1, value=asset_id).border = BORDER
+        ws.cell(row=rr, column=2, value=asset["Description"]).border = BORDER
+        ws.cell(row=rr, column=3, value=asset["Category"]).border = BORDER
+        ws.cell(row=rr, column=4, value=asset["Date Acquired"]).border = BORDER
+
+        cost_cell = ws.cell(row=rr, column=5, value=lookup(fa_cost, asset_id))
+        cost_cell.number_format = CURRENCY_FMT
+        cost_cell.border = BORDER
+        ws.cell(row=rr, column=6, value=asset["Method"]).border = BORDER
+        rate_cell = ws.cell(row=rr, column=7, value=lookup(fa_rate, asset_id))
+        rate_cell.border = BORDER
+        acc_dep_b_cell = ws.cell(row=rr, column=8, value=lookup(fa_acc_dep, asset_id))
+        acc_dep_b_cell.number_format = CURRENCY_FMT
+        acc_dep_b_cell.border = BORDER
+
+        cost_ref, method_ref, rate_ref, acc_dep_b_ref = f"E{rr}", f"F{rr}", f"G{rr}", f"H{rr}"
+        base = f"IF({method_ref}={quote(STRAIGHT_LINE)},{cost_ref},{cost_ref}-{acc_dep_b_ref})"
+        charge_cell = ws.cell(row=rr, column=9, value=f"=ROUND(MAX({base},0)*({rate_ref}/100)*{literal(result.period_fraction)},2)")
+        charge_cell.number_format = CURRENCY_FMT
+        charge_cell.border = BORDER
+
+        charge_ref = f"I{rr}"
+        acc_dep_c_cell = ws.cell(row=rr, column=10, value=f"=MIN({cost_ref},{acc_dep_b_ref}+{charge_ref})")
+        acc_dep_c_cell.number_format = CURRENCY_FMT
+        acc_dep_c_cell.border = BORDER
+
+        nbv_b_cell = ws.cell(row=rr, column=11, value=f"={cost_ref}-{acc_dep_b_ref}")
+        nbv_b_cell.number_format = CURRENCY_FMT
+        nbv_b_cell.border = BORDER
+        acc_dep_c_ref = f"J{rr}"
+        nbv_c_cell = ws.cell(row=rr, column=12, value=f"={cost_ref}-{acc_dep_c_ref}")
+        nbv_c_cell.number_format = CURRENCY_FMT
+        nbv_c_cell.border = BORDER
+        rr += 1
+    last_data_row = rr - 1
+
+    r = last_data_row + 2
+    additions_total_formula = "0"
+    if not result.new_additions.empty:
+        ws.cell(row=r, column=1, value="NEW ADDITIONS FOUND IN NOMINAL ACTIVITY - NOT YET IN REGISTER").font = SCHEDULE_FONT
+        additions_header_row = r + 1
+        r = _write_dataframe(ws, result.new_additions, start_row=additions_header_row)
+        cost_col_idx = list(result.new_additions.columns).index("Cost") + 1
+        cost_col_letter = get_column_letter(cost_col_idx)
+        additions_cost_range = f"{cost_col_letter}{additions_header_row + 1}:{cost_col_letter}{additions_header_row + len(result.new_additions)}"
+        additions_total_formula = f"SUM({additions_cost_range})"
+
+    if not result.possible_disposals.empty:
+        ws.cell(row=r, column=1, value="POSSIBLE DISPOSALS (CREDIT MOVEMENTS ON FIXED ASSET COST CODES)").font = SCHEDULE_FONT
+        r = _write_dataframe(ws, result.possible_disposals, start_row=r + 1)
+
+    # Summary block, written last (below the detail it references) so
+    # every total is a live formula against the schedule/additions ranges
+    # above and DATA_TB_Current, rather than the Python-computed figures
+    # already carried in result.summary.
+    if not result.summary.empty:
+        r += 1
+        ws.cell(row=r, column=1, value="SUMMARY").font = SCHEDULE_FONT
+        r += 1
+        summary_headers = ["Total cost (register + unrecorded additions)", "Total accumulated depreciation", "Total NBV (register)", "TB fixed asset net balance", "Variance"]
+        for j, h in enumerate(summary_headers):
+            ws.cell(row=r, column=1 + j, value=h)
+        _style_header_row(ws, r, len(summary_headers))
+        r += 1
+        cost_range = f"E{first_data_row}:E{last_data_row}"
+        acc_dep_c_range = f"J{first_data_row}:J{last_data_row}"
+        total_cost_cell = ws.cell(row=r, column=1, value=f"=SUM({cost_range})+{additions_total_formula}")
+        total_cost_cell.number_format = CURRENCY_FMT
+        total_acc_dep_cell = ws.cell(row=r, column=2, value=f"=SUM({acc_dep_c_range})")
+        total_acc_dep_cell.number_format = CURRENCY_FMT
+        total_nbv_cell = ws.cell(row=r, column=3, value=f"=A{r}-B{r}")
+        total_nbv_cell.number_format = CURRENCY_FMT
+        if refs.tb_current is not None:
+            tb_fa_formula = sumifs_exact(refs.tb_current.col_range("balance"), (refs.tb_current.col_range("account_type"), quote("Fixed Asset")))
+            tb_nbv_cell = ws.cell(row=r, column=4, value=tb_fa_formula)
+            tb_nbv_cell.number_format = CURRENCY_FMT
+            variance_cell = ws.cell(row=r, column=5, value=f"=C{r}-D{r}")
+            variance_cell.number_format = CURRENCY_FMT
+            if abs(result.summary.iloc[0]["Variance"] or 0) > materiality:
+                variance_cell.fill = PatternFill("solid", fgColor=AMBER)
+        for c in range(1, 6):
+            ws.cell(row=r, column=c).border = BORDER
+
+    ws.freeze_panes = f"A{table_row + 1}"
+
+
 def build_asset_register_sheet(wb: Workbook, client_name: str, current_label: str, ref: str, result: AssetRegisterResult, header_cells: dict | None = None):
     ws = wb.create_sheet(f"{ref} Fixed Asset Register"[:31])
     row = _write_title(ws, client_name, current_label, "FIXED ASSET REGISTER (ASSET DETAIL)", ref, header_cells=header_cells)
@@ -1575,7 +1737,10 @@ def _generate_schedules(
             place("fixed_asset_category", lambda: build_recon_sheet(wb, client_name, current_label, fa_ref, f"{fa_ref} Fixed Assets", fixed_asset_result, header_cells=header_cells))
 
     if ar_ref is not None:
-        place("fixed_asset_register", lambda: build_asset_register_sheet(wb, client_name, current_label, ar_ref, asset_register_result, header_cells=header_cells))
+        if refs.fixed_asset_register is not None:
+            place("fixed_asset_register", lambda: build_asset_register_sheet_formulas(wb, client_name, current_label, ar_ref, asset_register_result, refs, header_cells=header_cells, materiality=materiality))
+        else:
+            place("fixed_asset_register", lambda: build_asset_register_sheet(wb, client_name, current_label, ar_ref, asset_register_result, header_cells=header_cells))
 
     if cr_ref is not None:
         place("fixed_asset_register", lambda: build_closing_register_sheet(wb, client_name, current_label, cr_ref, asset_register_result.closing_register, header_cells=header_cells))

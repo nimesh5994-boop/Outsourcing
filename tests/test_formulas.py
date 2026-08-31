@@ -25,6 +25,7 @@ from app import nominal_matrix as nm  # noqa: E402
 from app import recon, xero_reports as xr  # noqa: E402
 from app.data_sheets import write_data_sheets  # noqa: E402
 from app.excel_builder import (  # noqa: E402
+    build_asset_register_sheet_formulas,
     build_bs_statement_sheet_formulas,
     build_control_account_sheet_formulas,
     build_corporation_tax_sheet_formulas,
@@ -306,6 +307,99 @@ def test_fixed_asset_category_formulas_match_python_ground_truth(tmp_path):
             assert _cell(sol, out.name, sheet_name, f"{letter}{r}") == row0[col]
         else:
             assert _cell(sol, out.name, sheet_name, f"{letter}{r}") == pytest.approx(row0[col], abs=0.01)
+
+
+def test_asset_register_formulas_match_python_ground_truth(tmp_path):
+    # 3 still-held assets (reducing balance, straight line, and a 0%-rate
+    # freehold-style asset that must not error), 1 already-disposed asset
+    # that must be excluded, a genuine addition, and a TB deliberately
+    # written with three different casings of "Fixed Asset" (Fixed Asset/
+    # fixed asset/FIXED ASSET) to prove the formula's account_type match
+    # is case-insensitive the same way Python's own .str.lower() compare is.
+    prior_register = pd.DataFrame([
+        {"asset_id": "FA-001", "description": "Ford Transit Van", "category": "Motor Vehicles",
+         "date_acquired": pd.Timestamp("2022-03-15"), "cost": 18000.0, "depreciation_method": "Reducing Balance",
+         "depreciation_rate": 25.0, "accumulated_depreciation_b_fwd": 10195.31, "disposed": "No"},
+        {"asset_id": "FA-002", "description": "Dell Precision Workstation", "category": "Computer Equipment",
+         "date_acquired": pd.Timestamp("2021-09-01"), "cost": 2200.0, "depreciation_method": "Straight Line",
+         "depreciation_rate": 33.3, "accumulated_depreciation_b_fwd": 1900.0, "disposed": "No"},
+        {"asset_id": "FA-003", "description": "Freehold display cabinet", "category": "Fixtures and Fittings",
+         "date_acquired": pd.Timestamp("2020-06-01"), "cost": 2000.0, "depreciation_method": "Straight Line",
+         "depreciation_rate": 0.0, "accumulated_depreciation_b_fwd": 500.0, "disposed": "No"},
+        {"asset_id": "FA-004", "description": "Old delivery van (sold)", "category": "Motor Vehicles",
+         "date_acquired": pd.Timestamp("2019-01-01"), "cost": 9000.0, "depreciation_method": "Reducing Balance",
+         "depreciation_rate": 25.0, "accumulated_depreciation_b_fwd": 9000.0, "disposed": "Yes"},
+    ])
+    tb_current = pd.DataFrame([
+        _fa_tb_row("3000", "MOTOR VEHICLES COST", "Fixed Asset", 18000, 0),
+        _fa_tb_row("3050", "MOTOR VEHICLES DEPRECIATION", "Fixed Asset", 0, 13695.31),
+        _fa_tb_row("6350", "COMPUTER EQUIPMENT - COST", "fixed asset", 2200, 0),
+        _fa_tb_row("6360", "COMPUTER EQUIPMENT - DEPRECIATION", "fixed asset", 0, 2266.6),
+        _fa_tb_row("4100", "FIXTURES AND FITTINGS COST", "FIXED ASSET", 2000, 0),
+        _fa_tb_row("4150", "FIXTURES AND FITTINGS DEPRECIATION", "FIXED ASSET", 0, 500),
+        _fa_tb_row("9000", "SALES", "Sales", 0, 50000),
+    ])
+    nominal_current = pd.DataFrame([
+        {"date": pd.Timestamp("2025-07-01"), "account_code": "3000", "account_name": "MOTOR VEHICLES COST",
+         "reference": "INV-501", "description": "New delivery van", "contact": "Van Dealer Ltd", "debit": 0.0, "credit": 0.0},
+    ])
+
+    result = fa.asset_level_rollforward(prior_register, nominal_current, tb_current, period_days=365)
+    assert result.status == "review"  # deliberate variance, asserted below
+    assert list(result.asset_schedule["Asset ID"]) == ["FA-001", "FA-002", "FA-003"]  # FA-004 excluded
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, {"tb_current": tb_current, "fixed_asset_register": prior_register, "nominal_current": nominal_current})
+    build_asset_register_sheet_formulas(wb, "Test Client", "Year ended 31 December 2025", "5", result, refs, materiality=500.0)
+    wb.remove(wb["Sheet"])
+    sheet_name = "5 Fixed Asset Register"
+
+    out = tmp_path / "far_asset_formula.xlsx"
+    wb.save(out)
+    sol = _evaluate(out)
+
+    errors = [k for k, v in sol.items() if f"[{out.name}]{sheet_name.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value) or "#NAME?" in str(v.value))]
+    assert not errors, f"formula errors: {errors}"
+
+    # per-asset rollforward columns: E..L, rows 10/11/12 for FA-001/002/003
+    columns = ["Cost", "Acc. Dep. b/fwd", "Depreciation Charge", "Acc. Dep. c/fwd", "NBV b/fwd", "NBV c/fwd"]
+    col_letters = ["E", "H", "I", "J", "K", "L"]
+    for i, row_num in enumerate([10, 11, 12]):
+        row_data = result.asset_schedule.iloc[i]
+        for col, letter in zip(columns, col_letters):
+            assert _cell(sol, out.name, sheet_name, f"{letter}{row_num}") == pytest.approx(row_data[col], abs=0.01), f"{col} for row {row_num}"
+
+    # the 0%-rate asset (FA-003, row 12) must charge exactly zero, not error
+    assert _cell(sol, out.name, sheet_name, "I12") == pytest.approx(0.0, abs=0.001)
+
+    # summary block: totals + the live TB tie-out, case-insensitive account_type match
+    summary_row = 17  # label row15, header row16, values row17 (no new additions in this fixture - debit is 0)
+    summary = result.summary.iloc[0]
+    assert _cell(sol, out.name, sheet_name, f"A{summary_row}") == pytest.approx(summary["Total cost (register + unrecorded additions)"], abs=0.01)
+    assert _cell(sol, out.name, sheet_name, f"B{summary_row}") == pytest.approx(summary["Total accumulated depreciation"], abs=0.01)
+    assert _cell(sol, out.name, sheet_name, f"C{summary_row}") == pytest.approx(summary["Total NBV (register)"], abs=0.01)
+    assert _cell(sol, out.name, sheet_name, f"D{summary_row}") == pytest.approx(summary["TB fixed asset net balance"], abs=0.01)
+    assert _cell(sol, out.name, sheet_name, f"E{summary_row}") == pytest.approx(summary["Variance"], abs=0.01)
+
+
+def test_asset_register_formulas_fall_back_to_plain_values_without_register_data_sheet(tmp_path):
+    # no fixed_asset_register data sheet written (e.g. the register upload
+    # is missing) - build_asset_register_sheet_formulas must not be called
+    # with refs.fixed_asset_register as None in real use (excel_builder
+    # gates on it), but the function itself still degrades safely rather
+    # than raising if it ever is.
+    prior_register = pd.DataFrame([
+        {"asset_id": "FA-001", "description": "Ford Transit Van", "category": "Motor Vehicles",
+         "date_acquired": pd.Timestamp("2022-03-15"), "cost": 18000.0, "depreciation_method": "Reducing Balance",
+         "depreciation_rate": 25.0, "accumulated_depreciation_b_fwd": 10195.31, "disposed": "No"},
+    ])
+    result = fa.asset_level_rollforward(prior_register, None, None, period_days=365)
+    wb = Workbook()
+    refs = write_data_sheets(wb, {})
+    build_asset_register_sheet_formulas(wb, "Test Client", "2025", "5", result, refs)
+    ws = wb["5 Fixed Asset Register"]
+    values = [cell.value for row in ws.iter_rows() for cell in row]
+    assert "FA-001" in values
 
 
 @pytest.mark.parametrize("accounting_profit,booked_tax_charge", [

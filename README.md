@@ -159,11 +159,12 @@ practice's chosen threshold, not a hardcoded one.
 
 The generated workbook doesn't just contain Python-computed numbers - every
 figure on the TB Lead Schedule, control account rollforwards, P&L, Balance
-Sheet, Corporation Tax computation, category-level fixed asset register, and
-nominal activity matrix is a live Excel formula, the way a manually-built
-working paper is. Change a figure on one of the hidden `DATA_*` sheets and
-everything downstream recalculates - a reviewer can trace any number back to
-its source by following the formula chain, not just trust a pasted value.
+Sheet, Corporation Tax computation, category-level fixed asset register,
+asset-level fixed asset register, and nominal activity matrix is a live
+Excel formula, the way a manually-built working paper is. Change a figure
+on one of the hidden `DATA_*` sheets and everything downstream
+recalculates - a reviewer can trace any number back to its source by
+following the formula chain, not just trust a pasted value.
 
 How it works: every job's raw canonical data (TB current/comparative,
 nominal activity, aged debtors/creditors, P&L, B/S) is written once onto
@@ -199,10 +200,40 @@ were found and worked around this way (documented in `xlformulas.py`):
 OR'd boolean condition in `>0` before multiplying returning all-TRUE
 regardless of the underlying condition.
 
+**Asset-level fixed asset register** (`build_asset_register_sheet_formulas`):
+each still-held asset's own row is a live lookup against the hidden
+`DATA_FixedAssetRegister` sheet - `SUMPRODUCT` keyed on that asset's own
+Asset ID (the same "OR-across-values"-style exact-match technique used
+everywhere else in this codebase, just keyed on a single unique value
+here rather than a list of codes) pulls its cost, brought-forward
+accumulated depreciation, and rate straight from the raw upload, and this
+year's depreciation charge, accumulated depreciation c/fwd, and both NBV
+figures all recalculate live from those looked-up cells - reducing
+balance vs straight line decided by a formula `IF()` on the row's own
+(Python-normalised) Method cell, prorated by the same period fraction
+Python used. A 0%-rate freehold-style asset correctly charges nothing
+without erroring (`MAX(...,0)` + a plain multiply, no divide-by-zero
+anywhere in the chain). The summary block's TB tie-out is live too - a
+`SUMPRODUCT` matching every `DATA_TB_Current` row whose own Account Type
+text says "Fixed Asset", case-insensitively (Excel's `=` comparison
+ignores case by default; verified against the `formulas` test library
+specifically, since two *other* library-specific text-matching quirks
+had already turned up real bugs here before - see below) - so the
+variance figure recalculates from the TB the same way every other
+tie-out on this workbook does. Same treatment as category-level's system-
+estimate columns for anything that isn't raw source data: which assets
+are still held (parsing the register's own free-text "Disposed?" column
+is a Python-side text decision, not something a formula should attempt)
+and the new-additions/possible-disposals tables (including the disposal
+asset-ID suggestion - free-text advisory content, not a number a formula
+could derive) stay Python-computed values below the live rollforward.
+Falls back to the plain Python-value sheet when there's no register
+upload for the workbook to link against, same gating pattern as the
+nominal matrix's Xero-native-only formula path below.
+
 Not yet formula-linked: the reconciliation check sheets (TB self-balance,
-debtors/creditors/bank/VAT recon, nominal review), the asset-level fixed
-asset register (prior-year rollforward), and the closing fixed asset
-register - these still write Python-computed values today.
+debtors/creditors/bank/VAT recon, nominal review) and the closing fixed
+asset register - these still write Python-computed values today.
 
 The nominal activity matrix's formula-linked sheet is Xero-native-only:
 its contra-account bucketing (`contra_code`/`contra_name`) is only ever
@@ -1503,13 +1534,18 @@ role and database) to run it.
   formula-linked schedules write - rather than the fixed £500/10%
   defaults regardless of what a template configures.
 - **Formula-linked output covers the core schedules, not everything yet.**
-  TB Lead Schedule, control accounts, P&L/B&S, category-level fixed assets,
-  Corporation Tax, and the nominal matrix are all live-formula (see
-  "Formula-linked schedules" above), and this now works identically
-  whether the base workbook is a fresh one or a loaded practice template.
-  The recon check sheets, the asset-level fixed asset register, and the
-  closing register still write Python-computed values - converting those
-  is the remaining piece.
+  TB Lead Schedule, control accounts, P&L/B&S, category-level and
+  asset-level fixed assets, Corporation Tax, and the nominal matrix are
+  all live-formula (see "Formula-linked schedules" above), and this now
+  works identically whether the base workbook is a fresh one or a loaded
+  practice template. The recon check sheets and the closing fixed asset
+  register still write Python-computed values - converting those is the
+  remaining piece (the recon sheets are the harder half of what's left:
+  unlike a rollforward, their headline numbers come from a genuine
+  matching decision - which GL posting pairs with which filed VAT
+  return line, which bank statement line ties to which TB balance - so
+  "convert to a formula" means finding a live way to express a match
+  Python already made, not just re-deriving a sum).
 - **Inserting into a real template file has a known fidelity cost.**
   Round-tripping a real client's `.xlsx` through openpyxl (load, add sheets,
   save) strips embedded images (e.g. a firm's logo) and dropdown data

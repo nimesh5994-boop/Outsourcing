@@ -113,6 +113,7 @@ class AssetRegisterResult:
     new_additions: pd.DataFrame = field(default_factory=pd.DataFrame)
     possible_disposals: pd.DataFrame = field(default_factory=pd.DataFrame)
     closing_register: pd.DataFrame = field(default_factory=pd.DataFrame)
+    period_fraction: float = 1.0  # the period_days/365 fraction depreciation was prorated by - exposed so a formula-linked sheet can embed the same constant a formula recalculates against, rather than re-deriving it
 
 
 def _category_and_kind(account_name: str) -> tuple[str, str]:
@@ -577,7 +578,7 @@ def asset_level_rollforward(
         "Variance": variance if variance is not None else "",
     }])
 
-    return AssetRegisterResult(status, message, summary, asset_schedule, new_additions, possible_disposals, closing_register)
+    return AssetRegisterResult(status, message, summary, asset_schedule, new_additions, possible_disposals, closing_register, period_fraction)
 
 
 # --- Capital expenditure coded elsewhere ---------------------------------
