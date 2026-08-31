@@ -985,6 +985,117 @@ def test_vat_reconciliation_end_to_end_through_http_and_into_the_workbook(http_c
     assert any("VAT Recon - Box 4" in name for name in wb.sheetnames)
 
 
+def test_vat_reconciliation_cash_basis_combination_matching_through_http(http_client):
+    """Cash-basis combination matching (vat_reconciliation.match_box
+    passes 4 and 5 - several GL legs summing to one filed row, and the
+    mirror case, several filed rows summing to one GL row) had only ever
+    been exercised directly against hand-built DataFrames before, never
+    through the real upload -> mapping-confirm -> run HTTP path. Also
+    covers a real bug found the same way: a filed return row with no date
+    column at all (this test's third invoice) leaves `date` as `pd.NaT`
+    after apply_mapping - a perfectly ordinary real-world event (not
+    every export tracks an invoice date the same way) - and main.py's
+    _jsonable helper checked `isinstance(value, pd.Timestamp)` to convert
+    dates for JSONB storage, but pd.NaT is its own singleton type, never
+    a Timestamp subclass, so that bare NaT reached json.dumps() and
+    crashed the whole save with an unhandled 500 instead of completing
+    the run. See test_jsonable.py for the fix's direct unit tests; this
+    test locks in the fix at the HTTP layer, where it actually surfaced,
+    alongside confirming both combination directions work."""
+    c = http_client
+    practice_id = _signup(c, admin_email="vat-combo@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "VAT Combo Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    # Acme Ltd: 3 partial GL receipts (400+350+250=1000) that only tie out
+    # combined -> Pass 4 (several GL legs -> one filed Box 1 row).
+    # Beta Supplies: one combined GL payment (600) that is the sum of two
+    # separate filed Box 4 invoices (250+350) -> Pass 5 (one GL row ->
+    # several filed rows). Echo Ltd: a plain reference match (no
+    # combination involved) whose filed invoice has no date at all.
+    gl_bytes = _vat_recon_workbook([
+        ["2025-06-05", "RCPT-A1", "Acme Ltd", "Part payment 1", 2000, 400],
+        ["2025-06-12", "RCPT-A2", "Acme Ltd", "Part payment 2", 1750, 350],
+        ["2025-06-19", "RCPT-A3", "Acme Ltd", "Part payment 3", 1250, 250],
+        ["2025-06-22", "PAY-BETA-1", "Beta Supplies", "Combined supplier payment", 3000, 600],
+        ["2025-06-25", "INV-E700", "Echo Ltd", "Sale", 300, 60],
+    ])
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "vat_gl"},
+        files={"files": ("gl.xlsx", gl_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    filed_sales = _vat_recon_workbook([["2025-06-01", "INV-A500", "Acme Ltd", "", 5000, 1000]])
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "vat_filed_sales"},
+        files={"files": ("filed_sales.xlsx", filed_sales, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    # No Date column at all - some filed-return exports genuinely don't
+    # carry one at invoice-line grain - so `date` comes back as pd.NaT
+    # for this row once apply_mapping defaults and parses it.
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Reference", "Customer", "Description", "Net Amount", "VAT Amount"])
+    ws.append(["INV-E700", "Echo Ltd", "", 300, 60])
+    buf = io.BytesIO()
+    wb.save(buf)
+    filed_sales_no_date = buf.getvalue()
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "vat_filed_sales"},
+        files={"files": ("filed_sales_no_date.xlsx", filed_sales_no_date, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    filed_purchases = _vat_recon_workbook([
+        ["2025-06-15", "PINV-1", "Beta Supplies", "", 1250, 250],
+        ["2025-06-18", "PINV-2", "Beta Supplies", "", 1750, 350],
+    ])
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "vat_filed_purchases"},
+        files={"files": ("filed_purchases.xlsx", filed_purchases, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    _confirm_all_pending_uploads(c, job_id)
+
+    resp = c.post(f"/jobs/{job_id}/vat-recon-settings", data={"vat_recon_basis": "cash", "vat_recon_tolerance": "0.0"}, follow_redirects=False)
+    assert resp.status_code == 303
+
+    resp = c.post(f"/jobs/{job_id}/vat-recon/run", follow_redirects=False)
+    assert resp.status_code == 303, "this used to 500 - a blank/NaT filed-invoice date crashed save_job()"
+
+    from app import storage
+    job = storage.get_job(job_id)
+    results = {r["name"]: r for r in job["vat_recon_results"]}
+
+    box1 = results["VAT Recon - Box 1 (Sales)"]
+    assert box1["status"] == "ok"
+    assert len(box1["matched_detail"]) == 2
+    by_ref = {r["Filed reference"]: r for r in box1["matched_detail"]}
+    assert "combined GL postings" in by_ref["INV-A500"]["Match basis"]
+    assert by_ref["INV-A500"]["GL VAT"] == 1000.0
+    assert by_ref["INV-E700"]["Match basis"] == "reference"
+    assert by_ref["INV-E700"]["Filed date"] is None, "the missing date should serialize as None, not crash"
+
+    box4 = results["VAT Recon - Box 4 (Purchases)"]
+    assert box4["status"] == "ok"
+    assert len(box4["matched_detail"]) == 1
+    assert "combined filed items" in box4["matched_detail"][0]["Match basis"]
+    assert box4["matched_detail"][0]["Filed reference"] == "PINV-1; PINV-2"
+
+
 def _make_payroll_gl_workbook() -> bytes:
     """A minimal but genuinely Xero-native 'Account Transactions' export
     (title rows + one section per account + a Total row per section,

@@ -392,6 +392,15 @@ def _jsonable(value):
         return None
     if isinstance(value, pd.Timestamp):
         return value.strftime("%Y-%m-%d") if not pd.isna(value) else None
+    if value is pd.NaT:
+        # A bare NaT (e.g. a combined-match row's own "date" field left
+        # blank because the source row's date genuinely didn't parse) is
+        # its own singleton type, NOT a pd.Timestamp subclass - isinstance
+        # above never catches it, so a raw NaT reached json.dumps()
+        # unconverted and crashed the whole save with a 500, found live
+        # when a VAT reconciliation result contained an unmapped/blank
+        # date field.
+        return None
     if hasattr(value, "item"):  # numpy scalar (float64/int64/bool_)
         value = value.item()
     if isinstance(value, float) and pd.isna(value):

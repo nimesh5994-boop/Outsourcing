@@ -1049,6 +1049,23 @@ infers each row's format individually, so both an ISO export and a
 genuinely ambiguous UK-style `D/M/Y` export in the same column parse
 correctly.
 
+**A blank date could crash the whole standalone-section save** - a
+separate, real bug: whatever produces a blank date cell (an unmapped
+required field left blank, a source row with no date at all, a
+combined-match summary row with nothing to show) leaves it as
+`pd.NaT` in the DataFrame, and `main.py`'s `_jsonable` helper (which
+converts a result's DataFrame cells to plain JSON before storing them as
+Postgres JSONB) checked `isinstance(value, pd.Timestamp)` to catch dates
+- but `pd.NaT` is its own singleton type (`NaTType`), never a
+`pd.Timestamp` subclass, so that check silently let a bare `NaT` straight
+through to `json.dumps()`, which crashed with an unhandled 500 rather
+than saving the result. Found live running VAT Reconciliation's cash-
+basis combination matching against a General Ledger upload with one
+field left unmapped. Fixed with an explicit `value is pd.NaT` check
+before the `isinstance` one - this protects every standalone section
+that runs through `_jsonable`, not VAT alone, since any of them could hit
+a blank date cell the same way.
+
 ## Reusable client mapping profiles
 
 For non-Xero (generic) uploads, once you confirm how a file's columns map
@@ -1344,6 +1361,12 @@ rather than silence, an API error degrades to a note rather than a raise,
 and the "nothing useful to add" marker becomes an empty note rather than
 clutter.
 
+`tests/test_jsonable.py` covers main.py's `_jsonable`/`_df_to_records`
+conversion directly (no database needed - importing `app.main` doesn't
+connect to one): a real Timestamp, NaN, and numpy scalars all convert
+correctly, and the `pd.NaT` regression above - a bare `NaT` now converts
+to `None` instead of reaching `json.dumps()` unconverted.
+
 `tests/test_storage_and_routes.py` exercises the Postgres-backed storage
 layer, the full practice -> template -> client -> job -> upload ->
 generate -> download HTTP flow (including a bulk upload of mixed Xero/
@@ -1353,7 +1376,11 @@ reporting all ten generate steps in order and leaving the job in the same
 generated state as the classic POST route, the VAT Reconciliation
 workspace end to end (General Ledger + two multi-file Filed Return
 uploads, settings, the standalone Run button, and the same results
-landing in the generated workbook's own tabs), the PAYE Reconciliation
+landing in the generated workbook's own tabs), cash-basis combination
+matching through the same real upload -> mapping-confirm -> run path
+(both directions - several GL legs summing to one filed row, and several
+filed rows summing to one GL row - plus the missing-date-column
+regression above), the PAYE Reconciliation
 workspace end to end (a Xero-native General Ledger upload plus three
 auto-detected BrightPay uploads, settings, the standalone Run button,
 results landing in the generated workbook's own tabs), Control Accounts,
