@@ -800,6 +800,30 @@ anything the client's own chart of accounts already says is a fixed
 asset shows up as a checkable addition, not just an aggregate a preparer
 has to trust.
 
+**Genuine addition vs. opening-balance migration** (`_addition_type`):
+a debit to a fixed asset cost code looks identical in nominal activity
+whether it's a real in-year purchase or a data-migration journal that
+simply re-established a prior bookkeeping system's opening balances in
+this one - found against real client data, where entries in a TB's own
+"Opening Balance" section got flagged as additions needing review,
+which was the right call (they do need reviewing) but misled a
+preparer into looking for a purchase invoice that was never posted.
+Every row in both additions tables (`far_additions_detail`'s category-
+level listing and `asset_level_rollforward`'s "new additions" table)
+now carries an "Addition type" label, using only signals the client's
+own posting habits already carry - the same "client's own data as
+vocabulary" idea as the capex-reclassification suggestion below: the
+transaction's own description/reference text first (a genuine migration
+entry is nearly always labelled as one - "Opening Balance", "B/Fwd",
+"Data Migration", and similar), falling back to its date and source
+type together when the text gives no clue (a migration is
+characteristically a single journal struck within about two weeks of
+the period start, not a Bill/Invoice/Spend Money transaction spread
+through the year the way a real purchase is). Purely advisory - never
+changes whether a row is counted, flagged, or included in the existing
+"review" status, only which of the two explanations it's shown with, so
+a preparer isn't misled about *why* something needs reviewing.
+
 **System-estimated depreciation** (`DEFAULT_CATEGORY_DEPRECIATION`,
 `_infer_category_rate`): each category's brought-forward cost/NBV is run
 through a default depreciation rate and method inferred from the
@@ -1249,12 +1273,13 @@ role and database) to run it.
   that differ from taxable profits (dividends received from non-51%-group
   companies) - defaults to treating them as equal, which is correct for the
   common case but not universal.
-- **Fixed asset register** can't distinguish a genuine in-year purchase
-  from an opening-balance data-migration journal when flagging "new
-  additions" from nominal activity (both look like a debit to a fixed
-  asset cost code) - real data showed this: entries in an "Opening
-  Balance" section got flagged as additions needing review, which is the
-  right call (they do need reviewing) but not always for the reason the
-  label implies. It also doesn't try to match a specific flagged disposal
-  to a specific register line automatically - that needs the asset
-  description reviewed by a preparer.
+- **Fixed asset register**'s "new additions" table now labels each row
+  "Likely genuine addition" or "Possible opening-balance migration -
+  review before treating as a new asset" (see "Genuine addition vs.
+  opening-balance migration" above) - advisory only, using description/
+  reference text and date/source-type signals, so it can still be wrong
+  on a client whose posting habits don't match either signal (e.g. a
+  migration journal with no identifying text, posted well after the
+  period start). It also doesn't try to match a specific flagged
+  disposal to a specific register line automatically - that needs the
+  asset description reviewed by a preparer.

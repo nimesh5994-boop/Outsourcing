@@ -145,7 +145,57 @@ def group_fixed_asset_codes(tb_current: pd.DataFrame) -> dict[str, dict[str, lis
     return grouped
 
 
-def far_additions_detail(tb_current: pd.DataFrame | None, nominal_activity: pd.DataFrame | None) -> pd.DataFrame:
+# --- Genuine addition vs. opening-balance migration journal --------------
+#
+# A debit to a fixed asset cost code looks identical in nominal activity
+# whether it's a real in-year purchase or a data-migration journal that
+# simply re-established a prior system's opening balances in this one -
+# found against real client data, where entries in a TB's own "Opening
+# Balance" section got flagged as additions needing review, which is the
+# right call (they DO need reviewing) but misleads a preparer into
+# looking for a purchase invoice that was never posted. Both directions
+# below use only signals the client's own posting habits already carry -
+# same "client's own data as vocabulary" idea as this module's other
+# suggestion checks (suggest_capital_expenditure_reclassification) -
+# never an invented one:
+#
+#   1. the transaction's own description/reference text - a genuine
+#      migration entry is nearly always labelled as one by whoever
+#      created it ("Opening Balance", "B/Fwd", "Data Migration", ...).
+#   2. failing that, its date and source together - a migration is
+#      characteristically a single journal struck at/near the very start
+#      of the period, not a Bill/Invoice/Spend Money transaction spread
+#      through the year the way a real purchase is.
+#
+# Purely advisory labelling: never changes whether a row is counted,
+# flagged, or included - only which of the two explanations it's shown
+# with, so a preparer isn't misled about WHY something needs reviewing.
+_MIGRATION_KEYWORDS = (
+    "opening balance", "opening bal", "b/fwd", "bfwd", "brought forward",
+    "data migration", "migration", "migrated", "conversion balance", "trial balance conversion",
+)
+_MIGRATION_JOURNAL_SOURCE_TYPES = ("journal", "manual journal", "je")
+_MIGRATION_DATE_WINDOW_DAYS = 14
+_LIKELY_GENUINE_ADDITION = "Likely genuine addition"
+_POSSIBLE_MIGRATION = "Possible opening-balance migration - review before treating as a new asset"
+
+
+def _addition_type(row: pd.Series, period_start) -> str:
+    text = f"{row.get('description', '')} {row.get('reference', '')}".lower()
+    if any(k in text for k in _MIGRATION_KEYWORDS):
+        return _POSSIBLE_MIGRATION
+    if period_start is not None and str(row.get("source_type", "")).lower() in _MIGRATION_JOURNAL_SOURCE_TYPES:
+        posting_date = row.get("date")
+        if pd.notna(posting_date):
+            days_from_start = abs((pd.Timestamp(posting_date) - pd.Timestamp(period_start)).days)
+            if days_from_start <= _MIGRATION_DATE_WINDOW_DAYS:
+                return _POSSIBLE_MIGRATION
+    return _LIKELY_GENUINE_ADDITION
+
+
+def far_additions_detail(
+    tb_current: pd.DataFrame | None, nominal_activity: pd.DataFrame | None, period_start=None,
+) -> pd.DataFrame:
     """Every transaction-level debit posted during the year to a Fixed
     Asset cost code, across every category - the actual postings behind
     each category's "Additions" total in category_level_rollforward, so a
@@ -176,10 +226,11 @@ def far_additions_detail(tb_current: pd.DataFrame | None, nominal_activity: pd.D
         return pd.DataFrame()
 
     additions["Category"] = additions["account_code"].map(code_to_category)
-    for col in ("date", "account_name", "reference", "description", "contact"):
+    for col in ("date", "account_name", "reference", "description", "contact", "source_type"):
         if col not in additions.columns:
             additions[col] = ""
-    return additions[["date", "Category", "account_code", "account_name", "reference", "description", "contact", "debit"]].rename(columns={
+    additions["Addition type"] = additions.apply(lambda r: _addition_type(r, period_start), axis=1)
+    return additions[["date", "Category", "account_code", "account_name", "reference", "description", "contact", "debit", "Addition type"]].rename(columns={
         "date": "Date", "account_code": "Nominal Code", "account_name": "Account",
         "reference": "Reference", "description": "Description", "contact": "Contact", "debit": "Addition (Cost)",
     }).sort_values(["Category", "Date"]).reset_index(drop=True)
@@ -187,7 +238,7 @@ def far_additions_detail(tb_current: pd.DataFrame | None, nominal_activity: pd.D
 
 def category_level_rollforward(
     tb_current: pd.DataFrame, tb_comparative: pd.DataFrame, nominal_activity: pd.DataFrame | None,
-    period_days: int = 365, materiality: float = MATERIALITY_AMOUNT,
+    period_days: int = 365, materiality: float = MATERIALITY_AMOUNT, period_start=None,
 ) -> FixedAssetResult:
     """Cost / accumulated depreciation / NBV rollforward per fixed asset
     category, built purely from the TB's own cost-vs-depreciation account
@@ -286,7 +337,7 @@ def category_level_rollforward(
     )
 
     result = FixedAssetResult("Fixed asset register (category summary)", status, msg, detail)
-    additions_detail = far_additions_detail(tb_current, nominal_activity)
+    additions_detail = far_additions_detail(tb_current, nominal_activity, period_start)
     if not additions_detail.empty:
         result.extra_detail = additions_detail
         result.extra_detail_label = "Fixed asset additions posted during the year (per nominal activity)"
@@ -311,6 +362,7 @@ def asset_level_rollforward(
     tb_current: pd.DataFrame | None,
     period_days: int = 365,
     materiality: float = MATERIALITY_AMOUNT,
+    period_start=None,
 ) -> AssetRegisterResult:
     """Rolls a prior-year asset register forward: depreciates each asset by
     its own method/rate, flags additions found in nominal activity that
@@ -354,9 +406,11 @@ def asset_level_rollforward(
         if not movement.empty:
             additions_raw = movement[movement["debit"] > 0]
             if not additions_raw.empty:
+                addition_types = additions_raw.apply(lambda r: _addition_type(r, period_start), axis=1)
                 new_additions = additions_raw[["date", "account_code", "account_name", "reference", "description", "contact", "debit"]].rename(
                     columns={"debit": "Cost", "account_name": "Account", "date": "Date", "reference": "Reference", "description": "Description", "contact": "Contact", "account_code": "Nominal Code"}
                 )
+                new_additions["Addition type"] = addition_types.values
                 new_additions["Category (to complete)"] = ""
                 new_additions["Depreciation rate % (to complete)"] = ""
 

@@ -827,9 +827,13 @@ def _load_canonical_data(job: dict) -> dict:
 def _period_days(job: dict) -> int:
     start, end = job.get("current_period_start"), job.get("current_period_end")
     if start and end:
-        from datetime import date
         return (date.fromisoformat(end) - date.fromisoformat(start)).days + 1
     return 365
+
+
+def _period_start(job: dict) -> date | None:
+    start = job.get("current_period_start")
+    return date.fromisoformat(start) if start else None
 
 
 def _build_ct_computation(job: dict, data: dict, materiality: float = corporation_tax.MATERIALITY_AMOUNT) -> corporation_tax.CTComputation | None:
@@ -1017,11 +1021,11 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     yield event(9, "running")
     fixed_asset_result = fixed_assets.category_level_rollforward(
         data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
-        period_days=_period_days(job), materiality=materiality,
+        period_days=_period_days(job), materiality=materiality, period_start=_period_start(job),
     )
     asset_register_result = fixed_assets.asset_level_rollforward(
         data.get("fixed_asset_register"), data.get("nominal_current"), data.get("tb_current"),
-        period_days=_period_days(job), materiality=materiality,
+        period_days=_period_days(job), materiality=materiality, period_start=_period_start(job),
     )
     results = results + [fixed_assets.suggest_capital_expenditure_reclassification(
         data.get("tb_current"), data.get("nominal_current"), data.get("fixed_asset_register"), threshold=materiality,

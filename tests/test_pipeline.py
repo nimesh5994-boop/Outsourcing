@@ -1,5 +1,6 @@
 """End-to-end test: parse the sample data (mirroring real Xero export
 structures), run every reconciliation, and build the final workbook."""
+from datetime import date
 from pathlib import Path
 
 import openpyxl
@@ -237,6 +238,93 @@ def test_fixed_asset_register_generic_mapping():
     van = df[df["asset_id"] == "FA-001"].iloc[0]
     assert van["depreciation_method"].strip().lower() == "reducing balance"
     assert pd.notna(van["date_acquired"])
+
+
+def _fa_nominal_row(date, code, name, debit=0.0, credit=0.0, reference="", description="", contact="", source_type=""):
+    return {"date": pd.Timestamp(date), "account_code": code, "account_name": name, "reference": reference,
+            "description": description, "contact": contact, "source_type": source_type, "debit": debit, "credit": credit}
+
+
+def test_new_addition_labelled_by_migration_keyword_in_description():
+    # a real false positive found against real client data: an "Opening
+    # Balance" section entry looks identical to a genuine purchase (both
+    # are just a debit to a fixed asset cost code) - the description text
+    # itself is the strongest available signal to tell them apart
+    tb_current = pd.DataFrame([{"account_code": "1", "account_name": "COMPUTER EQUIPMENT COST", "account_type": "Fixed Asset", "balance": 1000.0}])
+    prior_register = pd.DataFrame([{
+        "asset_id": "FA-1", "description": "Old PC", "category": "Computer Equipment", "date_acquired": pd.Timestamp("2023-01-01"),
+        "cost": 500.0, "depreciation_method": "straight_line", "depreciation_rate": 25.0,
+        "accumulated_depreciation_b_fwd": 125.0, "disposed": False,
+    }])
+    nominal = pd.DataFrame([
+        _fa_nominal_row("2025-06-01", "1", "COMPUTER EQUIPMENT COST", debit=1000.0, reference="OB-01",
+                         description="Opening Balance conversion journal", source_type="Journal"),
+    ])
+    result = fixed_assets.asset_level_rollforward(prior_register, nominal, tb_current, period_days=365)
+    assert result.new_additions.iloc[0]["Addition type"] == fixed_assets._POSSIBLE_MIGRATION
+
+
+def test_new_addition_labelled_by_date_and_journal_source_near_period_start():
+    tb_current = pd.DataFrame([{"account_code": "1", "account_name": "COMPUTER EQUIPMENT COST", "account_type": "Fixed Asset", "balance": 1000.0}])
+    prior_register = pd.DataFrame([{
+        "asset_id": "FA-1", "description": "Old PC", "category": "Computer Equipment", "date_acquired": pd.Timestamp("2023-01-01"),
+        "cost": 500.0, "depreciation_method": "straight_line", "depreciation_rate": 25.0,
+        "accumulated_depreciation_b_fwd": 125.0, "disposed": False,
+    }])
+    # no migration wording at all, but posted within days of the period
+    # start on a Journal source - the structural fallback signal
+    nominal = pd.DataFrame([
+        _fa_nominal_row("2025-01-05", "1", "COMPUTER EQUIPMENT COST", debit=1000.0, reference="JNL-1",
+                         description="Reclass entry", source_type="Journal"),
+    ])
+    result = fixed_assets.asset_level_rollforward(prior_register, nominal, tb_current, period_days=365, period_start=date(2025, 1, 1))
+    assert result.new_additions.iloc[0]["Addition type"] == fixed_assets._POSSIBLE_MIGRATION
+
+
+def test_genuine_mid_year_bill_purchase_not_flagged_as_migration():
+    tb_current = pd.DataFrame([{"account_code": "1", "account_name": "COMPUTER EQUIPMENT COST", "account_type": "Fixed Asset", "balance": 1000.0}])
+    prior_register = pd.DataFrame([{
+        "asset_id": "FA-1", "description": "Old PC", "category": "Computer Equipment", "date_acquired": pd.Timestamp("2023-01-01"),
+        "cost": 500.0, "depreciation_method": "straight_line", "depreciation_rate": 25.0,
+        "accumulated_depreciation_b_fwd": 125.0, "disposed": False,
+    }])
+    nominal = pd.DataFrame([
+        _fa_nominal_row("2025-06-15", "1", "COMPUTER EQUIPMENT COST", debit=1000.0, reference="INV-2025-042",
+                         description="New laptop for John", contact="Dell Ltd", source_type="Bill"),
+    ])
+    result = fixed_assets.asset_level_rollforward(prior_register, nominal, tb_current, period_days=365, period_start=date(2025, 1, 1))
+    assert result.new_additions.iloc[0]["Addition type"] == fixed_assets._LIKELY_GENUINE_ADDITION
+    # purely advisory - never changes the existing status/count logic
+    assert result.status == "review"
+    assert len(result.new_additions) == 1
+
+
+def test_journal_source_far_from_period_start_not_flagged_as_migration():
+    # a Journal source alone isn't enough - it needs to ALSO be near the
+    # period start, otherwise a genuine mid-year correcting journal would
+    # be wrongly labelled a migration entry
+    tb_current = pd.DataFrame([{"account_code": "1", "account_name": "COMPUTER EQUIPMENT COST", "account_type": "Fixed Asset", "balance": 1000.0}])
+    prior_register = pd.DataFrame([{
+        "asset_id": "FA-1", "description": "Old PC", "category": "Computer Equipment", "date_acquired": pd.Timestamp("2023-01-01"),
+        "cost": 500.0, "depreciation_method": "straight_line", "depreciation_rate": 25.0,
+        "accumulated_depreciation_b_fwd": 125.0, "disposed": False,
+    }])
+    nominal = pd.DataFrame([
+        _fa_nominal_row("2025-08-20", "1", "COMPUTER EQUIPMENT COST", debit=1000.0, reference="JNL-99",
+                         description="Correcting entry", source_type="Journal"),
+    ])
+    result = fixed_assets.asset_level_rollforward(prior_register, nominal, tb_current, period_days=365, period_start=date(2025, 1, 1))
+    assert result.new_additions.iloc[0]["Addition type"] == fixed_assets._LIKELY_GENUINE_ADDITION
+
+
+def test_far_additions_detail_also_carries_the_addition_type_label():
+    tb_current = pd.DataFrame([{"account_code": "1", "account_name": "COMPUTER EQUIPMENT COST", "account_type": "Fixed Asset", "balance": 1000.0}])
+    nominal = pd.DataFrame([
+        _fa_nominal_row("2025-01-02", "1", "COMPUTER EQUIPMENT COST", debit=1000.0,
+                         description="Opening Balance b/fwd", source_type="Journal"),
+    ])
+    detail = fixed_assets.far_additions_detail(tb_current, nominal)
+    assert detail.iloc[0]["Addition type"] == fixed_assets._POSSIBLE_MIGRATION
 
 
 def test_full_workbook_builds_and_saves(tmp_path, canonical_data):
