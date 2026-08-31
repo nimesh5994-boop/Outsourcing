@@ -178,6 +178,41 @@ def test_miscoding_suggestion_uses_aged_listing_as_independent_ground_truth():
     assert result.detail.iloc[0]["Normally clears through"] == "TRADE DEBTORS CONTROL"
 
 
+def test_miscoding_suggestion_aged_listing_wins_regardless_of_account_order():
+    # Regression test for a real bug: contact_home used to be built by
+    # iterating control_accounts in whatever order they came in (i.e. TB
+    # row order) and letting whichever account got there FIRST claim a
+    # contact - with this-year's-own postings on EQUAL footing with the
+    # aged listing's independent ground truth. Since the very posting
+    # under test for miscoding is itself one of "wherever they post this
+    # year", a single miscoded posting sitting on an account processed
+    # before the contact's true (aged-listing) home could win the race
+    # and flip the finding backwards: flagging the CORRECTLY-coded
+    # transaction on the true home account as the anomaly, while missing
+    # the actual miscoding. Here OTHER DEBTORS (the wrong account, with
+    # the miscoded posting) is listed FIRST in control_accounts - under
+    # the old code this made OTHER DEBTORS "win" as Acme Ltd's home,
+    # because Acme Ltd's aged-listing membership got unioned into
+    # OTHER DEBTORS's contact set too and nothing distinguished it from
+    # a genuine posting. The fix makes aged-listing home assignment run
+    # as its own pass, before any posting-based fallback, so it wins
+    # outright regardless of iteration order.
+    tb_current = _tb([
+        {"account_code": "1150", "account_name": "OTHER DEBTORS", "account_type": "Current Asset", "balance": 900.0},
+        {"account_code": "1100", "account_name": "TRADE DEBTORS CONTROL", "account_type": "Current Asset", "balance": 0.0},
+    ])
+    nominal = pd.DataFrame([
+        _nom_row("2025-06-01", "1150", "OTHER DEBTORS", debit=900.0, contact="Acme Ltd", description="Miscellaneous receivable"),
+    ])
+    aged_debtors = pd.DataFrame([{"customer": "Acme Ltd", "total": 0.0}])
+    control_accounts = [("1150", "OTHER DEBTORS"), ("1100", "TRADE DEBTORS CONTROL")]
+    result = ca.suggest_control_account_miscoding(tb_current, nominal, control_accounts, aged_debtors=aged_debtors)
+    assert result.status == "review"
+    assert len(result.detail) == 1
+    assert result.detail.iloc[0]["Coded to"] == "OTHER DEBTORS"
+    assert result.detail.iloc[0]["Normally clears through"] == "TRADE DEBTORS CONTROL"
+
+
 def test_miscoding_suggestion_na_without_required_inputs():
     assert ca.suggest_control_account_miscoding(None, None, []).status == "n/a"
     assert ca.suggest_control_account_miscoding(pd.DataFrame(), pd.DataFrame(), []).status == "n/a"

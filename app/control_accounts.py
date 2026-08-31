@@ -283,18 +283,32 @@ def suggest_control_account_miscoding(
     activity["_contact_key"] = activity["contact"].astype(str).str.strip().str.lower()
     activity = activity[activity["_contact_key"] != ""]
 
-    # Which control account a contact "belongs to": wherever they already
-    # post within it this year, plus - for debtors/creditors specifically
-    # - the aged listing's own party names, an independent ground truth
-    # that doesn't depend on this year's postings at all.
+    # Which control account a contact "belongs to": the aged listing's own
+    # party names first - an independent ground truth that doesn't depend
+    # on this year's postings at all - and only THEN, for a contact not on
+    # any aged listing, wherever they happen to post this year. Aged
+    # listings must win outright, not just go first in some arbitrary
+    # account order: the very posting under test for miscoding is itself
+    # one of "wherever they post this year", so if that evidence were
+    # allowed to compete on equal footing with the aged listing, a single
+    # miscoded posting sitting on an account that happens to be processed
+    # before the contact's true (aged-listing) home would flip the
+    # finding backwards - flagging the correctly-coded transaction on the
+    # true home account as the anomaly, while missing the actual
+    # miscoding entirely.
     contact_home: dict[str, tuple[str, str]] = {}
     for code, acc_name in control_accounts:
-        contacts_here = set(activity.loc[activity["account_code"] == code, "_contact_key"])
         name_l = acc_name.lower()
+        aged_contacts = set()
         if any(k in name_l for k in DEBTOR_KEYWORDS) and aged_debtors is not None and not aged_debtors.empty:
-            contacts_here |= set(aged_debtors["customer"].astype(str).str.strip().str.lower())
+            aged_contacts = set(aged_debtors["customer"].astype(str).str.strip().str.lower())
         if any(k in name_l for k in CREDITOR_KEYWORDS) and aged_creditors is not None and not aged_creditors.empty:
-            contacts_here |= set(aged_creditors["supplier"].astype(str).str.strip().str.lower())
+            aged_contacts = set(aged_creditors["supplier"].astype(str).str.strip().str.lower())
+        for contact_key in aged_contacts:
+            if contact_key:
+                contact_home[contact_key] = (code, acc_name)
+    for code, acc_name in control_accounts:
+        contacts_here = set(activity.loc[activity["account_code"] == code, "_contact_key"])
         for contact_key in contacts_here:
             if contact_key and contact_key not in contact_home:
                 contact_home[contact_key] = (code, acc_name)

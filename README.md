@@ -795,6 +795,21 @@ not a miscoding, and flagging it would just be noise on every correctly-
 coded posting. Runs as its own check with a candidate table of exactly
 what matched and why; never reclassifies anything itself.
 
+**The aged listing wins outright, not just by going first** - a real bug
+found via a live smoke test with deliberately reversed account ordering:
+a contact's "home" control account used to be built by iterating every
+control account in TB row order and letting whichever one got there
+first claim the contact, with this year's own postings on equal footing
+with the aged listing. Since the very posting under test for miscoding
+is itself one of "wherever they post this year", a single miscoded
+posting sitting on an account that happened to be processed *before* the
+contact's true (aged-listing) home could win that race and flip the
+finding backwards - flagging the *correctly*-coded transaction on the
+true home account as the anomaly, while missing the actual miscoding
+entirely. Aged-listing home assignment now runs as its own pass, before
+any posting-based fallback, so it wins outright regardless of account
+order.
+
 ## Fixed asset register
 
 Built from `app/fixed_assets.py`, in two parts that work independently,
@@ -1153,8 +1168,9 @@ movement transaction detail, the movement-by-contact breakdown appearing
 only when there's no aged-listing breakdown to conflict with, the
 control-account miscoding suggestion - including the regression case
 that matters most, that a normal double-entry contra-leg (a receipt
-through Bank, an invoice's Sales leg) is never mistaken for a miscoding
-- and account-type discovery covering Prepayment/Inventory/Non-current
+through Bank, an invoice's Sales leg) is never mistaken for a miscoding,
+and the aged-listing-wins-regardless-of-account-order regression above -
+and account-type discovery covering Prepayment/Inventory/Non-current
 Asset/Non-current Liability while still excluding Fixed Asset (which
 gets its own dedicated treatment elsewhere).
 
