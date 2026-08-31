@@ -1,6 +1,8 @@
 """Unit tests for the VAT Reconciliation matching engine (General Ledger vs
 Filed VAT Return, Box 1/Box 4 reconciled independently) - see
-app/vat_reconciliation.py for the three-pass cascade this exercises."""
+app/vat_reconciliation.py for the five-pass cascade this exercises (three
+one-to-one passes plus, cash basis only, two bounded combination-matching
+passes)."""
 import pandas as pd
 
 from app.vat_reconciliation import VatReconSettings, reconcile, reconcile_box
@@ -116,6 +118,105 @@ def test_cash_basis_uses_payment_date_with_fallback_to_transaction_date():
     cash_settings = VatReconSettings(accounting_basis="cash")
     matched, _, _ = match_box(_prepare_pool(gl, cash_settings), filed, cash_settings)
     assert matched.iloc[0]["Match basis"] == "date + amount + contact"
+
+
+def test_cash_basis_combines_several_filed_rows_into_one_gl_posting():
+    """One GL posting (£200), filed as two separate £100 lines - the
+    return was filed at a finer grain than the GL posted it. Same shape
+    as the reference master prompt's own cash-combination test case."""
+    gl = _gl([{"date": pd.Timestamp("2025-03-15"), "reference": "", "contact": "ABC Ltd", "net_amount": 1000.0, "vat_amount": 200.0}])
+    filed = _filed([
+        {"date": pd.Timestamp("2025-01-10"), "reference": "", "contact": "ABC Ltd", "net_amount": 500.0, "vat_amount": 100.0},
+        {"date": pd.Timestamp("2025-02-20"), "reference": "", "contact": "ABC Ltd", "net_amount": 500.0, "vat_amount": 100.0},
+    ])
+    result = reconcile_box("Box 1 (Sales)", gl, filed, VatReconSettings(accounting_basis="cash", tolerance=0.0))
+    assert result.status == "ok"
+    assert len(result.matched_detail) == 1
+    row = result.matched_detail.iloc[0]
+    assert row["Match basis"] == "combined filed items, cash basis (2 items)"
+    assert row["Filed VAT"] == 200.0
+    assert row["GL VAT"] == 200.0
+    assert row["VAT variance"] == 0.0
+
+
+def test_cash_basis_combines_several_gl_legs_into_one_filed_row():
+    """The mirror shape: one filed line (£200), but the GL recognised it
+    as two separate £100 postings (e.g. an invoice paid in two
+    instalments under cash accounting)."""
+    gl = _gl([
+        {"date": pd.Timestamp("2025-01-10"), "reference": "INV-1", "contact": "XYZ Ltd", "net_amount": 500.0, "vat_amount": 100.0},
+        {"date": pd.Timestamp("2025-02-20"), "reference": "INV-1", "contact": "XYZ Ltd", "net_amount": 500.0, "vat_amount": 100.0},
+    ])
+    filed = _filed([{"date": pd.Timestamp("2025-03-15"), "reference": "", "contact": "XYZ Ltd", "net_amount": 1000.0, "vat_amount": 200.0}])
+    result = reconcile_box("Box 1 (Sales)", gl, filed, VatReconSettings(accounting_basis="cash", tolerance=0.0))
+    assert result.status == "ok"
+    row = result.matched_detail.iloc[0]
+    assert row["Match basis"] == "combined GL postings, cash basis (2 legs)"
+    assert row["GL VAT"] == 200.0
+    assert "INV-1" in row["GL reference"]
+
+
+def test_combination_matching_is_cash_basis_only():
+    """The exact same split-payment data that matches cleanly under cash
+    basis must NOT get silently combined under accrual basis - a split
+    VAT amount there is more likely a real discrepancy than a legitimate
+    combination, and accrual accounting shouldn't hide that."""
+    gl = _gl([{"date": pd.Timestamp("2025-03-15"), "reference": "", "contact": "ABC Ltd", "net_amount": 1000.0, "vat_amount": 200.0}])
+    filed = _filed([
+        {"date": pd.Timestamp("2025-01-10"), "reference": "", "contact": "ABC Ltd", "net_amount": 500.0, "vat_amount": 100.0},
+        {"date": pd.Timestamp("2025-02-20"), "reference": "", "contact": "ABC Ltd", "net_amount": 500.0, "vat_amount": 100.0},
+    ])
+    result = reconcile_box("Box 1 (Sales)", gl, filed, VatReconSettings(accounting_basis="accrual", tolerance=0.0))
+    assert result.status == "review"
+    assert len(result.extra_detail) == 2
+    assert set(result.extra_detail["Exception type"]) == {"Filed return item - no GL match"}
+
+
+def test_combination_matching_never_crosses_contacts():
+    """A GL posting from a different contact must never be pulled into a
+    combination just because its amount happens to help the sum along."""
+    gl = _gl([
+        {"date": pd.Timestamp("2025-01-10"), "reference": "", "contact": "ABC Ltd", "net_amount": 500.0, "vat_amount": 100.0},
+        {"date": pd.Timestamp("2025-02-20"), "reference": "", "contact": "Different Ltd", "net_amount": 500.0, "vat_amount": 100.0},
+    ])
+    filed = _filed([{"date": pd.Timestamp("2025-03-15"), "reference": "", "contact": "ABC Ltd", "net_amount": 1000.0, "vat_amount": 200.0}])
+    result = reconcile_box("Box 1 (Sales)", gl, filed, VatReconSettings(accounting_basis="cash", tolerance=0.0))
+    assert result.status == "review"
+    assert len(result.extra_detail) == 1
+    assert result.extra_detail.iloc[0]["Exception type"] == "Filed return item - no GL match"
+
+
+def test_combination_matching_never_reuses_a_row_already_claimed():
+    """A GL row a one-to-one pass already claimed earlier in the filed
+    loop must not also be available to a later filed row's combination
+    search - each GL row is still claimed at most once overall."""
+    gl = _gl([
+        # claimed by the first filed row's exact reference match
+        {"date": pd.Timestamp("2025-01-05"), "reference": "INV-9", "contact": "Shared Ltd", "net_amount": 250.0, "vat_amount": 50.0},
+        # the only other same-contact posting - on its own it's £50, not
+        # enough to explain the second filed row's £100 by itself
+        {"date": pd.Timestamp("2025-02-01"), "reference": "", "contact": "Shared Ltd", "net_amount": 250.0, "vat_amount": 50.0},
+    ])
+    filed = _filed([
+        {"date": pd.Timestamp("2025-01-05"), "reference": "INV-9", "contact": "Shared Ltd", "net_amount": 250.0, "vat_amount": 50.0},
+        {"date": pd.Timestamp("2025-03-01"), "reference": "", "contact": "Shared Ltd", "net_amount": 500.0, "vat_amount": 100.0},
+    ])
+    result = reconcile_box("Box 1 (Sales)", gl, filed, VatReconSettings(accounting_basis="cash", tolerance=0.0))
+    assert result.status == "review"
+    assert len(result.matched_detail) == 1  # only the reference match
+    assert result.matched_detail.iloc[0]["Match basis"] == "reference"
+    assert len(result.extra_detail) == 1
+    assert result.extra_detail.iloc[0]["VAT Amount"] == 100.0
+
+
+def test_combination_matching_respects_tolerance():
+    gl = _gl([{"date": pd.Timestamp("2025-03-15"), "reference": "", "contact": "ABC Ltd", "net_amount": 1000.0, "vat_amount": 200.02}])
+    filed = _filed([
+        {"date": pd.Timestamp("2025-01-10"), "reference": "", "contact": "ABC Ltd", "net_amount": 500.0, "vat_amount": 100.0},
+        {"date": pd.Timestamp("2025-02-20"), "reference": "", "contact": "ABC Ltd", "net_amount": 500.0, "vat_amount": 100.0},
+    ])
+    assert reconcile_box("Box 1 (Sales)", gl, filed, VatReconSettings(accounting_basis="cash", tolerance=0.0)).status == "review"
+    assert reconcile_box("Box 1 (Sales)", gl, filed, VatReconSettings(accounting_basis="cash", tolerance=0.05)).status == "ok"
 
 
 def test_box1_and_box4_share_one_gl_pool_without_cross_contamination():

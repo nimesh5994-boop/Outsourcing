@@ -334,20 +334,50 @@ separate Summary/Detail tabs becomes two uploads automatically):
   from (`Source File`) so a finding can be traced back to a specific
   return.
 
-**Matching** cascades through three passes per box, strongest first:
-invoice/reference number alone (deliberately not gated on amount, so a
-real invoice with the *wrong* VAT amount posted against it is still
-recognised as the same transaction and its variance reported, rather
-than showing up as two unrelated "unmatched" rows); then date + amount
-(within the configured tolerance) + contact; then amount + contact
-alone, flagged `(verify)` since it's the least certain. Box 1 is
-matched first and claims its General Ledger rows before Box 4 runs
-against what's left, so a sales transaction can never also get claimed
-as a purchase; whatever General Ledger activity neither box's filed
-return accounts for is reported once, as its own **General Ledger
-Coverage** check - not duplicated as a false "exception" under both
-boxes just because a sale doesn't appear in the purchases detail (or
-vice versa).
+**Matching** cascades through five passes per box, strongest and least
+ambiguous first: (1) invoice/reference number alone (deliberately not
+gated on amount, so a real invoice with the *wrong* VAT amount posted
+against it is still recognised as the same transaction and its
+variance reported, rather than showing up as two unrelated "unmatched"
+rows); (2) date + amount (within the configured tolerance) + contact;
+(3) amount + contact alone, flagged `(verify)` since it's the least
+certain one-to-one pass. Box 1 is matched first and claims its General
+Ledger rows before Box 4 runs against what's left, so a sales
+transaction can never also get claimed as a purchase; whatever General
+Ledger activity neither box's filed return accounts for is reported
+once, as its own **General Ledger Coverage** check - not duplicated as
+a false "exception" under both boxes just because a sale doesn't appear
+in the purchases detail (or vice versa).
+
+**Cash-basis combination matching** (passes 4 and 5, Cash basis only):
+a genuine cash-accounting shape where the two sides split a single VAT
+amount differently doesn't fit a one-to-one pass at all - an invoice
+recognised piecemeal in the General Ledger as it was actually paid in
+instalments, filed as one line; or the reverse, filed at a finer grain
+than the General Ledger posted it. Both directions are searched, same
+contact required, no date requirement (matching Cash basis's own date
+tolerance): (4) a still-unmatched filed row against a **combination of
+several remaining General Ledger rows** summing to it; (5), run once
+after every filed row has had its turn, the mirror case - a still-
+unclaimed General Ledger row against a **combination of several
+still-unmatched filed rows** summing to it. Pass 4 always gets first
+claim on a row either pass could explain, so the outcome stays
+deterministic. Bounded on every axis so a large same-contact cluster
+can't turn into a runaway search: only the 25 rows closest in amount to
+the target are even considered, combinations are capped at 8 rows,
+sizes are tried smallest-first with an immediate return on the first
+valid combination found, and a hard ceiling on combinations examined
+guarantees the search always terminates quickly regardless of input
+shape (see `MAX_COMBINATION_SIZE`/`MAX_COMBINATION_CANDIDATES`/
+`MAX_COMBINATIONS_EXAMINED` in `vat_reconciliation.py`). A combination
+match's row in the matched detail shows `Match basis` as "combined GL
+postings, cash basis (N legs)" or "combined filed items, cash basis (N
+items)", with the combined side's date/reference fields summarised
+(a joined reference list, and either the shared date or a "N dates
+(earliest to latest)" note) rather than picking one row's values
+arbitrarily. Never attempted under Accrual basis: there, a split VAT
+amount is more likely a real discrepancy than a legitimate
+combination, and silently combining it away would hide that.
 
 Same "read the GL in depth, surface the assumption" treatment applied to
 FAR/control accounts/the nominal matrix, translated here:
@@ -1077,7 +1107,7 @@ non-matching postings.
 
 `tests/test_vat_reconciliation.py` covers the VAT Reconciliation
 workspace's matching engine directly (in-memory DataFrames, no
-database): the three-pass cascade in isolation (reference match
+database): the three one-to-one passes in isolation (reference match
 ignoring amount tolerance and still surfacing the variance, the date/
 amount/contact and amount/contact fallback passes, tolerance absorbing
 small differences without hiding genuine ones), cash vs accrual basis
@@ -1088,7 +1118,13 @@ the unmatched-items table - plus the matched-detail/implied-VAT-rate
 advisory (a non-standard rate stated in the message without flipping
 status) and the GL-coverage-gap box suggestion (a dominant contact
 history producing a suggestion, too little or too mixed history
-correctly producing none).
+correctly producing none). Also covers the cash-basis combination-
+matching passes both directions (several filed rows summing to one GL
+posting, and several GL legs summing to one filed line - both to a
+`Match basis` naming the combination), that combination matching is
+Accrual-basis-only, never crosses contacts, never reuses a row a
+one-to-one pass already claimed earlier in the same run, and respects
+the configured tolerance on the combined total.
 
 `tests/test_brightpay_reports.py` covers the BrightPay native report
 parsers directly (in-memory CSV text, no database): one row per employee

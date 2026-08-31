@@ -2,8 +2,8 @@
 
 Box 1 (VAT due on sales - output tax) and Box 4 (VAT reclaimed on
 purchases - input tax) are reconciled independently against the same
-General Ledger transaction pool, Box 1 first then Box 4, through three
-cascading passes per box - strongest match first:
+General Ledger transaction pool, Box 1 first then Box 4, through five
+cascading passes per box - strongest, least ambiguous match first:
 
   1. reference (invoice/bill number) alone - not gated on amount, since
      the point of matching by invoice number is to catch a genuinely
@@ -12,16 +12,31 @@ cascading passes per box - strongest match first:
      amounts to already agree before the two sides count as the same
      transaction.
   2. date + VAT amount within tolerance + contact
-  3. VAT amount within tolerance + contact (weakest - flagged "verify")
+  3. VAT amount within tolerance + contact (weakest one-to-one pass -
+     flagged "verify")
+  4. (cash basis only) a filed row against a COMBINATION of several
+     remaining GL rows, same contact, summing to the filed VAT amount -
+     the common cash-accounting shape where one invoice's VAT was
+     recognised piecemeal in the GL as it was actually paid in
+     instalments, while the filed return still reports it as one line.
+  5. (cash basis only, run once after every filed row above has had its
+     turn) the mirror image: a GL row against a COMBINATION of several
+     still-unmatched filed rows, same contact, summing to the GL VAT
+     amount - the return was filed at a finer grain than the GL posted
+     it. Passes 4 and 5 never both claim the same row: 4 runs first and
+     removes whatever it claims from the shared pool before 5 ever
+     looks at what's left. See _find_combination for the (bounded,
+     never-freezes-the-browser-equivalent) search.
 
-Each GL row is claimed by at most one filed-return row across BOTH
-boxes: Box 1 matches first and removes what it claims from the shared
-pool before Box 4 runs, so a sales transaction can't also get claimed
-as a purchase. Whatever GL activity neither box's filed return
-accounts for is reported once, as its own "General Ledger Coverage"
-check, rather than being reported as an "exception" under both boxes
-independently - a purchase transaction is not a Box 1 exception just
-because Box 1's filed sales never mention it, and vice versa.
+Each GL row is claimed by at most one filed-return row (or filed-row
+combination) across BOTH boxes: Box 1 matches first and removes what
+it claims from the shared pool before Box 4 runs, so a sales
+transaction can't also get claimed as a purchase. Whatever GL activity
+neither box's filed return accounts for is reported once, as its own
+"General Ledger Coverage" check, rather than being reported as an
+"exception" under both boxes independently - a purchase transaction is
+not a Box 1 exception just because Box 1's filed sales never mention
+it, and vice versa.
 
 "VAT Accounting Basis" (accrual vs cash) picks which General Ledger
 date is used for the date-based pass: accrual uses the transaction/
@@ -29,7 +44,11 @@ invoice date (always present); cash uses a payment date when the GL
 export actually carries one, falling back to the transaction date
 row-by-row when it doesn't (a GL without payment dates can't be cash-
 matched more precisely than that, so it degrades rather than drops
-rows).
+rows). Combination matching (passes 4/5) is cash-basis only - under
+accrual accounting a genuine invoice-level VAT amount should already
+be a single figure on both sides, so a split amount is more likely a
+real discrepancy than a legitimate combination, and silently combining
+it away would hide that.
 
 Deliberately free of any FastAPI/storage/upload concerns - takes plain
 canonical DataFrames (see models.py: vat_gl / vat_filed_sales /
@@ -62,6 +81,17 @@ RATE_TOLERANCE = 0.005
 # domain's suggestion logic can be tuned on its own terms later.
 MIN_HISTORY_FOR_SUGGESTION = 2
 DOMINANT_SHARE_THRESHOLD = 0.6
+
+# Cash-basis combination matching (see match_box passes 4/5): bounded on
+# every axis so a large same-contact cluster can't turn into a
+# combinatorial explosion - only the rows closest in amount to the target
+# are even considered, combinations are capped at a practical size (a
+# genuine split payment is a handful of instalments, not dozens), and a
+# hard ceiling on how many candidate combinations get examined guarantees
+# the search always terminates quickly regardless of input.
+MAX_COMBINATION_SIZE = 8
+MAX_COMBINATION_CANDIDATES = 25
+MAX_COMBINATIONS_EXAMINED = 20_000
 
 GL_COLUMNS = ["date", "reference", "contact", "description", "net_amount", "vat_amount"]
 FILED_COLUMNS = GL_COLUMNS + ["source_file"]
@@ -118,6 +148,118 @@ def _is_standard_rate(rate: float | None) -> bool:
     return any(abs(rate - r) <= RATE_TOLERANCE for r in STANDARD_VAT_RATES)
 
 
+def _join_unique(values) -> str:
+    """Semicolon-joined, sorted, de-duplicated text values - used to
+    summarise a reference/source-file column across several combined
+    rows into one display string, dropping blanks/NaN."""
+    seen = sorted({str(v).strip() for v in values if str(v).strip() and str(v).strip().lower() != "nan"})
+    return "; ".join(seen)
+
+
+def _describe_dates(dates) -> object:
+    """A single date if every combined row shares one, otherwise a short
+    'N dates (earliest to latest)' summary - mixing a real date (for the
+    common single-date case) with a text summary (for a genuine spread)
+    in the same column is fine for display; Excel just shows the text
+    ones as text."""
+    unique = sorted(pd.Series(list(dates)).dropna().unique())
+    if not unique:
+        return ""
+    if len(unique) == 1:
+        return unique[0]
+    return f"{len(unique)} dates ({unique[0]} to {unique[-1]})"
+
+
+def _find_combination(
+    candidates: pd.DataFrame, contact_key_col: str, contact_key: str,
+    amount_col: str, target: float, tolerance: float, id_col: str | None = None,
+) -> list | None:
+    """Bounded search for a small subset of `candidates` rows (same
+    contact, `amount_col` summing to `target` within `tolerance`) - the
+    cash-basis combination-matching primitive both match_box passes 4
+    and 5 share. Returns the list of matching row ids (>=2 - a size-1
+    match would already have been found by a one-to-one pass before this
+    ever runs), or None if nothing valid turns up within the search
+    bounds. `id_col` names the column identifying each row (e.g. the GL
+    pool's `_pool_id`); when omitted, the DataFrame's own index is used
+    (the filed side, where the index is already a stable per-row id).
+
+    Bounded on every axis so this can never run away on a large same-
+    contact cluster: only the MAX_COMBINATION_CANDIDATES rows closest in
+    amount to the target are considered at all, combinations are capped
+    at MAX_COMBINATION_SIZE rows, sizes are tried smallest-first with an
+    immediate return on the first valid combination found (a genuine
+    split payment is rarely more than a handful of instalments, so the
+    common case resolves fast), and a hard ceiling on combinations
+    examined guarantees termination regardless of input shape."""
+    same_contact = candidates[
+        (candidates[contact_key_col] == contact_key) & (candidates[amount_col].round(2) != 0)
+    ].copy()
+    if len(same_contact) < 2:
+        return None
+
+    same_contact["_diff"] = (same_contact[amount_col] - target).abs()
+    same_contact = same_contact.sort_values("_diff").head(MAX_COMBINATION_CANDIDATES)
+    ids = same_contact[id_col].tolist() if id_col else list(same_contact.index)
+    rows = list(zip(ids, same_contact[amount_col].tolist()))
+
+    tol = tolerance + 1e-9
+    target = round(float(target), 2)
+    budget = [MAX_COMBINATIONS_EXAMINED]
+
+    def search(size: int, start: int, chosen: list, total: float) -> list | None:
+        if len(chosen) == size:
+            return list(chosen) if abs(round(total, 2) - target) <= tol else None
+        remaining_slots = size - len(chosen)
+        for i in range(start, len(rows) - remaining_slots + 1):
+            if budget[0] <= 0:
+                return None
+            budget[0] -= 1
+            rid, amount = rows[i]
+            result = search(size, i + 1, chosen + [rid], total + amount)
+            if result is not None:
+                return result
+        return None
+
+    for size in range(2, min(MAX_COMBINATION_SIZE, len(rows)) + 1):
+        result = search(size, 0, [], 0.0)
+        if result is not None:
+            return result
+    return None
+
+
+def _combined_gl_legs_row(frow: pd.Series, combo_rows: pd.DataFrame) -> dict:
+    """One filed row matched against several GL rows summing to it (e.g.
+    an invoice's VAT recognised piecemeal across instalment payments in
+    the GL, filed as one line)."""
+    return {
+        "Match basis": f"combined GL postings, cash basis ({len(combo_rows)} legs)",
+        "Filed date": frow["date"], "Filed reference": frow["reference"], "Filed contact": frow["contact"],
+        "Filed net": frow["net_amount"], "Filed VAT": frow["vat_amount"], "Source file": frow.get("source_file", ""),
+        "GL date": _describe_dates(combo_rows["date"]), "GL reference": _join_unique(combo_rows["reference"]),
+        "GL contact": combo_rows.iloc[0]["contact"],
+        "GL net": round(float(combo_rows["net_amount"].sum()), 2), "GL VAT": round(float(combo_rows["vat_amount"].sum()), 2),
+        "VAT variance": round(float(frow["vat_amount"]) - float(combo_rows["vat_amount"].sum()), 2),
+    }
+
+
+def _combined_filed_items_row(grow: pd.Series, combo_filed: pd.DataFrame) -> dict:
+    """One GL row matched against several filed rows summing to it (the
+    mirror case: the return was filed at a finer grain than the GL
+    posted it)."""
+    filed_vat_total = float(combo_filed["vat_amount"].sum())
+    return {
+        "Match basis": f"combined filed items, cash basis ({len(combo_filed)} items)",
+        "Filed date": _describe_dates(combo_filed["date"]), "Filed reference": _join_unique(combo_filed["reference"]),
+        "Filed contact": combo_filed.iloc[0]["contact"],
+        "Filed net": round(float(combo_filed["net_amount"].sum()), 2), "Filed VAT": round(filed_vat_total, 2),
+        "Source file": _join_unique(combo_filed["source_file"]) if "source_file" in combo_filed.columns else "",
+        "GL date": grow["date"], "GL reference": grow["reference"], "GL contact": grow["contact"],
+        "GL net": grow["net_amount"], "GL VAT": grow["vat_amount"],
+        "VAT variance": round(filed_vat_total - float(grow["vat_amount"]), 2),
+    }
+
+
 def _prepare_pool(gl: pd.DataFrame | None, settings: VatReconSettings) -> pd.DataFrame:
     pool = gl.copy() if gl is not None and not gl.empty else _empty_gl()
     pool["_match_date"] = _basis_date_column(pool, settings.accounting_basis)
@@ -168,6 +310,20 @@ def match_box(pool: pd.DataFrame, filed: pd.DataFrame | None, settings: VatRecon
             if not cand.empty:
                 candidates, match_basis = cand, "amount + contact (verify)"
 
+        # Pass 4 (cash basis only): this filed row against a COMBINATION
+        # of several remaining GL rows summing to it - see module
+        # docstring and _find_combination.
+        if candidates is None and settings.accounting_basis == "cash":
+            combo_ids = _find_combination(
+                pool, "_contact_key", frow["_contact_key"], "vat_amount", float(frow["vat_amount"]),
+                settings.tolerance, id_col="_pool_id",
+            )
+            if combo_ids:
+                combo_rows = pool[pool["_pool_id"].isin(combo_ids)]
+                pool = pool[~pool["_pool_id"].isin(combo_ids)]
+                matched_rows.append(_combined_gl_legs_row(frow, combo_rows))
+                continue
+
         if candidates is None or candidates.empty:
             unmatched_filed_idx.append(filed_idx)
             continue
@@ -182,6 +338,29 @@ def match_box(pool: pd.DataFrame, filed: pd.DataFrame | None, settings: VatRecon
             "GL net": gl_row["net_amount"], "GL VAT": gl_row["vat_amount"],
             "VAT variance": round(float(frow["vat_amount"]) - float(gl_row["vat_amount"]), 2),
         })
+
+    # Pass 5 (cash basis only, runs once after every filed row above has
+    # had its turn): the mirror image of pass 4 - a still-unclaimed GL
+    # row against a COMBINATION of several still-unmatched filed rows
+    # summing to it. Deliberately sequenced after the whole pass 1-4 loop
+    # (not interleaved with it) so pass 4 always gets first claim on any
+    # row a combination could explain either way, keeping the outcome
+    # deterministic.
+    if settings.accounting_basis == "cash" and unmatched_filed_idx and not pool.empty:
+        remaining_filed = filed.loc[unmatched_filed_idx].copy()
+        for _, grow in list(pool.iterrows()):
+            if remaining_filed.empty:
+                break
+            combo_filed_idx = _find_combination(
+                remaining_filed, "_contact_key", grow["_contact_key"], "vat_amount", float(grow["vat_amount"]),
+                settings.tolerance,
+            )
+            if combo_filed_idx:
+                combo_filed_rows = remaining_filed.loc[combo_filed_idx]
+                matched_rows.append(_combined_filed_items_row(grow, combo_filed_rows))
+                pool = pool[pool["_pool_id"] != grow["_pool_id"]]
+                remaining_filed = remaining_filed.drop(index=combo_filed_idx)
+        unmatched_filed_idx = list(remaining_filed.index)
 
     matched = pd.DataFrame(matched_rows)
     unmatched_filed = filed.loc[unmatched_filed_idx, [c for c in FILED_COLUMNS if c in filed.columns]]
