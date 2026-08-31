@@ -832,7 +832,7 @@ def _period_days(job: dict) -> int:
     return 365
 
 
-def _build_ct_computation(job: dict, data: dict) -> corporation_tax.CTComputation | None:
+def _build_ct_computation(job: dict, data: dict, materiality: float = corporation_tax.MATERIALITY_AMOUNT) -> corporation_tax.CTComputation | None:
     pl = data.get("pl_current")
     if pl is None or pl.empty:
         return None
@@ -852,6 +852,7 @@ def _build_ct_computation(job: dict, data: dict) -> corporation_tax.CTComputatio
         associated_companies=int(job.get("ct_associated_companies", 0)),
         period_days=_period_days(job),
         booked_tax_charge=booked_tax_charge,
+        materiality=materiality,
     )
 
 
@@ -940,6 +941,9 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
         return record({"step": n, "total": total, "label": GENERATE_STEPS[n - 1], "status": status, **extra})
 
     template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
+    materiality_cfg = template["config"].get("materiality", {}) if template else {}
+    materiality = float(materiality_cfg.get("default_amount", recon.MATERIALITY_AMOUNT))
+    variance_pct_threshold = float(materiality_cfg.get("variance_pct_threshold", recon.VARIANCE_PCT_THRESHOLD))
 
     def _step1():
         step_data = _load_canonical_data(job)
@@ -950,7 +954,7 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     data, pl_current, current_year_profit = yield from _run_step_with_retry(event, 1, _step1)
 
     yield event(2, "running")
-    results = recon.run_all_recons(data)
+    results = recon.run_all_recons(data, materiality, variance_pct_threshold)
     vat_settings = vat_reconciliation.VatReconSettings(
         accounting_basis=job.get("vat_recon_basis", "accrual"),
         tolerance=job.get("vat_recon_tolerance", 0.0),
@@ -973,10 +977,10 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     )
     period_end_str = job.get("current_period_end")
     results = results + [statutory_deadlines.build_result(date.fromisoformat(period_end_str) if period_end_str else None)]
-    bs_statement_result = financial_statements.build_bs_statement(data.get("bs_current"), current_year_profit or 0.0)
-    results = results + [going_concern.assess(bs_statement_result.statement)]
+    bs_statement_result = financial_statements.build_bs_statement(data.get("bs_current"), current_year_profit or 0.0, materiality)
+    results = results + [going_concern.assess(bs_statement_result.statement, materiality)]
     results = results + [related_party_transactions.find_related_party_transactions(
-        data.get("tb_current"), data.get("nominal_current"),
+        data.get("tb_current"), data.get("nominal_current"), materiality,
     )]
     yield event(4, "done")
 
@@ -990,40 +994,40 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     yield event(6, "running")
     ca_results = control_accounts.build_all_rollforwards(
         data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
-        data.get("aged_debtors"), data.get("aged_creditors"),
+        data.get("aged_debtors"), data.get("aged_creditors"), materiality,
     )
     results = results + [control_accounts.suggest_control_account_miscoding(
         data.get("tb_current"), data.get("nominal_current"),
         [(r.account_code, r.account_name) for r in ca_results],
-        data.get("aged_debtors"), data.get("aged_creditors"),
+        data.get("aged_debtors"), data.get("aged_creditors"), materiality,
     )]
     yield event(6, "done")
 
     yield event(7, "running")
-    mx_results = nominal_matrix.build_all_matrices(data.get("tb_current"), data.get("nominal_current"))
+    mx_results = nominal_matrix.build_all_matrices(data.get("tb_current"), data.get("nominal_current"), materiality=materiality)
     results = results + [nominal_matrix.suggest_unallocated_reallocations(
         data.get("nominal_current"), [r.account_code for r in mx_results] or None,
     )]
     yield event(7, "done")
 
     yield event(8, "running")
-    ct_computation = _build_ct_computation(job, data)
+    ct_computation = _build_ct_computation(job, data, materiality)
     yield event(8, "done")
 
     yield event(9, "running")
     fixed_asset_result = fixed_assets.category_level_rollforward(
         data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
-        period_days=_period_days(job),
+        period_days=_period_days(job), materiality=materiality,
     )
     asset_register_result = fixed_assets.asset_level_rollforward(
         data.get("fixed_asset_register"), data.get("nominal_current"), data.get("tb_current"),
-        period_days=_period_days(job),
+        period_days=_period_days(job), materiality=materiality,
     )
     results = results + [fixed_assets.suggest_capital_expenditure_reclassification(
-        data.get("tb_current"), data.get("nominal_current"), data.get("fixed_asset_register"),
+        data.get("tb_current"), data.get("nominal_current"), data.get("fixed_asset_register"), threshold=materiality,
     )]
     results = results + [accruals_prepayments.build_schedule(
-        data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
+        data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"), materiality,
     )]
     yield event(9, "done")
 
@@ -1035,12 +1039,14 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
                 job["client_name"], job["current_label"], job["comparative_label"], data, results,
                 control_account_results=ca_results, matrix_results=mx_results, ct_computation=ct_computation,
                 fixed_asset_result=fixed_asset_result, asset_register_result=asset_register_result,
+                materiality=materiality, variance_pct_threshold=variance_pct_threshold,
             )
         else:
             wb = build_workbook(
                 job["client_name"], job["current_label"], job["comparative_label"], data, results,
                 control_account_results=ca_results, matrix_results=mx_results, ct_computation=ct_computation,
                 fixed_asset_result=fixed_asset_result, asset_register_result=asset_register_result,
+                materiality=materiality, variance_pct_threshold=variance_pct_threshold,
             )
 
         buffer = io.BytesIO()

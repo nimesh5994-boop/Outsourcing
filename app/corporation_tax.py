@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 
 from app.tax_rates import CT_RATES, CTRates
 
+MATERIALITY_AMOUNT = 500.0
+
 
 @dataclass
 class CTComputation:
@@ -52,7 +54,7 @@ def compute(
     associated_companies: int = 0,
     period_days: int = 365,
     booked_tax_charge: float | None = None,
-    materiality: float = 500.0,
+    materiality: float = MATERIALITY_AMOUNT,
     rates: CTRates = CT_RATES,
 ) -> CTComputation:
     taxable_profit = accounting_profit + disallowable_additions - capital_allowances

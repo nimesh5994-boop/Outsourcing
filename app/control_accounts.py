@@ -111,6 +111,7 @@ def build_rollforward(
     nominal_activity: pd.DataFrame,
     aged_debtors: pd.DataFrame | None = None,
     aged_creditors: pd.DataFrame | None = None,
+    materiality: float = MATERIALITY_AMOUNT,
 ) -> ControlAccountResult:
     b_fwd = 0.0
     if tb_comparative is not None and not tb_comparative.empty:
@@ -130,7 +131,7 @@ def build_rollforward(
 
     computed_c_fwd = b_fwd + net_movement
     difference = round(computed_c_fwd - c_fwd_per_tb, 2)
-    rollforward_ties = movement.empty is False and abs(difference) <= MATERIALITY_AMOUNT
+    rollforward_ties = movement.empty is False and abs(difference) <= materiality
 
     def dr_cr(amount: float) -> tuple[float, float]:
         return (round(amount, 2), 0.0) if amount >= 0 else (0.0, round(-amount, 2))
@@ -193,7 +194,7 @@ def build_rollforward(
                 "account without an aged listing to check it against."
             )
 
-    breakdown_ok = breakdown_diff is None or abs(breakdown_diff) <= MATERIALITY_AMOUNT
+    breakdown_ok = breakdown_diff is None or abs(breakdown_diff) <= materiality
     status = "ok" if rollforward_ties and breakdown_ok else ("n/a" if movement.empty and breakdown_diff is None else "review")
 
     parts = []
@@ -220,6 +221,7 @@ def build_all_rollforwards(
     nominal_activity: pd.DataFrame,
     aged_debtors: pd.DataFrame | None = None,
     aged_creditors: pd.DataFrame | None = None,
+    materiality: float = MATERIALITY_AMOUNT,
 ) -> list[ControlAccountResult]:
     accounts = dict(find_control_accounts(tb_current, nominal_activity))
 
@@ -238,7 +240,7 @@ def build_all_rollforwards(
                 accounts[code] = row["account_name"]
 
     return [
-        build_rollforward(code, name, tb_current, tb_comparative, nominal_activity, aged_debtors, aged_creditors)
+        build_rollforward(code, name, tb_current, tb_comparative, nominal_activity, aged_debtors, aged_creditors, materiality)
         for code, name in accounts.items()
     ]
 

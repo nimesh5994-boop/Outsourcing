@@ -56,7 +56,7 @@ def build_pl_statement(pl: pd.DataFrame) -> StatementResult:
     return StatementResult("ok", "Profit & Loss account, grouped by category.", pd.DataFrame(rows), net_profit)
 
 
-def build_bs_statement(bs: pd.DataFrame, net_profit: float) -> StatementResult:
+def build_bs_statement(bs: pd.DataFrame, net_profit: float, materiality: float = MATERIALITY_AMOUNT) -> StatementResult:
     if bs is None or bs.empty:
         return StatementResult("n/a", "No Balance Sheet data available.")
 
@@ -76,7 +76,7 @@ def build_bs_statement(bs: pd.DataFrame, net_profit: float) -> StatementResult:
     total_equity = equity_b_fwd + equity_current_year
 
     check = round(net_assets + total_equity, 2)
-    status = "ok" if abs(check) <= MATERIALITY_AMOUNT else "review"
+    status = "ok" if abs(check) <= materiality else "review"
     message = (
         "Balance sheet balances: net assets agree to total equity (including the current year's "
         "profit, which isn't yet closed to retained earnings in the TB itself)."

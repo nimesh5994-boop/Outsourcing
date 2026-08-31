@@ -88,7 +88,9 @@ def _other_bucket_breakdown(sub: pd.DataFrame) -> pd.DataFrame:
     return breakdown.sort_values("Net amount £", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
 
 
-def build_matrix(account_code: str, account_name: str, nominal_activity: pd.DataFrame) -> MatrixResult:
+def build_matrix(
+    account_code: str, account_name: str, nominal_activity: pd.DataFrame, materiality: float = MATERIALITY_AMOUNT,
+) -> MatrixResult:
     if nominal_activity is None or nominal_activity.empty or "contra_code" not in nominal_activity.columns:
         return MatrixResult(account_code, account_name, "n/a", "No contra-account detail available for this account (requires a Xero Account Transactions export).")
 
@@ -110,7 +112,7 @@ def build_matrix(account_code: str, account_name: str, nominal_activity: pd.Data
     unallocated = sub[sub["contra_label"].str.startswith(UNALLOCATED_PREFIX)]["net"].sum()
 
     other_breakdown = _other_bucket_breakdown(sub)
-    material_other = other_breakdown[other_breakdown["Net amount £"].abs() > MATERIALITY_AMOUNT] if not other_breakdown.empty else pd.DataFrame()
+    material_other = other_breakdown[other_breakdown["Net amount £"].abs() > materiality] if not other_breakdown.empty else pd.DataFrame()
 
     status = "ok" if needs_review_count == 0 and abs(unallocated) < 0.01 else "review"
     parts = []
@@ -166,7 +168,10 @@ def build_matrix_row_groups(account_code: str, nominal_activity_with_row_ids: pd
     return rows, col_names
 
 
-def build_all_matrices(tb_current: pd.DataFrame, nominal_activity: pd.DataFrame, account_codes: list[str] | None = None) -> list[MatrixResult]:
+def build_all_matrices(
+    tb_current: pd.DataFrame, nominal_activity: pd.DataFrame, account_codes: list[str] | None = None,
+    materiality: float = MATERIALITY_AMOUNT,
+) -> list[MatrixResult]:
     if tb_current is None or tb_current.empty or nominal_activity is None or nominal_activity.empty:
         return []
     if account_codes is None:
@@ -179,7 +184,7 @@ def build_all_matrices(tb_current: pd.DataFrame, nominal_activity: pd.DataFrame,
     for code in account_codes:
         name_rows = tb_current.loc[tb_current["account_code"].astype(str) == code, "account_name"]
         name = name_rows.iloc[0] if not name_rows.empty else code
-        results.append(build_matrix(code, name, nominal_activity))
+        results.append(build_matrix(code, name, nominal_activity, materiality))
     return results
 
 

@@ -187,7 +187,7 @@ def far_additions_detail(tb_current: pd.DataFrame | None, nominal_activity: pd.D
 
 def category_level_rollforward(
     tb_current: pd.DataFrame, tb_comparative: pd.DataFrame, nominal_activity: pd.DataFrame | None,
-    period_days: int = 365,
+    period_days: int = 365, materiality: float = MATERIALITY_AMOUNT,
 ) -> FixedAssetResult:
     """Cost / accumulated depreciation / NBV rollforward per fixed asset
     category, built purely from the TB's own cost-vs-depreciation account
@@ -271,7 +271,7 @@ def category_level_rollforward(
         })
 
     detail = pd.DataFrame(rows)
-    flagged = detail[(detail["Cost diff"].abs() > MATERIALITY_AMOUNT) | (detail["Depreciation diff"].abs() > MATERIALITY_AMOUNT)]
+    flagged = detail[(detail["Cost diff"].abs() > materiality) | (detail["Depreciation diff"].abs() > materiality)]
     status = "ok" if flagged.empty else "review"
     msg = (
         "Every category's cost and depreciation rollforward ties to the TB."
@@ -310,6 +310,7 @@ def asset_level_rollforward(
     nominal_activity: pd.DataFrame | None,
     tb_current: pd.DataFrame | None,
     period_days: int = 365,
+    materiality: float = MATERIALITY_AMOUNT,
 ) -> AssetRegisterResult:
     """Rolls a prior-year asset register forward: depreciates each asset by
     its own method/rate, flags additions found in nominal activity that
@@ -412,7 +413,7 @@ def asset_level_rollforward(
     if tb_nbv is not None:
         variance = round(total_nbv - tb_nbv, 2)
         parts = []
-        if abs(variance) > MATERIALITY_AMOUNT:
+        if abs(variance) > materiality:
             parts.append(f"register NBV (£{total_nbv:,.2f}) differs from the TB fixed asset net balance (£{tb_nbv:,.2f}) by £{abs(variance):,.2f}")
         if not new_additions.empty:
             parts.append(f"{len(new_additions)} transaction(s) found in nominal activity against fixed asset cost codes not yet in the register - review and add")

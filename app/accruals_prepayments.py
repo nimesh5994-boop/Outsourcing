@@ -61,6 +61,7 @@ def _find_accounts(tb_current: pd.DataFrame) -> list[tuple[str, str, str]]:
 
 def build_schedule(
     tb_current: pd.DataFrame | None, tb_comparative: pd.DataFrame | None, nominal_activity: pd.DataFrame | None,
+    materiality: float = MATERIALITY_AMOUNT,
 ) -> ReconResult:
     name = "Accruals & Prepayments schedule"
     accounts = _find_accounts(tb_current)
@@ -94,7 +95,7 @@ def build_schedule(
         })
 
     detail = pd.DataFrame(rows)
-    flagged = detail[detail["Diff"].abs() > MATERIALITY_AMOUNT]
+    flagged = detail[detail["Diff"].abs() > materiality]
     status = "ok" if flagged.empty else "review"
 
     total_prepayments = float(detail.loc[detail["Type"] == "Prepayment", "Balance c/fwd (per TB)"].sum())

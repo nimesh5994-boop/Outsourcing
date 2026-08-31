@@ -89,6 +89,34 @@ def test_tb_lead_schedule_formulas_match_python_ground_truth(tmp_path, canonical
         assert bool(_cell(sol, out.name, sheet_name, f"G{r}")) == bool(row.flag)
 
 
+def test_tb_lead_schedule_formulas_respect_a_configured_materiality(tmp_path, canonical_tb):
+    # a tighter materiality than the £500/10% default should flag rows the
+    # default wouldn't - and the live Excel formula (not just the Python
+    # side) needs to bake in that same tighter value, since a template's
+    # configured materiality is meant to reach the actual workbook
+    tb_current, tb_comparative = canonical_tb
+    tight_materiality, tight_pct = 50.0, 0.01
+    variance = recon.variance_analysis(tb_current, tb_comparative, materiality=tight_materiality, variance_pct_threshold=tight_pct)
+    assert variance.detail["flag"].any(), "fixture doesn't exercise a flagged row at the tightened threshold"
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, {"tb_current": tb_current, "tb_comparative": tb_comparative})
+    build_tb_lead_schedule_formulas(
+        wb, "Brightwell Landscaping Supplies Limited", "Year ended 31 December 2025", "1", variance.detail, refs,
+        materiality=tight_materiality, variance_pct_threshold=tight_pct,
+    )
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / "tb_formula_tight_materiality.xlsx"
+    wb.save(out)
+
+    sol = _evaluate(out)
+    sheet_name = "1 TB Lead Schedule"
+    for i, row in enumerate(variance.detail.itertuples()):
+        r = 6 + i
+        assert bool(_cell(sol, out.name, sheet_name, f"G{r}")) == bool(row.flag)
+
+
 def test_control_account_formulas_match_python_ground_truth(tmp_path, canonical_data):
     results = ca.build_all_rollforwards(
         canonical_data["tb_current"], canonical_data["tb_comparative"], canonical_data["nominal_current"],

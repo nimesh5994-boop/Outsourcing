@@ -63,7 +63,10 @@ def check_tb_self_balances(tb_current: pd.DataFrame, tb_comparative: pd.DataFram
     return ReconResult("TB self-balance check", "ok", "Trial balance debits equal credits for all periods uploaded.", detail)
 
 
-def variance_analysis(tb_current: pd.DataFrame, tb_comparative: pd.DataFrame) -> ReconResult:
+def variance_analysis(
+    tb_current: pd.DataFrame, tb_comparative: pd.DataFrame,
+    materiality: float = MATERIALITY_AMOUNT, variance_pct_threshold: float = VARIANCE_PCT_THRESHOLD,
+) -> ReconResult:
     if tb_current is None or tb_current.empty:
         return ReconResult("Current vs comparative variance analysis", "n/a", "No current-year trial balance uploaded.")
     cur = tb_current.groupby(["account_code", "account_name"], as_index=False)["balance"].sum().rename(columns={"balance": "current_year"})
@@ -79,17 +82,17 @@ def variance_analysis(tb_current: pd.DataFrame, tb_comparative: pd.DataFrame) ->
         axis=1,
     )
     merged["flag"] = (
-        (merged["variance_amount"].abs() >= MATERIALITY_AMOUNT) &
-        (merged["variance_pct"].abs() >= VARIANCE_PCT_THRESHOLD)
+        (merged["variance_amount"].abs() >= materiality) &
+        (merged["variance_pct"].abs() >= variance_pct_threshold)
     )
     merged = merged.sort_values("variance_amount", key=lambda s: s.abs(), ascending=False).reset_index(drop=True)
     flagged = int(merged["flag"].sum())
     status = "ok" if flagged == 0 else "review"
-    msg = "No nominal codes moved beyond materiality." if flagged == 0 else f"{flagged} nominal code(s) moved >{VARIANCE_PCT_THRESHOLD:.0%} and >£{MATERIALITY_AMOUNT:,.0f} year-on-year - review for reclassification or genuine business change."
+    msg = "No nominal codes moved beyond materiality." if flagged == 0 else f"{flagged} nominal code(s) moved >{variance_pct_threshold:.0%} and >£{materiality:,.0f} year-on-year - review for reclassification or genuine business change."
     return ReconResult("Current vs comparative variance analysis", status, msg, merged)
 
 
-def nominal_activity_review(nominal_current: pd.DataFrame) -> ReconResult:
+def nominal_activity_review(nominal_current: pd.DataFrame, materiality: float = MATERIALITY_AMOUNT) -> ReconResult:
     if nominal_current is None or nominal_current.empty:
         return ReconResult("Nominal activity review (reallocation candidates)", "n/a", "No nominal activity uploaded.")
 
@@ -106,7 +109,7 @@ def nominal_activity_review(nominal_current: pd.DataFrame) -> ReconResult:
             row_reasons.append("Posted to a suspense/miscellaneous code")
         if r["abs_amount"] >= ROUND_SUM_THRESHOLD and r["abs_amount"] % 100 == 0:
             row_reasons.append("Round-sum manual journal above threshold")
-        if str(r.get("source_type", "")).lower() in ("journal", "manual journal", "je") and r["abs_amount"] >= MATERIALITY_AMOUNT:
+        if str(r.get("source_type", "")).lower() in ("journal", "manual journal", "je") and r["abs_amount"] >= materiality:
             row_reasons.append("Material manual journal")
         if any(k in desc_l for k in ("reallocat", "correction", "reclass", "to be reviewed", "tbc", "query")):
             row_reasons.append("Description flags it as a pending correction/reallocation")
@@ -123,7 +126,10 @@ def nominal_activity_review(nominal_current: pd.DataFrame) -> ReconResult:
     return ReconResult("Nominal activity review (reallocation candidates)", status, msg, flagged[cols] if not flagged.empty else pd.DataFrame(columns=cols))
 
 
-def debtors_creditors_control_recon(aged: pd.DataFrame, tb: pd.DataFrame, control_account_names: list[str], party_col: str, label: str) -> ReconResult:
+def debtors_creditors_control_recon(
+    aged: pd.DataFrame, tb: pd.DataFrame, control_account_names: list[str], party_col: str, label: str,
+    materiality: float = MATERIALITY_AMOUNT,
+) -> ReconResult:
     if aged is None or aged.empty:
         return ReconResult(label, "n/a", "No aged report uploaded.")
     aged_total = float(aged["total"].sum())
@@ -142,7 +148,7 @@ def debtors_creditors_control_recon(aged: pd.DataFrame, tb: pd.DataFrame, contro
         "TB control account balance": abs(tb_total),
         "Variance": variance,
     }])
-    status = "ok" if abs(variance) <= MATERIALITY_AMOUNT else "review"
+    status = "ok" if abs(variance) <= materiality else "review"
     msg = "Aged listing agrees to the control account." if status == "ok" else f"Aged listing does not agree to the TB control account by £{variance:,.2f} - investigate unposted invoices/credits or a control account misstatement."
 
     result = ReconResult(label, status, msg, detail)
@@ -164,7 +170,10 @@ def debtors_creditors_control_recon(aged: pd.DataFrame, tb: pd.DataFrame, contro
     return result
 
 
-def bank_reconciliation(bank_statement: pd.DataFrame, tb: pd.DataFrame, bank_account_names: list[str] | None = None) -> ReconResult:
+def bank_reconciliation(
+    bank_statement: pd.DataFrame, tb: pd.DataFrame, bank_account_names: list[str] | None = None,
+    materiality: float = MATERIALITY_AMOUNT,
+) -> ReconResult:
     if bank_statement is None or bank_statement.empty:
         return ReconResult("Bank reconciliation", "n/a", "No bank closing statement uploaded.")
 
@@ -187,7 +196,7 @@ def bank_reconciliation(bank_statement: pd.DataFrame, tb: pd.DataFrame, bank_acc
             "Reconciling items (to complete)": "",
         })
     detail = pd.DataFrame(rows)
-    flagged = detail[detail["Unreconciled variance"].abs() > MATERIALITY_AMOUNT]
+    flagged = detail[detail["Unreconciled variance"].abs() > materiality]
     status = "ok" if flagged.empty else "review"
     msg = "All bank accounts agree to TB within materiality." if flagged.empty else f"{len(flagged)} bank account(s) show an unreconciled variance - list reconciling items (unpresented cheques, uncleared deposits, bank charges) on the Bank Recon tab."
     return ReconResult("Bank reconciliation", status, msg, detail)
@@ -195,7 +204,7 @@ def bank_reconciliation(bank_statement: pd.DataFrame, tb: pd.DataFrame, bank_acc
 
 def vat_cross_check(
     vat_return: pd.DataFrame, pl: pd.DataFrame, tb: pd.DataFrame, vat_control_names: list[str],
-    nominal_activity: pd.DataFrame | None = None,
+    nominal_activity: pd.DataFrame | None = None, materiality: float = MATERIALITY_AMOUNT,
 ) -> ReconResult:
     if vat_return is None or vat_return.empty:
         return ReconResult("VAT return cross-check", "n/a", "No VAT return uploaded.")
@@ -240,28 +249,30 @@ def vat_cross_check(
     return result
 
 
-def run_all_recons(data: dict) -> list[ReconResult]:
+def run_all_recons(
+    data: dict, materiality: float = MATERIALITY_AMOUNT, variance_pct_threshold: float = VARIANCE_PCT_THRESHOLD,
+) -> list[ReconResult]:
     """data keys: tb_current, tb_comparative, nominal_current, aged_debtors,
     aged_creditors, vat_return, bank_statement, pl_current, bs_current."""
     results = [
         check_tb_self_balances(data.get("tb_current"), data.get("tb_comparative")),
-        variance_analysis(data.get("tb_current"), data.get("tb_comparative")),
-        nominal_activity_review(data.get("nominal_current")),
+        variance_analysis(data.get("tb_current"), data.get("tb_comparative"), materiality, variance_pct_threshold),
+        nominal_activity_review(data.get("nominal_current"), materiality),
         debtors_creditors_control_recon(
             data.get("aged_debtors"), data.get("tb_current"),
             ["debtors control", "trade debtors", "accounts receivable", "sales ledger control"],
-            "customer", "Debtors control account reconciliation",
+            "customer", "Debtors control account reconciliation", materiality,
         ),
         debtors_creditors_control_recon(
             data.get("aged_creditors"), data.get("tb_current"),
             ["creditors control", "trade creditors", "accounts payable", "purchase ledger control"],
-            "supplier", "Creditors control account reconciliation",
+            "supplier", "Creditors control account reconciliation", materiality,
         ),
-        bank_reconciliation(data.get("bank_statement"), data.get("tb_current")),
+        bank_reconciliation(data.get("bank_statement"), data.get("tb_current"), materiality=materiality),
         vat_cross_check(
             data.get("vat_return"), data.get("pl_current"), data.get("tb_current"),
             ["vat control", "vat liability", "sales tax payable", "vat payable"],
-            data.get("nominal_current"),
+            data.get("nominal_current"), materiality=materiality,
         ),
     ]
     return results

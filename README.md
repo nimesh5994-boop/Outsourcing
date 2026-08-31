@@ -112,10 +112,26 @@ value goes* (a cell reference per field); it doesn't write label text of
 its own - a template's own surrounding labels, if any, are part of the
 template's untouched sheets, not something a generated schedule adds.
 
-**Not yet wired to the config**: `materiality` (the materiality/variance
-thresholds used across recon.py, control_accounts.py, financial_statements
-.py, fixed_assets.py, and corporation_tax.py are still fixed module-level
-constants, not read from a template's config) - see Known limitations.
+**Configurable materiality.** `materiality` (`{"default_amount": 500,
+"variance_pct_threshold": 0.10}` by default) sets the £ and % thresholds
+every check flags against - a practice tightens or loosens it per template
+rather than living with the system's £500/10% defaults everywhere.
+`main.py`'s `_generate_workbook_steps` reads it once per job
+(`template["config"]["materiality"]`, falling back to each module's own
+constant when a job has no template) and threads the resulting
+`materiality`/`variance_pct_threshold` through every check that flags on a
+variance: `recon.py` (TB variance analysis, nominal activity review,
+debtors/creditors control recon, bank recon, VAT cross-check),
+`control_accounts.py`, `nominal_matrix.py`, `financial_statements.py`
+(the Balance Sheet's own balance check), `going_concern.py`,
+`fixed_assets.py` (both the category and asset-level rollforwards),
+`accruals_prepayments.py`, `related_party_transactions.py`, and
+`corporation_tax.py`. It reaches the generated workbook too, not just the
+Recon summary: the live Excel formulas on the formula-linked TB Lead
+Schedule (the variance flag) and the fixed asset category sheet (the cost/
+depreciation diff highlight) bake in the same configured value, so editing
+a figure on a `DATA_*` sheet after the fact still flags against the
+practice's chosen threshold, not a hardcoded one.
 
 ## Formula-linked schedules
 
@@ -1132,18 +1148,16 @@ role and database) to run it.
 
 ## Known limitations / roadmap
 
-- **The template config doesn't fully drive generation yet.** Schedule
+- **The template config now fully drives generation.** Schedule
   enable/disable, `insert_after_sheet` positioning, `numbering.start_at`,
-  and `header_cells` (which cell each schedule's CLIENT NAME/PERIOD/TITLE
-  block lands in) are all wired in and generate into a copy of the
-  practice's real uploaded template file (see "Practices, templates, and
-  clients" above). `materiality` (per-template variance/materiality
-  thresholds) isn't read yet - every check still uses the fixed £500/10%
-  thresholds regardless of what a template configures. That's a bigger
-  change than the others: it's currently a module-level constant in five
-  different computation modules (recon.py, control_accounts.py,
-  financial_statements.py, fixed_assets.py, corporation_tax.py), not a
-  parameter any of them accept.
+  `header_cells` (which cell each schedule's CLIENT NAME/PERIOD/TITLE block
+  lands in), and `materiality` (per-template variance/materiality
+  thresholds) are all wired in and generate into a copy of the practice's
+  real uploaded template file (see "Practices, templates, and clients"
+  above). `materiality` reaches every check that flags on a variance -
+  both their Python-computed status and the live Excel formulas the
+  formula-linked schedules write - rather than the fixed £500/10%
+  defaults regardless of what a template configures.
 - **Formula-linked output covers the core schedules, not everything yet.**
   TB Lead Schedule, control accounts, P&L/B&S, category-level fixed assets,
   Corporation Tax, and the nominal matrix are all live-formula (see

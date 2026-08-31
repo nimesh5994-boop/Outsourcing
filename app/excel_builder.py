@@ -233,7 +233,10 @@ def build_tb_lead_schedule(wb: Workbook, client_name: str, current_label: str, r
     ws.freeze_panes = f"A{row + 1}"
 
 
-def build_tb_lead_schedule_formulas(wb: Workbook, client_name: str, current_label: str, ref: str, variance_detail: pd.DataFrame, refs: DataRefs, header_cells: dict | None = None):
+def build_tb_lead_schedule_formulas(
+    wb: Workbook, client_name: str, current_label: str, ref: str, variance_detail: pd.DataFrame, refs: DataRefs,
+    header_cells: dict | None = None, materiality: float = MATERIALITY_AMOUNT, variance_pct_threshold: float = VARIANCE_PCT_THRESHOLD,
+):
     """Same schedule as build_tb_lead_schedule, but every numeric cell is a
     live formula against the DATA_TB_* sheets instead of a Python-computed
     literal - which accounts appear and their sort order still come from
@@ -279,7 +282,7 @@ def build_tb_lead_schedule_formulas(wb: Workbook, client_name: str, current_labe
         pct_cell.number_format = "0.0%"
         pct_cell.border = BORDER
 
-        flag_cell = ws.cell(row=r, column=7, value=f"=AND(ABS(E{r})>={MATERIALITY_AMOUNT!r},ABS(F{r})>={VARIANCE_PCT_THRESHOLD!r})")
+        flag_cell = ws.cell(row=r, column=7, value=f"=AND(ABS(E{r})>={materiality!r},ABS(F{r})>={variance_pct_threshold!r})")
         flag_cell.border = BORDER
 
         ws.cell(row=r, column=8, value="").border = BORDER
@@ -784,7 +787,7 @@ def build_bs_statement_sheet_formulas(
 
 def build_fixed_asset_category_sheet_formulas(
     wb: Workbook, client_name: str, period_label: str, ref: str, result: FixedAssetResult, refs: DataRefs,
-    grouped_codes: dict[str, dict[str, list[str]]], header_cells: dict | None = None,
+    grouped_codes: dict[str, dict[str, list[str]]], header_cells: dict | None = None, materiality: float = MATERIALITY_AMOUNT,
 ):
     """Formula-linked version of the category-level fixed asset rollforward:
     same cost/depreciation/NBV columns as the Python-computed sheet, but
@@ -883,7 +886,7 @@ def build_fixed_asset_category_sheet_formulas(
         est_diff_cell = ws.cell(row=r, column=17, value=row_data["Booked vs system est. (diff)"])
         est_diff_cell.number_format = CURRENCY_FMT
 
-        flagged = abs(row_data["Cost diff"]) > MATERIALITY_AMOUNT or abs(row_data["Depreciation diff"]) > MATERIALITY_AMOUNT
+        flagged = abs(row_data["Cost diff"]) > materiality or abs(row_data["Depreciation diff"]) > materiality
         if flagged:
             for c in (6, 11):
                 ws.cell(row=r, column=c).fill = PatternFill("solid", fgColor=AMBER)
@@ -1422,6 +1425,8 @@ def _generate_schedules(
     enabled=lambda key: True,
     place=lambda key, call: call(),
     header_cells: dict | None = None,
+    materiality: float = MATERIALITY_AMOUNT,
+    variance_pct_threshold: float = VARIANCE_PCT_THRESHOLD,
 ) -> Workbook:
     """The shared core both build_workbook (generic layout, a fresh
     workbook) and build_workbook_into_template (a practice's real
@@ -1445,7 +1450,7 @@ def _generate_schedules(
         entries.append({"ref": tb_ref, "title": "TB Lead Schedule", "status": "ok" if data.get("tb_current") is not None and not data["tb_current"].empty else "n/a", "message": "Current vs comparative, variance flagged"})
 
     pl_statement = build_pl_statement(data.get("pl_current"))
-    bs_statement = build_bs_statement(data.get("bs_current"), pl_statement.net_profit)
+    bs_statement = build_bs_statement(data.get("bs_current"), pl_statement.net_profit, materiality)
 
     pl_on, bs_on = enabled("profit_and_loss"), enabled("balance_sheet")
     pl_ref = ref.next() if pl_on else None
@@ -1539,7 +1544,7 @@ def _generate_schedules(
     variance_result = next((r for r in results if r.name == "Current vs comparative variance analysis"), None)
     if tb_on:
         if refs.tb_current is not None:
-            place("tb_lead_schedule", lambda: build_tb_lead_schedule_formulas(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame(), refs, header_cells=header_cells))
+            place("tb_lead_schedule", lambda: build_tb_lead_schedule_formulas(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame(), refs, header_cells=header_cells, materiality=materiality, variance_pct_threshold=variance_pct_threshold))
         else:
             place("tb_lead_schedule", lambda: build_tb_lead_schedule(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame(), header_cells=header_cells))
 
@@ -1555,7 +1560,7 @@ def _generate_schedules(
     if fa_ref is not None:
         grouped_codes = group_fixed_asset_codes(data.get("tb_current"))
         if grouped_codes and refs.tb_current is not None:
-            place("fixed_asset_category", lambda: build_fixed_asset_category_sheet_formulas(wb, client_name, current_label, fa_ref, fixed_asset_result, refs, grouped_codes, header_cells=header_cells))
+            place("fixed_asset_category", lambda: build_fixed_asset_category_sheet_formulas(wb, client_name, current_label, fa_ref, fixed_asset_result, refs, grouped_codes, header_cells=header_cells, materiality=materiality))
         else:
             place("fixed_asset_category", lambda: build_recon_sheet(wb, client_name, current_label, fa_ref, f"{fa_ref} Fixed Assets", fixed_asset_result, header_cells=header_cells))
 
@@ -1608,6 +1613,8 @@ def build_workbook(
     fixed_asset_result: FixedAssetResult | None = None,
     asset_register_result: AssetRegisterResult | None = None,
     header_cells: dict | None = None,
+    materiality: float = MATERIALITY_AMOUNT,
+    variance_pct_threshold: float = VARIANCE_PCT_THRESHOLD,
 ) -> Workbook:
     """Builds the working paper pack in this system's own generic layout -
     a fresh workbook, sequential numbering from 1, everything enabled, the
@@ -1621,7 +1628,7 @@ def build_workbook(
         client_name, current_label, comparative_label, data, results,
         control_account_results or [], matrix_results or [],
         ct_computation, fixed_asset_result, asset_register_result,
-        header_cells=header_cells,
+        header_cells=header_cells, materiality=materiality, variance_pct_threshold=variance_pct_threshold,
     )
 
 
@@ -1638,6 +1645,8 @@ def build_workbook_into_template(
     ct_computation: CTComputation | None = None,
     fixed_asset_result: FixedAssetResult | None = None,
     asset_register_result: AssetRegisterResult | None = None,
+    materiality: float | None = None,
+    variance_pct_threshold: float | None = None,
 ) -> Workbook:
     """Same schedules as build_workbook, generated into a copy of a
     practice's real uploaded template file instead of a fresh workbook -
@@ -1658,9 +1667,15 @@ def build_workbook_into_template(
     "Index1", rather than erroring or overwriting), positioned via
     insert_after_sheet and otherwise left wherever it's created.
 
-    Not yet wired to the config: materiality (recon.MATERIALITY_AMOUNT and
-    equivalents in the other computation modules are still fixed
-    module-level constants) - see README known limitations.
+    materiality/variance_pct_threshold default to the template's own
+    "materiality" config block (default_amount/variance_pct_threshold - see
+    storage.DEFAULT_TEMPLATE_CONFIG) when not passed explicitly by the
+    caller, so a practice's chosen materiality reaches every schedule's
+    flagging - both the Python-computed status in `results` (materiality
+    should already have been threaded through whatever produced those
+    upstream, e.g. recon.run_all_recons) and the live Excel formulas this
+    function itself writes (the TB Lead Schedule variance flag, the fixed
+    asset category diff highlight).
     """
     # template_source is bytes once templates live in Postgres rather than
     # on disk (a local path wouldn't survive between serverless
@@ -1671,6 +1686,11 @@ def build_workbook_into_template(
     schedules_cfg = template_config.get("schedules", {})
     numbering_cfg = template_config.get("numbering", {})
     header_cells = template_config.get("header_cells")
+    materiality_cfg = template_config.get("materiality", {})
+    if materiality is None:
+        materiality = float(materiality_cfg.get("default_amount", MATERIALITY_AMOUNT))
+    if variance_pct_threshold is None:
+        variance_pct_threshold = float(materiality_cfg.get("variance_pct_threshold", VARIANCE_PCT_THRESHOLD))
 
     def enabled(key: str) -> bool:
         return schedules_cfg.get(key, {}).get("enabled", True)
@@ -1709,4 +1729,5 @@ def build_workbook_into_template(
         control_account_results or [], matrix_results or [],
         ct_computation, fixed_asset_result, asset_register_result,
         enabled=enabled, place=place, header_cells=header_cells,
+        materiality=materiality, variance_pct_threshold=variance_pct_threshold,
     )

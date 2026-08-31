@@ -34,7 +34,7 @@ def _line(statement: pd.DataFrame, label: str) -> float | None:
     return float(match.iloc[0]["Amount"])
 
 
-def assess(bs_statement: pd.DataFrame | None) -> ReconResult:
+def assess(bs_statement: pd.DataFrame | None, materiality: float = MATERIALITY_AMOUNT) -> ReconResult:
     name = "Going concern indicators"
     if bs_statement is None or bs_statement.empty:
         return ReconResult(name, "n/a", "No Balance Sheet data available to assess.")
@@ -60,12 +60,12 @@ def assess(bs_statement: pd.DataFrame | None) -> ReconResult:
     ])
 
     flags = []
-    if net_current_assets < -MATERIALITY_AMOUNT:
+    if net_current_assets < -materiality:
         flags.append(
             f"net current LIABILITIES of £{abs(net_current_assets):,.2f} - current liabilities exceed current "
             f"assets, a working-capital deficit"
         )
-    if net_assets < -MATERIALITY_AMOUNT:
+    if net_assets < -materiality:
         flags.append(
             f"net LIABILITIES of £{abs(net_assets):,.2f} - total liabilities exceed total assets "
             f"(balance sheet insolvency)"
