@@ -1238,6 +1238,131 @@ def test_control_accounts_standalone_run_through_http(http_client):
     assert "DEBTORS CONTROL" in resp.text
 
 
+def _far_tb_workbook() -> bytes:
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Account Code", "Account Name", "Account Type", "Debit", "Credit"])
+    ws.append(["3000", "Motor Vehicles Cost", "Fixed Asset", 18000, 0])
+    ws.append(["3050", "Motor Vehicles Depreciation", "Fixed Asset", 0, 10195.31])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _far_tb_comparative_workbook() -> bytes:
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Account Code", "Account Name", "Account Type", "Debit", "Credit"])
+    ws.append(["3000", "Motor Vehicles Cost", "Fixed Asset", 12000, 0])
+    ws.append(["3050", "Motor Vehicles Depreciation", "Fixed Asset", 0, 7000])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _far_nominal_workbook() -> bytes:
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Date", "Account Code", "Account Name", "Reference", "Description", "Contact", "Source Type", "Debit", "Credit"])
+    ws.append(["2025-06-01", "3000", "Motor Vehicles Cost", "INV-9", "New van purchase", "Van Dealer Ltd", "Bill", 6000, 0])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _far_register_workbook() -> bytes:
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Asset ID", "Description", "Category", "Date Acquired", "Cost", "Depreciation Method", "Depreciation Rate", "Accumulated Depreciation Brought Forward", "Disposed?"])
+    ws.append(["FA-001", "Ford Transit van", "Motor Vehicles", "15/03/2022", 12000, "Reducing Balance", 25, 7000, "No"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _upload_and_confirm_with_period(c: TestClient, job_id: str, section_report_type: str, filename: str, content: bytes, period: str) -> None:
+    """Same upload + mapping-confirm flow as _confirm_all_pending_uploads,
+    but forces `period` explicitly rather than trusting the auto-detect
+    guess - needed here because guess_period's "closest period end wins"
+    date heuristic (see document_detection.guess_period) can pick the
+    wrong side for a fixture with only one or two GL rows nowhere near
+    either period end; a real full-year GL export doesn't have this
+    problem, but a minimal test fixture does."""
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": section_report_type},
+        files={"files": (filename, content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    from app import storage
+    job = storage.get_job(job_id)
+    upload = next(u for u in job["uploads"].values() if not u["confirmed"])
+    confirm_data = {"action": "confirm", "period": period}
+    confirm_data.update({f"col__{col}": field for col, field in (upload["mapping"] or {}).items() if field})
+    resp = c.post(f"/jobs/{job_id}/uploads/{upload['id']}/mapping", data=confirm_data, follow_redirects=False)
+    assert resp.status_code == 303
+
+
+def _upload_far_fixture(c: TestClient, job_id: str) -> None:
+    _upload_and_confirm_with_period(c, job_id, "trial_balance", "tb.xlsx", _far_tb_workbook(), "current")
+    _upload_and_confirm_with_period(c, job_id, "trial_balance", "tb_comparative.xlsx", _far_tb_comparative_workbook(), "comparative")
+    _upload_and_confirm_with_period(c, job_id, "nominal_activity", "gl.xlsx", _far_nominal_workbook(), "current")
+    _upload_and_confirm_with_period(c, job_id, "fixed_asset_register", "far.xlsx", _far_register_workbook(), "comparative")
+
+
+def test_fixed_asset_register_standalone_run_through_http(http_client):
+    """Fixed Asset Register as its own standalone section, same treatment
+    as Control Accounts/Debtors & Creditors above: the category-level
+    rollforward and capex-miscoding scan need only Trial Balance/Nominal
+    Activity; the asset-level detail additionally uses a prior-year Fixed
+    Asset Register upload and comes back as an AssetRegisterResult, which
+    has no `name` of its own and four data tables rather than the generic
+    three - see _asset_register_result_to_dict for how that's mapped onto
+    the shared results shape."""
+    c = http_client
+    practice_id = _signup(c, admin_email="fixed-asset-register@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "FAR Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+        "comparative_period_start": "2024-01-01", "comparative_period_end": "2024-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    _upload_far_fixture(c, job_id)
+
+    resp = c.post(f"/jobs/{job_id}/fixed-asset-register/run", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/jobs/{job_id}#fixed-asset-register"
+
+    from app import storage
+    job = storage.get_job(job_id)
+    results = {r["name"]: r for r in job["fixed_asset_register_results"]}
+    assert "Fixed asset register (category summary)" in results
+    assert "Fixed asset register (asset detail)" in results
+    assert any("capital expenditure" in n.lower() for n in results)
+
+    category_result = results["Fixed asset register (category summary)"]
+    assert category_result["status"] in ("ok", "review")
+    assert category_result["detail"]  # per-category cost/depreciation/NBV rollforward
+    assert category_result["extra_detail"]  # additions posted during the year
+
+    register_result = results["Fixed asset register (asset detail)"]
+    assert register_result["status"] in ("ok", "review")
+    assert register_result["detail"]  # the rolled-forward per-asset schedule
+    assert register_result["extra_detail"]  # new additions found in nominal activity, not yet in the register
+    assert register_result["extra_detail"][0]["Account"] == "Motor Vehicles Cost"
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    assert "Fixed Asset Register" in resp.text
+    assert "Ford Transit van" in resp.text
+
+
 def test_debtors_creditors_standalone_run_through_http(http_client):
     """Debtors & Creditors as its own standalone section, same treatment
     as Control Accounts above - the aged listing vs Trial Balance control

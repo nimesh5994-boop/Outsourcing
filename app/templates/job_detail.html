@@ -293,6 +293,20 @@
   {{ render_standalone_results(job.debtors_creditors_results, job.debtors_creditors_computed_at) }}
 </div>
 
+<div class="card" id="fixed-asset-register">
+  <h2>Fixed Asset Register</h2>
+  <p class="muted">Cost/depreciation/NBV rolled forward by category straight from the Trial Balance's own Fixed Asset accounts, plus a possible-capex-miscoded-elsewhere scan &mdash; both need only the Trial Balance and Nominal Activity below. The asset-level detail (each asset depreciated by its own method/rate, new additions and possible disposals flagged) additionally needs a prior-year Fixed Asset Register upload; it shows as "n/a" until one is confirmed.</p>
+
+  <div style="margin-top:20px">
+    <form method="post" action="/jobs/{{ job.id }}/fixed-asset-register/run">
+      <button type="submit">Run Fixed Asset Register</button>
+    </form>
+    <p class="muted" style="margin-top:8px">Uses the Trial Balance / Nominal Activity / Fixed Asset Register sections below &mdash; no separate upload here. Runs independently of Generate, so you can test and refine those inputs on their own before building the full working paper.</p>
+  </div>
+
+  {{ render_standalone_results(job.fixed_asset_register_results, job.fixed_asset_register_computed_at) }}
+</div>
+
 {% for rt in report_types %}
 <div class="card">
   <h2>{{ report_labels[rt] }}</h2>

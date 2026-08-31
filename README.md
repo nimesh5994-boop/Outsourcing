@@ -299,8 +299,8 @@ PDF, in any order), and the system works out what each one is:
 | PAYE Reconciliation | BrightPay payroll data matched against the General Ledger - Net Pay per employee per month, HMRC PAYE & NI and Pension Contributions as monthly totals - a dedicated workspace, see below |
 | Corporation Tax computation | Current UK rates (small profits/marginal relief/main rate) applied to accounting profit, checked against the booked tax charge |
 | Statutory filing deadlines | Companies House accounts filing, CT600 filing, and CT payment deadlines - computed purely from the job's period end, no upload needed - see below |
-| Fixed asset register (category) | Cost/depreciation rollforward per asset category, derived from TB + nominal activity, checked against the TB |
-| Fixed asset register (asset detail) | Prior-year register rolled forward asset-by-asset, new additions/possible disposals flagged from nominal activity, totals checked against TB |
+| Fixed asset register (category) | Cost/depreciation rollforward per asset category, derived from TB + nominal activity, checked against the TB - runnable and viewable on its own as its own "Fixed Asset Register" card, same treatment as VAT/PAYE - see below |
+| Fixed asset register (asset detail) | Prior-year register rolled forward asset-by-asset, new additions/possible disposals flagged from nominal activity, totals checked against TB - same standalone card as above |
 | Accruals & Prepayments schedule | Every Prepayment-typed and accrual-named account, side by side in one table, b/fwd + movement = c/fwd checked against TB - see below |
 | Contact coding consistency | A contact whose postings are mostly on one nominal code but a small minority land on a different one - the "BT: 10 postings to Telephone, 2 to Light & Heat" pattern - flags the minority transactions with the likely correct code |
 | Duplicate transaction check | Same contact+date+amount posted more than once, or the same reference/invoice number reused on the same nominal code for the same amount - excludes the natural double-entry legs of one transaction (same reference on different codes, or an invoice and its later payment, which share a reference but have opposite signs) |
@@ -869,6 +869,33 @@ category "review" by itself, since real accounting policies vary far too
 much for a keyword-inferred rate to be authoritative. It's a sanity-check
 number to look at, not a finding.
 
+**Runnable and viewable on its own**, same treatment as VAT/PAYE
+Reconciliation, Control Accounts, and Debtors & Creditors: a "Fixed Asset
+Register" card on the job page reuses whatever Trial Balance/Nominal
+Activity uploads are already confirmed for the job - the category-level
+rollforward and the capex-miscoding scan need nothing else - and has its
+own "Run Fixed Asset Register" button. The asset-level detail runs in
+the same click; it additionally uses a prior-year Fixed Asset Register
+upload when one is confirmed, and comes back "n/a" (rather than blocking
+the other two checks) when it isn't yet. All three checks compute and
+show independently of the full Generate pipeline and of every other
+section, same "test one section on its own" workflow as the rest.
+
+**Real "No" text in a "Disposed?" column no longer reads as disposed**:
+a prior-year register uploaded as an actual file round-trips its
+"Disposed?" column through the generic mapper as text, never a Python
+`bool` - and `bool("No")` is exactly as `True` as `bool("Yes")`, since
+any non-empty string is truthy. The old `asset_level_rollforward` did
+`reg["disposed"].astype(bool)` directly on that text column, so a real
+upload with an explicit "No" in every still-held row's `Disposed?` cell
+silently marked *every* asset disposed, emptying the asset schedule
+entirely - found via a live HTTP smoke test using a real upload rather
+than the hand-built Python `bool` values every existing unit test passed
+directly. `_parse_disposed_flag` now recognises actual affirmative text
+("Yes", "Y", "True", "1", "Disposed", "Sold", "Written off" - case-
+insensitive) as disposed and treats everything else (including "No",
+blank, and an already-Python `False`) as not disposed.
+
 **Capital expenditure coded elsewhere**
 (`suggest_capital_expenditure_reclassification`): the other direction -
 scans nominal activity coded to an ordinary expense account (Xero's
@@ -1094,11 +1121,13 @@ pytest tests/ -v
 features directly (in-memory DataFrames, no database): the transaction-
 level additions detail behind a category's total, the system-estimated
 depreciation columns (specific-before-generic keyword matching, period
-proration, never itself flagging a category "review"), and the capex-
+proration, never itself flagging a category "review"), the capex-
 miscoding suggestion (client's-own-category vocabulary, the generic
 fallback vocabulary for a client with no fixed asset categories yet,
 threshold filtering, and correctly ignoring postings already coded to a
-fixed asset account).
+fixed asset account), and the "Disposed?" text-column regression above -
+"No"/"Yes"/"Y"/"true"/"1" and a real Python `bool` all parsed correctly
+in either direction.
 
 `tests/test_control_accounts.py` covers the control account rollforward
 robustness features directly (in-memory DataFrames, no database): the
@@ -1242,11 +1271,15 @@ uploads, settings, the standalone Run button, and the same results
 landing in the generated workbook's own tabs), the PAYE Reconciliation
 workspace end to end (a Xero-native General Ledger upload plus three
 auto-detected BrightPay uploads, settings, the standalone Run button,
-results landing in the generated workbook's own tabs), Control Accounts
-and Debtors & Creditors as their own standalone sections end to end
-(reusing the job's existing Trial Balance/Nominal Activity/Aged Debtors/
-Aged Creditors uploads rather than needing any of their own, each with
-its own independent "Run" button and results shown on the job page), and
+results landing in the generated workbook's own tabs), Control Accounts,
+Debtors & Creditors, and the Fixed Asset Register as their own standalone
+sections end to end (reusing the job's existing Trial Balance/Nominal
+Activity/Aged Debtors/Aged Creditors/Fixed Asset Register uploads rather
+than needing any of their own, each with its own independent "Run"
+button and results shown on the job page - the Fixed Asset Register test
+also confirms a disposed asset from a real upload is correctly excluded
+from the still-held schedule, the regression case for the "Disposed?"
+text-column bug above), and
 - with a mocked Anthropic client - an AI-assisted note actually reaching the downloaded
 workbook end to end), and the access-control model (signup, login, wrong
 password, unauthenticated redirect, a preparer scoped to only their

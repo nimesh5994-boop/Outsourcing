@@ -424,6 +424,27 @@ def _control_account_result_to_dict(result) -> dict:
     }
 
 
+def _asset_register_result_to_dict(result) -> dict:
+    """AssetRegisterResult (fixed_assets.asset_level_rollforward) has no
+    `name` field, unlike FixedAssetResult/ReconResult (it's always exactly
+    one register per job, so nothing to name it against), and four data
+    tables instead of the generic detail/extra_detail/matched_detail three
+    slots this shape carries. Mapped here as: detail = the rolled-forward
+    per-asset schedule (the main content), extra_detail = new additions
+    found in nominal activity not yet in the register, matched_detail =
+    possible disposals. `summary`'s few totals (register NBV vs TB,
+    variance) are already stated in `message`, so it isn't duplicated as
+    its own table."""
+    return {
+        "name": "Fixed asset register (asset detail)", "status": result.status, "message": result.message,
+        "detail": _df_to_records(result.asset_schedule),
+        "extra_detail": _df_to_records(result.new_additions),
+        "extra_detail_label": "New additions found in nominal activity, not yet in the register",
+        "matched_detail": _df_to_records(result.possible_disposals),
+        "matched_detail_label": "Possible disposals (credit movements on fixed asset cost codes)",
+    }
+
+
 @app.post("/jobs/{job_id}/vat-recon/run")
 def run_vat_reconciliation(job_id: str, user: dict = Depends(auth.current_user_dep)):
     """Computes the VAT Reconciliation independently of the main Generate
@@ -531,6 +552,42 @@ def run_debtors_creditors_recon(job_id: str, user: dict = Depends(auth.current_u
     job["debtors_creditors_computed_at"] = datetime.now(timezone.utc).isoformat()
     storage.save_job(job)
     return RedirectResponse(f"/jobs/{job_id}#debtors-creditors", status_code=303)
+
+
+@app.post("/jobs/{job_id}/fixed-asset-register/run")
+def run_fixed_asset_register(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Computes the Fixed Asset Register checks independently of the main
+    Generate pipeline, same "test this section on its own" treatment as
+    VAT/PAYE Reconciliation, Control Accounts and Debtors & Creditors
+    above (see app/fixed_assets.py). The category-level rollforward and
+    the capex-miscoding suggestion need only the Trial Balance/Nominal
+    Activity uploads already used elsewhere; the asset-level rollforward
+    additionally needs a prior-year Fixed Asset Register upload - when
+    that isn't present yet it comes back "n/a" rather than blocking the
+    other two checks from running."""
+    job, client = _authorize_job(user, job_id)
+    data = _load_canonical_data(job)
+    template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
+    materiality, _ = _job_materiality(template)
+    category_result = fixed_assets.category_level_rollforward(
+        data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
+        period_days=_period_days(job), materiality=materiality, period_start=_period_start(job),
+    )
+    register_result = fixed_assets.asset_level_rollforward(
+        data.get("fixed_asset_register"), data.get("nominal_current"), data.get("tb_current"),
+        period_days=_period_days(job), materiality=materiality, period_start=_period_start(job),
+    )
+    capex_result = fixed_assets.suggest_capital_expenditure_reclassification(
+        data.get("tb_current"), data.get("nominal_current"), data.get("fixed_asset_register"), threshold=materiality,
+    )
+    job["fixed_asset_register_results"] = [
+        _recon_result_to_dict(category_result),
+        _asset_register_result_to_dict(register_result),
+        _recon_result_to_dict(capex_result),
+    ]
+    job["fixed_asset_register_computed_at"] = datetime.now(timezone.utc).isoformat()
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#fixed-asset-register", status_code=303)
 
 
 @app.post("/clients/{client_id}/notes/{report_type}")

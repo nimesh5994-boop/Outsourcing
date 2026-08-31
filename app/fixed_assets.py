@@ -356,6 +356,25 @@ def _normalise_method(raw: str) -> str:
     return _METHOD_ALIASES.get(key, STRAIGHT_LINE if not key else key)
 
 
+_DISPOSED_TRUTHY = {"yes", "y", "true", "1", "disposed", "sold", "written off", "wrote off"}
+
+
+def _parse_disposed_flag(value) -> bool:
+    """A "Disposed?" column round-tripped through a real upload (CSV/xlsx
+    -> parsers.apply_mapping) always arrives as a string, not a Python
+    bool - "No" is exactly as truthy as "Yes" under bool("No"), so
+    reg["disposed"].astype(bool) (the old approach) marked EVERY asset as
+    disposed the moment a real file supplied a "No" column, silently
+    emptying the asset schedule. Only recognised affirmative text (or an
+    already-Python bool True) counts as disposed; "No", "", NaN and
+    anything else read as not disposed."""
+    if isinstance(value, bool):
+        return value
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return False
+    return str(value).strip().lower() in _DISPOSED_TRUTHY
+
+
 def asset_level_rollforward(
     prior_register: pd.DataFrame,
     nominal_activity: pd.DataFrame | None,
@@ -373,6 +392,7 @@ def asset_level_rollforward(
 
     reg = prior_register.copy()
     reg["depreciation_method"] = reg["depreciation_method"].map(_normalise_method)
+    reg["disposed"] = reg.get("disposed", False).apply(_parse_disposed_flag) if "disposed" in reg.columns else False
     period_fraction = min(1.0, max(0.0, period_days / 365.0))
 
     def charge_for(row) -> float:
@@ -385,7 +405,7 @@ def asset_level_rollforward(
     reg["nbv_b_fwd"] = reg["cost"] - reg["accumulated_depreciation_b_fwd"]
     reg["nbv_c_fwd"] = reg["cost"] - reg["accumulated_depreciation_c_fwd"]
 
-    still_held = reg[~reg.get("disposed", pd.Series(False, index=reg.index)).astype(bool)]
+    still_held = reg[~reg["disposed"]]
     asset_schedule = still_held[[
         "asset_id", "description", "category", "date_acquired", "cost", "depreciation_method", "depreciation_rate",
         "accumulated_depreciation_b_fwd", "depreciation_charge", "accumulated_depreciation_c_fwd", "nbv_b_fwd", "nbv_c_fwd",

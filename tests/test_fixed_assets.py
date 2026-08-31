@@ -198,3 +198,44 @@ def test_capex_suggestion_uses_prior_register_categories_too():
 def test_capex_suggestion_na_without_tb_or_nominal_activity():
     assert fa.suggest_capital_expenditure_reclassification(None, None).status == "n/a"
     assert fa.suggest_capital_expenditure_reclassification(pd.DataFrame(), pd.DataFrame()).status == "n/a"
+
+
+# --- asset_level_rollforward: "Disposed?" column round-tripped as text --
+
+def _prior_register_row(disposed):
+    return {
+        "asset_id": "FA-001", "description": "Ford Transit van", "category": "Motor Vehicles",
+        "date_acquired": pd.Timestamp("2022-03-15"), "cost": 12000.0,
+        "depreciation_method": "Reducing Balance", "depreciation_rate": 25.0,
+        "accumulated_depreciation_b_fwd": 7000.0, "disposed": disposed,
+    }
+
+
+def test_asset_rollforward_treats_string_no_as_not_disposed():
+    """Regression test for a real bug: a prior-year register uploaded as a
+    real file (CSV/xlsx) round-trips its "Disposed?" column through
+    parsers.apply_mapping as text, never a Python bool - "No" is exactly
+    as truthy as "Yes" under Python's own bool("No"), so the old
+    reg["disposed"].astype(bool) marked every single asset "disposed" the
+    moment the column held the word "No", silently emptying the asset
+    schedule for every real upload (found live: an asset-level register
+    with an explicit "No" column came back with an empty schedule and a
+    "no prior year register" style outcome instead of the roll-forward)."""
+    prior_register = pd.DataFrame([_prior_register_row("No")])
+    result = fa.asset_level_rollforward(prior_register, None, None, period_days=365)
+    assert len(result.asset_schedule) == 1
+    assert result.asset_schedule.iloc[0]["Asset ID"] == "FA-001"
+
+
+@pytest.mark.parametrize("disposed_value", ["Yes", "YES", "y", "true", "1", True])
+def test_asset_rollforward_recognises_various_disposed_spellings(disposed_value):
+    prior_register = pd.DataFrame([_prior_register_row(disposed_value)])
+    result = fa.asset_level_rollforward(prior_register, None, None, period_days=365)
+    assert result.asset_schedule.empty
+
+
+@pytest.mark.parametrize("disposed_value", ["No", "no", "N", "false", "0", "", False])
+def test_asset_rollforward_recognises_various_not_disposed_spellings(disposed_value):
+    prior_register = pd.DataFrame([_prior_register_row(disposed_value)])
+    result = fa.asset_level_rollforward(prior_register, None, None, period_days=365)
+    assert len(result.asset_schedule) == 1
