@@ -293,7 +293,7 @@ PDF, in any order), and the system works out what each one is:
 | Control account rollforwards | B/fwd + movements = c/fwd for any balance-sheet account with nominal detail, with the aged listing attached as a breakdown of debtors/creditors closing balances specifically - plus the actual postings behind the movement and, where there's no aged listing, a movement-by-contact view - runnable and viewable on its own as its own "Control Accounts" card, same treatment as VAT/PAYE - see below |
 | Control accounts - possible miscoding | Postings coded to the wrong balance-sheet control account, found by contact identity - see below |
 | Nominal analysis matrix | Every transaction against an account allocated to its contra nominal code; multi-way splits and unallocated amounts flagged for manual review - plus what's actually inside the OTHER catch-all, and suggested allocations for unallocated items based on that contact's own history - see below |
-| Bank reconciliation | Statement closing balance vs TB |
+| Bank reconciliation | Statement closing balance vs TB - runnable and viewable on its own as its own "Bank Reconciliation" card, same treatment as VAT/PAYE - see below |
 | VAT cross-check | VAT return boxes vs P&L turnover and VAT control account |
 | VAT Reconciliation (Box 1 & 4) | General Ledger matched transaction-by-transaction against the filed return's Sales and Purchases detail - a dedicated workspace, see below |
 | PAYE Reconciliation | BrightPay payroll data matched against the General Ledger - Net Pay per employee per month, HMRC PAYE & NI and Pension Contributions as monthly totals - a dedicated workspace, see below |
@@ -917,6 +917,24 @@ with a candidate table of exactly what matched and why - never
 reclassifies anything itself, since a keyword match on a description is
 a starting point for the preparer to check, not proof of capital nature.
 
+## Bank Reconciliation (standalone section)
+
+The simplest of the standalone sections - `recon.bank_reconciliation`
+matches every account on the uploaded Bank Closing Statement to the
+Trial Balance by account name and compares balance-for-balance, flagging
+any account whose unreconciled variance exceeds materiality. Same
+"runnable and viewable on its own" treatment as VAT/PAYE Reconciliation,
+Control Accounts, Debtors & Creditors, and the Fixed Asset Register: a
+"Bank Reconciliation" card on the job page reuses whatever Bank Closing
+Statement/Trial Balance uploads are already confirmed for the job (no
+separate upload for this section) and has its own "Run Bank
+Reconciliation" button, computing and showing the result independently
+of the full Generate pipeline and of every other section. Last of the
+four sections built for the "every check open and testable on its own"
+phase - every check on the job page (VAT/PAYE/FAR/Bank/Control
+Accounts/Debtors/Creditors) can now be run and reviewed independently,
+without needing every other section's inputs ready first.
+
 ## Accruals & Prepayments schedule
 
 Built from `app/accruals_prepayments.py` - a section every real working
@@ -1272,14 +1290,14 @@ landing in the generated workbook's own tabs), the PAYE Reconciliation
 workspace end to end (a Xero-native General Ledger upload plus three
 auto-detected BrightPay uploads, settings, the standalone Run button,
 results landing in the generated workbook's own tabs), Control Accounts,
-Debtors & Creditors, and the Fixed Asset Register as their own standalone
-sections end to end (reusing the job's existing Trial Balance/Nominal
-Activity/Aged Debtors/Aged Creditors/Fixed Asset Register uploads rather
-than needing any of their own, each with its own independent "Run"
-button and results shown on the job page - the Fixed Asset Register test
-also confirms a disposed asset from a real upload is correctly excluded
-from the still-held schedule, the regression case for the "Disposed?"
-text-column bug above), and
+Debtors & Creditors, the Fixed Asset Register, and Bank Reconciliation as
+their own standalone sections end to end (reusing the job's existing
+Trial Balance/Nominal Activity/Aged Debtors/Aged Creditors/Fixed Asset
+Register/Bank Closing Statement uploads rather than needing any of their
+own, each with its own independent "Run" button and results shown on the
+job page - the Fixed Asset Register test also confirms a disposed asset
+from a real upload is correctly excluded from the still-held schedule,
+the regression case for the "Disposed?" text-column bug above), and
 - with a mocked Anthropic client - an AI-assisted note actually reaching the downloaded
 workbook end to end), and the access-control model (signup, login, wrong
 password, unauthenticated redirect, a preparer scoped to only their

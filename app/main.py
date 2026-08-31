@@ -590,6 +590,28 @@ def run_fixed_asset_register(job_id: str, user: dict = Depends(auth.current_user
     return RedirectResponse(f"/jobs/{job_id}#fixed-asset-register", status_code=303)
 
 
+@app.post("/jobs/{job_id}/bank-recon/run")
+def run_bank_reconciliation(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Computes Bank Reconciliation independently of the main Generate
+    pipeline, same "test this section on its own" treatment as every
+    other standalone section above (see recon.bank_reconciliation) -
+    reuses whatever Bank Closing Statement/Trial Balance uploads are
+    already confirmed for this job rather than needing uploads of its
+    own. Last of the four sections built for this phase (VAT/PAYE,
+    Control Accounts/Debtors & Creditors, Fixed Asset Register, now
+    Bank), so every check on the job page can be run and reviewed on
+    its own before a full working paper is even ready to build."""
+    job, client = _authorize_job(user, job_id)
+    data = _load_canonical_data(job)
+    template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
+    materiality, _ = _job_materiality(template)
+    result = recon.bank_reconciliation(data.get("bank_statement"), data.get("tb_current"), materiality=materiality)
+    job["bank_recon_results"] = [_recon_result_to_dict(result)]
+    job["bank_recon_computed_at"] = datetime.now(timezone.utc).isoformat()
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#bank-recon", status_code=303)
+
+
 @app.post("/clients/{client_id}/notes/{report_type}")
 def save_report_note(client_id: str, report_type: str, note: str = Form(""), next: str = Form(""),
                       user: dict = Depends(auth.current_user_dep)):

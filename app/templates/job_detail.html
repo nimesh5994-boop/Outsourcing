@@ -307,6 +307,20 @@
   {{ render_standalone_results(job.fixed_asset_register_results, job.fixed_asset_register_computed_at) }}
 </div>
 
+<div class="card" id="bank-recon">
+  <h2>Bank Reconciliation</h2>
+  <p class="muted">Every bank account on the Bank Closing Statement matched to the Trial Balance by account name and compared balance-for-balance, flagged if the unreconciled variance exceeds materiality.</p>
+
+  <div style="margin-top:20px">
+    <form method="post" action="/jobs/{{ job.id }}/bank-recon/run">
+      <button type="submit">Run Bank Reconciliation</button>
+    </form>
+    <p class="muted" style="margin-top:8px">Uses the Bank Closing Statement / Trial Balance sections below &mdash; no separate upload here. Runs independently of Generate, so you can test and refine those inputs on their own before building the full working paper.</p>
+  </div>
+
+  {{ render_standalone_results(job.bank_recon_results, job.bank_recon_computed_at) }}
+</div>
+
 {% for rt in report_types %}
 <div class="card">
   <h2>{{ report_labels[rt] }}</h2>

@@ -1363,6 +1363,75 @@ def test_fixed_asset_register_standalone_run_through_http(http_client):
     assert "Ford Transit van" in resp.text
 
 
+def _bank_statement_workbook() -> bytes:
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Account", "Statement Date", "Closing Balance"])
+    ws.append(["BANK CURRENT ACCOUNT", "2025-12-31", 5000])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _bank_recon_tb_workbook() -> bytes:
+    from openpyxl import Workbook
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Account Code", "Account Name", "Account Type", "Debit", "Credit"])
+    ws.append(["1200", "BANK CURRENT ACCOUNT", "Bank", 5000, 0])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_bank_reconciliation_standalone_run_through_http(http_client):
+    """Bank Reconciliation as its own standalone section, same treatment
+    as Control Accounts/Debtors & Creditors/Fixed Asset Register above -
+    the simplest of the four (a single ReconResult, no separate upload of
+    its own beyond the Bank Closing Statement and Trial Balance already
+    used elsewhere), the last section built for this "every check open
+    and testable on its own" phase (see recon.bank_reconciliation)."""
+    c = http_client
+    practice_id = _signup(c, admin_email="bank-recon@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Bank Recon Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    for section_report_type, filename, content in [
+        ("bank_statement", "bank.xlsx", _bank_statement_workbook()),
+        ("trial_balance", "tb.xlsx", _bank_recon_tb_workbook()),
+    ]:
+        resp = c.post(
+            f"/jobs/{job_id}/uploads", data={"section_report_type": section_report_type},
+            files={"files": (filename, content, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+    _confirm_all_pending_uploads(c, job_id)
+
+    resp = c.post(f"/jobs/{job_id}/bank-recon/run", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/jobs/{job_id}#bank-recon"
+
+    from app import storage
+    job = storage.get_job(job_id)
+    results = job["bank_recon_results"]
+    assert len(results) == 1
+    result = results[0]
+    assert result["name"] == "Bank reconciliation"
+    assert result["status"] == "ok"  # statement (5000) ties exactly to the TB bank balance (5000)
+    assert result["detail"][0]["Bank account"] == "BANK CURRENT ACCOUNT"
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    assert "Bank Reconciliation" in resp.text
+    assert "BANK CURRENT ACCOUNT" in resp.text
+
+
 def test_debtors_creditors_standalone_run_through_http(http_client):
     """Debtors & Creditors as its own standalone section, same treatment
     as Control Accounts above - the aged listing vs Trial Balance control
