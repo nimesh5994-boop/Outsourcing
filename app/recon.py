@@ -171,9 +171,25 @@ def debtors_creditors_control_recon(
 
 
 def bank_reconciliation(
-    bank_statement: pd.DataFrame, tb: pd.DataFrame, bank_account_names: list[str] | None = None,
+    bank_statement: pd.DataFrame, tb: pd.DataFrame,
     materiality: float = MATERIALITY_AMOUNT,
 ) -> ReconResult:
+    """Matches each bank statement account to its TB account by name -
+    exact match first, falling back to a substring match (e.g. statement
+    "NATWEST CURRENT ACCOUNT" against TB "BANK - NATWEST CURRENT
+    ACCOUNT") only when that substring identifies exactly ONE TB account,
+    never applied when it's ambiguous between several (a client with both
+    a "Bank Current Account" and a "Bank Deposit Account" must not have a
+    statement's bare "Bank" fuzzy-matched into a meaningless sum of the
+    two) - a genuinely unmatched account is left to report its full
+    balance as a variance rather than silently guessing wrong. This used
+    to require an unused `bank_account_names` parameter that no caller
+    ever actually passed (its own content played no part in the match -
+    it was purely a truthy on/off gate always left off), which made the
+    fallback dead code: a bank statement whose account naming didn't
+    match the TB byte-for-byte - the normal case, not the exception, in
+    real exports - always came back as a bogus "unreconciled" finding for
+    the account's ENTIRE balance."""
     if bank_statement is None or bank_statement.empty:
         return ReconResult("Bank reconciliation", "n/a", "No bank closing statement uploaded.")
 
@@ -183,8 +199,10 @@ def bank_reconciliation(
         tb_balance = 0.0
         if tb is not None and not tb.empty:
             mask = tb["account_name"].str.lower().str.strip() == str(acct_name).lower().strip()
-            if not mask.any() and bank_account_names:
-                mask = tb["account_name"].str.lower().apply(lambda n: acct_name.lower() in n or n in acct_name.lower())
+            if not mask.any():
+                fuzzy_mask = tb["account_name"].str.lower().apply(lambda n: acct_name.lower() in n or n in acct_name.lower())
+                if fuzzy_mask.sum() == 1:
+                    mask = fuzzy_mask
             tb_balance = float(tb.loc[mask, "balance"].sum())
         variance = round(float(b["closing_balance"]) - tb_balance, 2)
         rows.append({

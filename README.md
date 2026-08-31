@@ -971,6 +971,27 @@ phase - every check on the job page (VAT/PAYE/FAR/Bank/Control
 Accounts/Debtors/Creditors) can now be run and reviewed independently,
 without needing every other section's inputs ready first.
 
+**Fuzzy account-name matching actually works now** - a real bug found by
+deep-testing this section with realistic (non-exact-match) data: the
+account-name matcher always tried an exact match first, correctly, but
+its substring-based fallback for the normal case where a bank
+statement's account name doesn't read byte-for-byte identical to the
+TB's (e.g. "NATWEST CURRENT ACCOUNT" on the statement vs "BANK -
+NATWEST CURRENT ACCOUNT" in the TB) was gated behind a `bank_account_
+names` parameter that no caller anywhere in the app ever actually
+passed - and even when supplied, its own content played no part in the
+match; it was purely an always-off toggle. So the fallback was dead
+code: any client whose bank export named its accounts even slightly
+differently from the TB got a bogus "unreconciled" finding for the
+account's *entire* balance, every single time, rather than a clean tie-
+out. Fixed by making the substring fallback available unconditionally
+(no parameter to wire up) - but only when it identifies exactly ONE TB
+account: a bare "Bank" fuzzy-matching both a "Bank Current Account" and
+a "Bank Deposit Account" must never be silently summed into a
+meaningless combined balance, so an ambiguous match is left unresolved
+(reported as a full variance, same as no match at all) rather than
+guessed.
+
 ## Accruals & Prepayments schedule
 
 Built from `app/accruals_prepayments.py` - a section every real working
@@ -1182,6 +1203,15 @@ threshold filtering, and correctly ignoring postings already coded to a
 fixed asset account), and the "Disposed?" text-column regression above -
 "No"/"Yes"/"Y"/"true"/"1" and a real Python `bool` all parsed correctly
 in either direction.
+
+`tests/test_bank_reconciliation.py` covers `recon.bank_reconciliation`'s
+account-name matching directly (in-memory DataFrames, no database): an
+exact name match, the fuzzy-match regression above (a statement account
+name that's a substring of - or contains - the TB's actual account name
+now ties out correctly), the ambiguous-match case correctly refusing to
+guess when a fuzzy match could hit more than one TB account, a statement
+account with no TB match at all reporting its full balance as a
+variance, and the "n/a" case with no bank statement uploaded.
 
 `tests/test_control_accounts.py` covers the control account rollforward
 robustness features directly (in-memory DataFrames, no database): the
