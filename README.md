@@ -285,6 +285,41 @@ silently produces wrong numbers on them. What was true on real client data:
   (Xero puts those in a separate report) - so bank movement analysis isn't
   available yet; bank is covered by the simpler statement-vs-TB balance
   check instead.
+- **Aged Payables Detail and Aged Receivables Detail are structurally
+  identical past the title row** - same grouped-by-contact shape, same
+  Current/1 Month/.../Total bucket columns - so `parse_aged_report` used
+  to happily parse EITHER file as EITHER party_field, and auto-detection
+  (which just returns the first Xero-native parser that doesn't raise)
+  picked whichever of `aged_debtors`/`aged_creditors` it tried first,
+  regardless of which one the file actually was. Found live against a
+  real client: an Aged Receivables Detail export got classified as
+  `aged_creditors`, mixing debtor invoices into the creditors control
+  account check (which then showed a large bogus variance) while debtors
+  reconciliation showed "no aged report uploaded" despite one being
+  confirmed. `parse_aged_report` now reads the file's own title text
+  (`Aged Payables Detail` / `Aged Receivables Detail`) - via
+  `source.raw_columns()[0]`, since pandas treats a Xero report's very
+  first row as the column header, not row data - and raises rather than
+  silently parsing a mismatched file, so `try_xero_native`'s "first
+  parser that doesn't error wins" logic can no longer pick the wrong one.
+- **Two separate Xero-native TB uploads for one job used to silently mix
+  up current and comparative.** A Xero TB export already embeds both
+  years in one file, but a job can also receive two separate Xero-native
+  TB uploads (this year's export, plus last year's kept as its own file
+  rather than relying on this year's embedded comparative column) -
+  `_load_canonical_data` used to overwrite `data["tb_current"]` on every
+  confirmed `trial_balance` upload with no regard for that upload's own
+  period tag, so whichever of the two happened to be processed last
+  silently became "current," regardless of which year it actually was.
+  Found live against a real client whose two years came as genuinely
+  separate exports - the entire workbook (P&L, B/S, Corporation Tax,
+  every control account, the fixed asset register) computed against last
+  year's figures as "current." Now keyed by each upload's own
+  `period`: a `"current"`-tagged upload's own current-year figures become
+  `data["tb_current"]`, a `"comparative"`-tagged upload's own current-year
+  figures (i.e. what that file itself calls "current," which is exactly
+  the job's comparative period) become `data["tb_comparative"]` - correct
+  regardless of upload order.
 
 See `app/xero_reports.py` for the parsers and the docstrings for the exact
 quirks each one works around.

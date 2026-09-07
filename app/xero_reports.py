@@ -228,13 +228,46 @@ _BUCKET_COLUMNS = [
 ]
 
 
+_AGED_TITLE_KEYWORDS = {
+    "customer": ("receivable", "debtor"),
+    "supplier": ("payable", "creditor"),
+}
+
+
 def parse_aged_report(source: DataSource, party_field: str) -> pd.DataFrame:
     """Xero 'Aged Payables/Receivables Detail' report: grouped by contact,
     invoice-level rows, then a 'Total <name>' subtotal row per contact and a
     final grand 'Total' + 'Percentage of total' row. The per-contact subtotal
     rows use un-evaluated formulas (e.g. '=E9') in Xero's own export, which
     read back as blank/zero - so contact totals are summed from the detail
-    rows directly rather than trusted from the subtotal row."""
+    rows directly rather than trusted from the subtotal row.
+
+    An Aged Payables Detail export and an Aged Receivables Detail export are
+    structurally identical past the title row - same grouped-by-contact
+    shape, same Current/1 Month/.../Total bucket columns - so nothing below
+    this point can tell them apart. Without checking the title, this parser
+    happily parses EITHER file as EITHER party_field, and try_xero_native's
+    "first Xero-native parser that doesn't raise wins" logic then picks
+    whichever of aged_debtors/aged_creditors it happens to try first - found
+    live: a real client's Aged Receivables Detail export got auto-detected
+    as aged_creditors (mixing debtor invoices into the creditors control
+    account check, and leaving debtors reconciliation showing "no aged
+    report uploaded" despite one being confirmed). The title row ('Aged
+    Payables Detail' / 'Aged Receivables Detail') is the one signal that
+    actually distinguishes them, so it's checked first and rejected loudly
+    (not silently parsed as the wrong type) when it doesn't match. That
+    title text is read via source.raw_columns()[0] rather than a row of
+    _load_raw()'s DataFrame: pandas treats the file's very first row as the
+    column header, so the title ends up as the raw column name (source.
+    raw_columns() returns it as 'Aged Payables Detail', 'Unnamed: 1', ...)
+    and is gone from row data entirely by the time _load_raw() re-indexes
+    columns to plain integers."""
+    columns = source.raw_columns()
+    title = str(columns[0]).strip().lower() if columns and columns[0] is not None else ""
+    keywords = _AGED_TITLE_KEYWORDS[party_field]
+    if title and not any(k in title for k in keywords):
+        raise ValueError(f"Title row {title!r} doesn't match an Aged {'Receivables' if party_field == 'customer' else 'Payables'} Detail report.")
+
     raw = _load_raw(source)
     header_row = _find_header_row(raw, ["Current", "Older", "Total"])
     body = _sliced_with_header(raw, header_row)

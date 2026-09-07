@@ -1029,10 +1029,33 @@ def _load_canonical_data(job: dict) -> dict:
 
         if upload.get("xero_native"):
             if report_type == "trial_balance":
-                tb_current, tb_comparative = xero_reports.parse_trial_balance(source)
-                data["tb_current"] = tb_current
-                if not tb_comparative.empty:
-                    data["tb_comparative"] = tb_comparative
+                # A Xero TB export already embeds both years in one file
+                # (see parse_trial_balance), so this single upload's own
+                # (this_current, this_comparative) pair is a complete
+                # current+comparative dataset on its own - but a job can
+                # also have TWO separate Xero-native TB uploads (this
+                # year's export, plus last year's kept as its own file
+                # rather than relying on this year's embedded column), and
+                # the two must be told apart by the job's own period tag on
+                # each upload, not just whichever gets processed last.
+                # Blindly overwriting data["tb_current"] on every trial_
+                # balance upload here - the bug this replaced - meant
+                # uploading the comparative-year TB *after* the current-
+                # year one silently made the whole workbook compute against
+                # last year's figures as "current", found live against a
+                # real client whose two years came as genuinely separate
+                # exports.
+                this_current, this_comparative = xero_reports.parse_trial_balance(source)
+                if upload["period"] == "current":
+                    data["tb_current"] = this_current
+                    if "tb_comparative" not in data and not this_comparative.empty:
+                        data["tb_comparative"] = this_comparative
+                elif not this_current.empty:
+                    # this file's own "current" column is what IT calls
+                    # current (e.g. FY2024, as at its own upload date) -
+                    # which is exactly the job's comparative period; its
+                    # own embedded comparative (FY2023) isn't wanted here.
+                    data["tb_comparative"] = this_current
             elif report_type == "nominal_activity":
                 key = "nominal_current" if upload["period"] == "current" else "nominal_comparative"
                 data[key] = xero_reports.parse_account_transactions(source)

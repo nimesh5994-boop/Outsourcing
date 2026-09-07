@@ -7,7 +7,7 @@ import openpyxl
 import pandas as pd
 import pytest
 
-from app import anomaly_detection, compliance_checks, control_accounts, corporation_tax, excel_builder, financial_statements, fixed_assets, mapping, nominal_matrix, parsers, recon, xero_reports
+from app import anomaly_detection, compliance_checks, control_accounts, corporation_tax, document_detection, excel_builder, financial_statements, fixed_assets, mapping, nominal_matrix, parsers, recon, xero_reports
 from app.excel_builder import build_workbook
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
@@ -24,6 +24,45 @@ def test_aged_report_sums_from_detail_rows_not_formula_subtotals(canonical_data)
     # those as zero
     moss = canonical_data["aged_debtors"].set_index("customer").loc["MOSS & TURF SUPPLIES"]
     assert moss["total"] == pytest.approx(2370.00)
+
+
+def test_aged_report_rejects_the_wrong_party_field():
+    # Regression: an Aged Payables Detail export and an Aged Receivables
+    # Detail export are structurally identical past the title row (same
+    # grouped-by-contact shape, same Current/1 Month/.../Total bucket
+    # columns) - without checking the title, parse_aged_report happily
+    # parsed EITHER file as EITHER party_field, so document_detection's
+    # try_xero_native (which just returns whichever of aged_debtors/
+    # aged_creditors it tries first without erroring) could silently
+    # classify a real client's Aged Receivables export as aged_creditors -
+    # found live, feeding debtor invoices into the creditors control
+    # account check and leaving debtors reconciliation with no data at all
+    # despite an aged report having been uploaded and confirmed.
+    payables = parsers.FileDataSource(SAMPLE_DIR / "aged_payables_current_xero.xlsx")
+    receivables = parsers.FileDataSource(SAMPLE_DIR / "aged_receivables_current_xero.xlsx")
+
+    # correct party_field still works
+    assert not xero_reports.parse_aged_report(payables, "supplier").empty
+    assert not xero_reports.parse_aged_report(receivables, "customer").empty
+
+    # wrong party_field is rejected, not silently parsed as the wrong type
+    with pytest.raises(ValueError, match="Aged Receivables"):
+        xero_reports.parse_aged_report(
+            parsers.FileDataSource(SAMPLE_DIR / "aged_payables_current_xero.xlsx"), "customer"
+        )
+    with pytest.raises(ValueError, match="Aged Payables"):
+        xero_reports.parse_aged_report(
+            parsers.FileDataSource(SAMPLE_DIR / "aged_receivables_current_xero.xlsx"), "supplier"
+        )
+
+
+def test_document_detection_tells_payables_and_receivables_apart():
+    # end-to-end version of the regression above, through the actual
+    # auto-detect path a real upload goes through
+    payables = parsers.FileDataSource(SAMPLE_DIR / "aged_payables_current_xero.xlsx")
+    receivables = parsers.FileDataSource(SAMPLE_DIR / "aged_receivables_current_xero.xlsx")
+    assert document_detection.try_xero_native(payables) == "aged_creditors"
+    assert document_detection.try_xero_native(receivables) == "aged_debtors"
 
 
 def test_vat_column_mapping_via_alias_suggestion(canonical_data):

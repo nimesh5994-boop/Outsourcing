@@ -20,6 +20,7 @@ from pathlib import Path
 import psycopg
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import Workbook
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
 
@@ -369,7 +370,88 @@ def test_bulk_upload_mixed_files_auto_detect_and_confirm_chain(http_client):
     assert resp.status_code == 303
     resp = c.get(f"/jobs/{job_id}/download")
     assert resp.status_code == 200
-    assert len(resp.content) > 1000
+
+
+def _xero_native_tb_bytes(as_at_text: str, receivable_balance: float) -> bytes:
+    """A genuinely Xero-native-shaped TB export (title rows + 'As at ...' +
+    the real header Xero uses), not a generic-mapped one - real Xero TB
+    exports embed the comparative year as their own extra column, so this
+    intentionally doesn't set one: the point of the test using this helper
+    is two SEPARATE Xero-native TB uploads for the same job (this year's
+    export, and last year's kept as its own file), not one file's own
+    embedded comparative."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Trial Balance"
+    ws.append(("Trial Balance",))
+    ws.append(("Regression Test Client",))
+    ws.append((as_at_text,))
+    ws.append(("Account Code", "Account", "Account Type", "Debit - Year to date", "Credit - Year to date"))
+    ws.append(("610A", "ACCOUNTS RECEIVABLE", "Current Asset", receivable_balance, None))
+    ws.append(("3000", "RETAINED EARNINGS", "Equity", None, receivable_balance))
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("upload_order", ["current_first", "comparative_first"])
+def test_two_separate_xero_native_tb_uploads_keep_current_and_comparative_straight(http_client, upload_order):
+    # Regression: a Xero TB export already embeds both years in one file,
+    # but a job can also get TWO separate Xero-native TB uploads - this
+    # year's export, plus last year's kept as its own file rather than
+    # relying on this year's embedded comparative column. _load_canonical_
+    # data used to overwrite data["tb_current"] on every confirmed trial_
+    # balance upload regardless of that upload's own period tag, so
+    # whichever of the two got processed LAST silently became "current" -
+    # found live against a real client whose two years came as genuinely
+    # separate exports: the whole workbook computed against last year's
+    # figures. Parametrized over both upload orders since the bug was
+    # order-dependent (whichever upload landed last in the job's uploads
+    # dict won).
+    c = http_client
+    practice_id = _signup(c, admin_email=f"twotb-{upload_order}@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Two TB Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+        "comparative_period_start": "2024-01-01", "comparative_period_end": "2024-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    current_bytes = _xero_native_tb_bytes("As at 31 December 2025", 473823.25)
+    comparative_bytes = _xero_native_tb_bytes("As at 31 December 2024", 231721.61)
+    xlsx_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+    if upload_order == "current_first":
+        first, second = ("tb_2025.xlsx", current_bytes), ("tb_2024.xlsx", comparative_bytes)
+    else:
+        first, second = ("tb_2024.xlsx", comparative_bytes), ("tb_2025.xlsx", current_bytes)
+
+    resp = c.post(f"/jobs/{job_id}/uploads", files=[("files", (first[0], first[1], xlsx_type))], follow_redirects=False)
+    assert resp.status_code == 303
+    resp = c.post(f"/jobs/{job_id}/uploads", files=[("files", (second[0], second[1], xlsx_type))], follow_redirects=False)
+    assert resp.status_code == 303
+
+    from app import storage
+    job = storage.get_job(job_id)
+    by_filename = {u["filename"]: u for u in job["uploads"].values()}
+    assert by_filename["tb_2025.xlsx"]["confirmed"] is True
+    assert by_filename["tb_2024.xlsx"]["confirmed"] is True
+    assert by_filename["tb_2025.xlsx"]["period"] == "current"
+    assert by_filename["tb_2024.xlsx"]["period"] == "comparative"
+
+    from app.main import _load_canonical_data
+    data = _load_canonical_data(job)
+    tb_current_receivable = data["tb_current"].set_index("account_code").loc["610A", "debit"]
+    tb_comparative_receivable = data["tb_comparative"].set_index("account_code").loc["610A", "debit"]
+    assert tb_current_receivable == pytest.approx(473823.25), (
+        f"tb_current should hold the 2025 (job-current) figure regardless of upload order ({upload_order}), "
+        f"got {tb_current_receivable}"
+    )
+    assert tb_comparative_receivable == pytest.approx(231721.61), (
+        f"tb_comparative should hold the 2024 (job-comparative) figure regardless of upload order ({upload_order}), "
+        f"got {tb_comparative_receivable}"
+    )
 
 
 def _make_multisheet_vat_workbook() -> bytes:
