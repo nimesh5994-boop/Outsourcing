@@ -22,6 +22,7 @@ Two generic tables back nearly everything:
 mapping_profiles is its own small table (composite key, not a blob) since
 it's looked up by (client, report_type, platform), not by id.
 """
+import functools
 import os
 import uuid
 from datetime import datetime
@@ -135,11 +136,44 @@ def _get_conn() -> psycopg.Connection:
     """Reuses one connection for the life of the process (a serverless
     instance can be reused across several invocations) - reconnects
     transparently if it's been closed or dropped (idle timeout, cold
-    start)."""
+    start) *before* the next query even runs. That only catches a drop
+    psycopg has already noticed locally, though - a connection Neon (or
+    the network) closed silently in between invocations still looks open
+    here (.closed is still False) and fails on the very next real query
+    instead. See _with_reconnect below for the case this doesn't catch."""
     global _conn
     if _conn is None or _conn.closed:
         _conn = _connect()
     return _conn
+
+
+def _with_reconnect(fn):
+    """Retries a storage function exactly once, against a freshly-opened
+    connection, if it fails with psycopg.OperationalError - the failure
+    mode _get_conn's own .closed check can't see coming: a connection
+    Neon's idle timeout (or a serverless cold start resuming a half-dead
+    socket) closed silently between invocations still reports .closed as
+    False right up until the next real query hits it, which then surfaces
+    as a bare "SSL connection has been closed unexpectedly" on an
+    otherwise-correct request. Seen live in production - rare (~1 in 150
+    requests over a day) but a real, avoidable 500 with no code change
+    needed on the caller's side. Only retries this one error class, and
+    only once, so a genuine query/data problem still fails immediately
+    rather than being masked behind a pointless second attempt."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        global _conn
+        try:
+            return fn(*args, **kwargs)
+        except psycopg.OperationalError:
+            if _conn is not None:
+                try:
+                    _conn.close()
+                except Exception:
+                    pass
+            _conn = None
+            return fn(*args, **kwargs)
+    return wrapper
 
 
 def _new_id(prefix: str) -> str:
@@ -148,6 +182,7 @@ def _new_id(prefix: str) -> str:
 
 # ---------- generic entity storage (practices/templates/clients/jobs) ----------
 
+@_with_reconnect
 def _get_entity(kind: str, entity_id: str) -> dict | None:
     with _get_conn().cursor() as cur:
         cur.execute("SELECT data FROM entities WHERE kind = %s AND id = %s", (kind, entity_id))
@@ -155,6 +190,7 @@ def _get_entity(kind: str, entity_id: str) -> dict | None:
         return row[0] if row else None
 
 
+@_with_reconnect
 def _put_entity(kind: str, entity_id: str, parent_id: str | None, data: dict) -> None:
     with _get_conn().cursor() as cur:
         cur.execute(
@@ -164,6 +200,7 @@ def _put_entity(kind: str, entity_id: str, parent_id: str | None, data: dict) ->
         )
 
 
+@_with_reconnect
 def _list_entities(kind: str, parent_id: str | None = None, order_by_id_desc: bool = False) -> list[dict]:
     order = "id DESC" if order_by_id_desc else "id ASC"
     with _get_conn().cursor() as cur:
@@ -176,6 +213,7 @@ def _list_entities(kind: str, parent_id: str | None = None, order_by_id_desc: bo
 
 # ---------- file storage (uploads, templates, generated output) ----------
 
+@_with_reconnect
 def save_file(kind: str, job_id: str | None, filename: str, content: bytes, content_type: str | None = None) -> str:
     file_id = _new_id("file")
     with _get_conn().cursor() as cur:
@@ -186,6 +224,7 @@ def save_file(kind: str, job_id: str | None, filename: str, content: bytes, cont
     return file_id
 
 
+@_with_reconnect
 def load_file(file_id: str) -> bytes | None:
     with _get_conn().cursor() as cur:
         cur.execute("SELECT content FROM files WHERE id = %s", (file_id,))
@@ -360,6 +399,7 @@ def list_jobs(client_id: str | None = None) -> list[dict]:
     return _list_entities("job", client_id, order_by_id_desc=True)
 
 
+@_with_reconnect
 def delete_job(job_id: str) -> None:
     """Removes a job and every file that belongs to it - every confirmed
     upload plus the generated output workbook, if one exists (files.job_id
@@ -391,6 +431,7 @@ def add_upload(job: dict, report_type: str, period: str, platform: str, filename
 
 # ---------- reusable client mapping profiles ----------
 
+@_with_reconnect
 def load_mapping_profile(client_id: str, report_type: str, platform: str) -> dict | None:
     with _get_conn().cursor() as cur:
         cur.execute(
@@ -401,6 +442,7 @@ def load_mapping_profile(client_id: str, report_type: str, platform: str) -> dic
         return row[0] if row else None
 
 
+@_with_reconnect
 def save_mapping_profile(client_id: str, report_type: str, platform: str, mapping: dict) -> None:
     with _get_conn().cursor() as cur:
         cur.execute(
@@ -429,6 +471,7 @@ def _user_row_to_dict(row) -> dict:
 _USER_COLUMNS = "id, practice_id, email, password_hash, name, role, created_at"
 
 
+@_with_reconnect
 def create_user(practice_id: str, email: str, password_hash: str, name: str, role: str) -> dict:
     user_id = _new_id("user")
     email = email.strip().lower()
@@ -440,6 +483,7 @@ def create_user(practice_id: str, email: str, password_hash: str, name: str, rol
     return get_user(user_id)
 
 
+@_with_reconnect
 def get_user(user_id: str) -> dict | None:
     with _get_conn().cursor() as cur:
         cur.execute(f"SELECT {_USER_COLUMNS} FROM users WHERE id = %s", (user_id,))
@@ -447,6 +491,7 @@ def get_user(user_id: str) -> dict | None:
         return _user_row_to_dict(row) if row else None
 
 
+@_with_reconnect
 def get_user_by_email(email: str) -> dict | None:
     with _get_conn().cursor() as cur:
         cur.execute(f"SELECT {_USER_COLUMNS} FROM users WHERE lower(email) = lower(%s)", (email.strip(),))
@@ -454,24 +499,28 @@ def get_user_by_email(email: str) -> dict | None:
         return _user_row_to_dict(row) if row else None
 
 
+@_with_reconnect
 def list_users(practice_id: str) -> list[dict]:
     with _get_conn().cursor() as cur:
         cur.execute(f"SELECT {_USER_COLUMNS} FROM users WHERE practice_id = %s ORDER BY created_at ASC", (practice_id,))
         return [_user_row_to_dict(row) for row in cur.fetchall()]
 
 
+@_with_reconnect
 def count_users() -> int:
     with _get_conn().cursor() as cur:
         cur.execute("SELECT count(*) FROM users")
         return cur.fetchone()[0]
 
 
+@_with_reconnect
 def delete_user(user_id: str) -> None:
     with _get_conn().cursor() as cur:
         cur.execute("DELETE FROM client_access WHERE user_id = %s", (user_id,))
         cur.execute("DELETE FROM users WHERE id = %s", (user_id,))
 
 
+@_with_reconnect
 def set_client_access(user_id: str, client_ids: list[str]) -> None:
     """Replaces the full set of clients a preparer can see - simplest correct
     model for a checkbox-list UI (submit the whole selection, not deltas)."""
@@ -484,12 +533,14 @@ def set_client_access(user_id: str, client_ids: list[str]) -> None:
             )
 
 
+@_with_reconnect
 def has_client_access(user_id: str, client_id: str) -> bool:
     with _get_conn().cursor() as cur:
         cur.execute("SELECT 1 FROM client_access WHERE user_id = %s AND client_id = %s", (user_id, client_id))
         return cur.fetchone() is not None
 
 
+@_with_reconnect
 def list_client_access(user_id: str) -> list[str]:
     with _get_conn().cursor() as cur:
         cur.execute("SELECT client_id FROM client_access WHERE user_id = %s", (user_id,))

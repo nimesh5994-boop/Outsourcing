@@ -1565,6 +1565,27 @@ On first request after deploy, `storage.py` creates its tables
 (`entities`, `files`, `mapping_profiles`) if they don't already exist, so
 there's nothing else to provision.
 
+**Reconnecting after a dropped connection.** A serverless instance reuses
+one Postgres connection across invocations rather than reconnecting every
+time (`storage._get_conn`) - cheaper, but means that connection can go
+stale between requests (Neon's own idle timeout, or a cold start resuming
+a half-dead socket). `_get_conn`'s own `.closed` check only catches a drop
+psycopg has already noticed locally; a connection closed silently by the
+server still reports `.closed == False` right up until the next real
+query hits it, which then fails with a bare
+`psycopg.OperationalError: SSL connection has been closed unexpectedly`
+on an otherwise-correct request - seen live in production (rare, ~1 in
+150 requests over a day, but a real avoidable 500). Every function that
+touches the connection (`_get_entity`, `_put_entity`, `save_file`,
+`get_user`, etc.) is now wrapped in `storage._with_reconnect`, which
+retries exactly once against a freshly-opened connection if it hits this
+specific error - transparent to every caller, no route code changed.
+Verified against the real failure mode, not just the already-handled
+`.closed` case: killing the Postgres backend mid-session from a second
+connection (`pg_terminate_backend`) leaves `conn.closed` reporting `False`
+- exactly what a real idle timeout looks like - and the next call still
+succeeds (see `test_storage_reconnects_after_a_silently_dropped_connection`).
+
 **Known constraint:** uploaded/template/generated files are stored as
 Postgres `BYTEA` rather than in a separate object store, to keep the
 credential footprint to just `DATABASE_URL`. This is simplest-thing-that-

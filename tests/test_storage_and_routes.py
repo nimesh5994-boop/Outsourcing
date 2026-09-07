@@ -123,6 +123,34 @@ def test_storage_entity_and_file_roundtrip(http_client):
     assert storage.load_mapping_profile("client_x", "trial_balance", "sage") is None
 
 
+def test_storage_reconnects_after_a_silently_dropped_connection(http_client):
+    """Regression: seen live in production as an intermittent
+    "psycopg.OperationalError: SSL connection has been closed
+    unexpectedly" on an otherwise-correct request. Neon's own idle
+    timeout (or a serverless cold start resuming a half-dead socket) can
+    close the underlying connection without psycopg noticing straight
+    away - conn.closed still reports False right up until the next real
+    query hits it, so _get_conn's own "reconnect if closed" check can't
+    catch this case; only _with_reconnect's catch-and-retry-once at the
+    point of failure can. Reproduced here by killing the Postgres backend
+    from a second connection (not by calling conn.close(), which IS the
+    already-handled case) - the exact "still looks open, isn't" state a
+    real idle timeout leaves behind."""
+    from app import storage
+
+    practice = storage.create_practice("Reconnect Test")
+
+    backend_pid = storage._conn.info.backend_pid
+    admin_conn = psycopg.connect(TEST_DATABASE_URL, autocommit=True)
+    admin_conn.execute("SELECT pg_terminate_backend(%s)", (backend_pid,))
+    admin_conn.close()
+    assert storage._conn.closed is False  # psycopg hasn't noticed the kill yet
+
+    fetched = storage.get_practice(practice["id"])  # would previously raise OperationalError
+    assert fetched["id"] == practice["id"]
+    assert fetched["name"] == "Reconnect Test"
+
+
 def test_full_http_flow_practice_to_download(http_client):
     """signup (practice + partner login) -> template upload (normalised) ->
     client -> job -> report upload -> generate -> download, all over real
