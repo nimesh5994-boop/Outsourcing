@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mapping, nominal_matrix, parsers, paye_reconciliation, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, vat_reconciliation, xero_reports
+from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mapping, nominal_matrix, parsers, paye_reconciliation, pdf_extraction, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, vat_reconciliation, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
 from app.models import PAYE_RECON_TYPES, PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS, VAT_RECON_TYPES
 
@@ -812,7 +812,7 @@ def _summarize_progress(progress: list[dict] | None) -> dict | None:
 
 def _first_unconfirmed_upload(job: dict) -> str | None:
     for upload_id, upload in job["uploads"].items():
-        if not upload["confirmed"]:
+        if not upload["confirmed"] and not upload.get("parse_error"):
             return upload_id
     return None
 
@@ -870,7 +870,24 @@ async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: byt
         storage.save_job(job)
         return
 
-    columns = source.raw_columns()
+    try:
+        columns = source.raw_columns()
+    except ValueError as exc:
+        # A PDF that genuinely has no extractable table (a scanned image,
+        # or a layout pdf_extraction's strategies both fail on) used to
+        # propagate straight out of this route as an unhandled 500,
+        # killing the *entire* batch upload - including any other files
+        # in the same drop that parsed just fine. Recorded as its own
+        # upload instead, clearly marked as failed, so one bad file in a
+        # batch doesn't take the rest down with it.
+        upload_id = storage.add_upload(job, "", "current", "other", filename, content, [])
+        job["uploads"][upload_id]["confirmed"] = False
+        job["uploads"][upload_id]["parse_error"] = str(exc)
+        job["uploads"][upload_id]["sheet_name"] = sheet_name
+        job["uploads"][upload_id]["display_name"] = display_name
+        storage.save_job(job)
+        return
+
     if type_hint:
         report_type, confidence = type_hint, 1.0
     else:
@@ -879,6 +896,28 @@ async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: byt
             profile_probe = mapping.suggest_mapping(report_type, columns)
             category_col = next((c for c, f in profile_probe.items() if f == "category"), None)
             report_type = document_detection.disambiguate_pl_vs_bs(source.raw_dataframe(), category_col)
+        elif report_type in ("aged_debtors", "aged_creditors") and Path(filename).suffix.lower() == ".pdf":
+            # An Aged Payables Detail export and an Aged Receivables Detail
+            # export are structurally identical once table-extracted (same
+            # grouped-by-contact shape, same Current/1 Month/.../Total
+            # bucket columns, no "payable"/"receivable" wording anywhere in
+            # the columns themselves) - classify_report_type's alias
+            # scoring has nothing to prefer one over the other with and can
+            # pick the wrong one. The file's own title line (dropped from
+            # the extracted table as pre-header noise - see
+            # pdf_extraction._pick_header_row) is the one signal that
+            # actually distinguishes them, so it's sniffed independently
+            # here and overrides the guess when it clearly says otherwise.
+            # Same override this codebase already applies for a genuine
+            # Xero-native aged report - see xero_reports.parse_aged_report -
+            # just reached through the generic (non-Xero-native, e.g. PDF)
+            # upload path instead, which has no title-check of its own.
+            title_text = pdf_extraction.extract_leading_text(content)
+            detected_party = xero_reports.classify_aged_report_party(title_text)
+            if detected_party == "customer":
+                report_type = "aged_debtors"
+            elif detected_party == "supplier":
+                report_type = "aged_creditors"
     platform = document_detection.classify_platform(columns, is_xero_native=False)
     period = document_detection.guess_period(source, report_type or "trial_balance", job, None)
 
@@ -1019,6 +1058,26 @@ async def save_mapping(request: Request, job_id: str, upload_id: str, user: dict
 
 
 def _load_canonical_data(job: dict) -> dict:
+    # A report type in document_detection.XERO_NATIVE_REPORT_TYPES (e.g.
+    # vat_return) can also arrive through the generic path - most commonly
+    # a multi-sheet workbook dropped into that type's upload section, where
+    # the type_hint forces EVERY sheet to carry the same report_type even
+    # though only one sheet is a genuine match (see the doc-comment on the
+    # generic DATA_KEY branch below). Precomputed here so that branch can
+    # refuse to let one of those other, structurally-unrelated sheets
+    # silently overwrite the correct data a genuine native match already
+    # produced - found live: a real client's VAT Return export workbook
+    # had two extra detail sheets that both got auto-confirmed as
+    # vat_return with an empty column mapping (nothing in their shape
+    # looks like a header row), and whichever of the three sheets got
+    # processed last silently became the only "vat_return" data the VAT
+    # cross-check ever saw - usually one of the two blank ones, not the
+    # real box summary.
+    natively_matched_report_types = {
+        upload["report_type"] for upload in job["uploads"].values()
+        if upload["confirmed"] and upload.get("xero_native")
+    }
+
     data = {}
     for upload in job["uploads"].values():
         if not upload["confirmed"]:
@@ -1063,6 +1122,8 @@ def _load_canonical_data(job: dict) -> dict:
                 data["aged_debtors"] = xero_reports.parse_aged_report(source, "customer")
             elif report_type == "aged_creditors":
                 data["aged_creditors"] = xero_reports.parse_aged_report(source, "supplier")
+            elif report_type == "vat_return":
+                data["vat_return"] = xero_reports.parse_vat_return_box_summary(source)
             continue
 
         if report_type in VAT_RECON_TYPES:
@@ -1094,6 +1155,13 @@ def _load_canonical_data(job: dict) -> dict:
 
         key = DATA_KEY.get((report_type, upload["period"]))
         if not key:
+            continue
+        if report_type in natively_matched_report_types:
+            # see the doc-comment where natively_matched_report_types is
+            # built - this upload shares a report_type with a genuine
+            # native match elsewhere on the job, but isn't one itself
+            # (e.g. a sibling sheet in the same workbook), so it must not
+            # overwrite the good data the native match already produced.
             continue
         df = parsers.apply_mapping(source, report_type, upload["mapping"] or {})
         data[key] = df

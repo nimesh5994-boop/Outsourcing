@@ -31,7 +31,7 @@ from app import mapping, xero_reports
 from app.models import REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS
 from app.parsers import DataSource
 
-XERO_NATIVE_REPORT_TYPES = {"trial_balance", "nominal_activity", "aged_debtors", "aged_creditors"}
+XERO_NATIVE_REPORT_TYPES = {"trial_balance", "nominal_activity", "aged_debtors", "aged_creditors", "vat_return"}
 
 _PLATFORM_HINTS = {
     "sage": {"nominalcode", "nominal", "sagereference"},
@@ -56,6 +56,8 @@ def try_xero_native(source: DataSource) -> str | None:
                 xero_reports.parse_aged_report(source, "customer")
             elif report_type == "aged_creditors":
                 xero_reports.parse_aged_report(source, "supplier")
+            elif report_type == "vat_return":
+                xero_reports.parse_vat_return_box_summary(source)
             return report_type
         except Exception:
             continue

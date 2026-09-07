@@ -234,6 +234,30 @@ _AGED_TITLE_KEYWORDS = {
 }
 
 
+def classify_aged_report_party(text: str) -> str | None:
+    """Reads free text (a report title, or any text pulled from near the
+    top of a file) and returns 'customer' (a Receivables/Debtors report)
+    or 'supplier' (a Payables/Creditors report) - or None if the text
+    doesn't clearly say either. Shared between parse_aged_report's own
+    Xero-native title check below and the generic (non-Xero-native, e.g.
+    a PDF export) upload path in main.py, which hits the exact same
+    ambiguity for the exact same reason: an Aged Payables Detail export
+    and an Aged Receivables Detail export are structurally identical past
+    their own title line - same grouped-by-contact shape, same bucket
+    columns - so this text is the only reliable signal either path has to
+    tell them apart. Found live via the generic path specifically: a real
+    Aged Payables Detail PDF, once table-extracted, has no column header
+    text that says "payable" or "creditor" anywhere (the bucket columns
+    are just Current/1 Month/.../Total, identical to a receivables
+    export), so the ordinary alias-scoring classifier had nothing to
+    prefer aged_creditors over aged_debtors with and picked the wrong one."""
+    lowered = str(text).strip().lower()
+    for party_field, keywords in _AGED_TITLE_KEYWORDS.items():
+        if any(k in lowered for k in keywords):
+            return party_field
+    return None
+
+
 def parse_aged_report(source: DataSource, party_field: str) -> pd.DataFrame:
     """Xero 'Aged Payables/Receivables Detail' report: grouped by contact,
     invoice-level rows, then a 'Total <name>' subtotal row per contact and a
@@ -293,6 +317,46 @@ def parse_aged_report(source: DataSource, party_field: str) -> pd.DataFrame:
 
     out = detail.groupby(party_field, as_index=False)[[c for c, _ in _BUCKET_COLUMNS]].sum()
     return out.reset_index(drop=True)
+
+
+_VAT_BOX_NUMBERS = {str(i) for i in range(1, 10)}
+_VAT_REQUIRED_BOXES = {"box1", "box3", "box4", "box5"}
+
+
+def parse_vat_return_box_summary(source: DataSource) -> pd.DataFrame:
+    """Xero's exported 'VAT Return' report - not a table at all, but a
+    vertical label/box-number/value listing (one row per HMRC box, e.g.
+    ['VAT due in the period on sales and other outputs', '1', 492.36]),
+    with title/client-name/period/scheme-detail rows above and below it
+    that carry no box number. Found live: a real client's VAT Return
+    export dropped into the VAT Return upload section came through as a
+    3-sheet workbook (this report plus two structurally unrelated detail
+    sheets - see main.py's XERO_NATIVE_REPORT_TYPES handling), and the
+    generic column-mapper found nothing to map on ANY of the three (no
+    row in this shape looks like a header row with per-box columns), so
+    the top-level VAT cross-check silently had nothing to work with.
+    Returns a single-row DataFrame with columns box1..box9 (0.0 for any
+    box this export happens to omit, e.g. an export from a business with
+    no EU trade never mentions boxes 8/9)."""
+    raw = _load_raw(source)
+    if raw.shape[1] < 3:
+        raise ValueError("Not a VAT Return box summary export - expected at least 3 columns (label, box number, value).")
+
+    boxes: dict[str, object] = {}
+    for _, row in raw.iterrows():
+        box_no = str(row.iloc[1]).strip() if row.iloc[1] is not None else ""
+        if box_no in _VAT_BOX_NUMBERS:
+            boxes[f"box{box_no}"] = row.iloc[2]
+
+    if not _VAT_REQUIRED_BOXES.issubset(boxes.keys()):
+        raise ValueError("Not a VAT Return box summary export - couldn't find boxes 1, 3, 4 and 5.")
+
+    for i in range(1, 10):
+        boxes.setdefault(f"box{i}", 0.0)
+    out = pd.DataFrame([boxes])
+    for col in out.columns:
+        out[col] = _to_numeric(out[col])
+    return out
 
 
 def derive_pl_bs_from_tb(tb: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:

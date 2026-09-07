@@ -310,6 +310,125 @@ def _make_pdf_trial_balance() -> bytes:
     return buf.getvalue()
 
 
+def _make_pdf_with_no_table() -> bytes:
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.platypus import Paragraph, SimpleDocTemplate
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    doc.build([Paragraph("Just some text, no table here.", getSampleStyleSheet()["Normal"])])
+    return buf.getvalue()
+
+
+def test_unparseable_pdf_in_a_batch_does_not_take_down_the_other_files(http_client):
+    # Regression: a genuinely unparseable PDF (a scanned image, or any
+    # layout pdf_extraction's strategies both fail on) used to raise
+    # straight out of the upload route as an unhandled 500 - killing the
+    # *entire* batch, including a perfectly good file uploaded alongside
+    # it in the same drop. The bad file should be recorded as its own
+    # failed upload instead, and every other file in the batch should
+    # still process normally.
+    pytest.importorskip("reportlab", reason="reportlab is a dev-only dependency for building test PDFs")
+    c = http_client
+    practice_id = _signup(c, admin_email="badpdf@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Bad PDF Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+        "comparative_period_start": "2024-01-01", "comparative_period_end": "2024-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    tb_path = SAMPLE_DIR / "trial_balance_current_xero.xlsx"
+    files_payload = [
+        ("files", (tb_path.name, tb_path.read_bytes(),
+                   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")),
+        ("files", ("scanned_or_unreadable.pdf", _make_pdf_with_no_table(), "application/pdf")),
+    ]
+    resp = c.post(f"/jobs/{job_id}/uploads", files=files_payload, follow_redirects=False)
+    assert resp.status_code == 303, f"batch upload should not 500 just because one file failed to parse: {resp.status_code}"
+
+    from app import storage
+    job = storage.get_job(job_id)
+    by_filename = {u["filename"]: u for u in job["uploads"].values()}
+    assert by_filename[tb_path.name]["confirmed"] is True  # the good file still auto-confirmed
+    bad = by_filename["scanned_or_unreadable.pdf"]
+    assert bad["confirmed"] is False
+    assert bad.get("parse_error"), "the failed file should carry a parse_error message"
+    assert "No table could be found" in bad["parse_error"]
+
+    # the failed upload must never be routed into the mapping-confirm chain
+    from app.main import _first_unconfirmed_upload
+    assert _first_unconfirmed_upload(job) is None
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert resp.status_code == 200
+    assert "Failed to parse" in resp.text
+    assert "scanned_or_unreadable.pdf" in resp.text
+
+
+def _make_aged_report_pdf(kind: str) -> bytes:
+    """A borderless (no drawn gridlines) PDF mimicking a real Aged Payables/
+    Receivables Detail export's shape: title/client/period rows ahead of a
+    real header row, with bucket columns (Current/1 Month/.../Total) that
+    carry no "payable"/"receivable" wording themselves - only the title
+    line does. See test_generic_pdf_aged_report_uses_title_to_tell_
+    payables_from_receivables below."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Table
+
+    title = "Aged Payables Detail" if kind == "supplier" else "Aged Receivables Detail"
+    rows = [
+        [title, "", "", "", ""],
+        ["Acme Ltd", "", "", "", ""],
+        ["As at 31 December 2025", "", "", "", ""],
+        ["Invoice Date", "Reference", "Current", "Older", "Total"],
+        ["01 Jan 2025", "INV-1", "0", "100.00", "100.00"],
+        ["02 Jan 2025", "INV-2", "0", "200.00", "200.00"],
+    ]
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    doc.build([Table(rows)])  # no TableStyle/GRID - matches the real export's lack of gridlines
+    return buf.getvalue()
+
+
+def test_generic_pdf_aged_report_uses_title_to_tell_payables_from_receivables(http_client):
+    # Regression: an Aged Payables Detail export and an Aged Receivables
+    # Detail export are structurally identical once table-extracted (same
+    # grouped shape, same Current/1 Month/.../Total bucket columns, no
+    # "payable"/"receivable" wording anywhere in the columns themselves),
+    # so classify_report_type's alias scoring had nothing to prefer one
+    # over the other with. Found live: a real client's Aged Payables
+    # Detail PDF got auto-detected as aged_debtors. The upload route now
+    # sniffs the file's own title text (independent of table extraction,
+    # since the title row itself gets dropped as pre-header noise) and
+    # corrects the guess when it clearly says otherwise.
+    pytest.importorskip("reportlab", reason="reportlab is a dev-only dependency for building test PDFs")
+    c = http_client
+    practice_id = _signup(c, admin_email="agedpdf@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Aged PDF Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+        "comparative_period_start": "2024-01-01", "comparative_period_end": "2024-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    files_payload = [
+        ("files", ("payables.pdf", _make_aged_report_pdf("supplier"), "application/pdf")),
+        ("files", ("receivables.pdf", _make_aged_report_pdf("customer"), "application/pdf")),
+    ]
+    resp = c.post(f"/jobs/{job_id}/uploads", files=files_payload, follow_redirects=False)
+    assert resp.status_code == 303
+
+    from app import storage
+    job = storage.get_job(job_id)
+    by_filename = {u["filename"]: u for u in job["uploads"].values()}
+    assert by_filename["payables.pdf"]["report_type"] == "aged_creditors", by_filename["payables.pdf"]
+    assert by_filename["receivables.pdf"]["report_type"] == "aged_debtors", by_filename["receivables.pdf"]
+
+
 def test_bulk_upload_mixed_files_auto_detect_and_confirm_chain(http_client):
     """The real workflow this feature exists for: drop in several files of
     different kinds and formats at once (a genuine Xero export, a generic
@@ -451,6 +570,102 @@ def test_two_separate_xero_native_tb_uploads_keep_current_and_comparative_straig
     assert tb_comparative_receivable == pytest.approx(231721.61), (
         f"tb_comparative should hold the 2024 (job-comparative) figure regardless of upload order ({upload_order}), "
         f"got {tb_comparative_receivable}"
+    )
+
+
+def _multi_sheet_vat_return_workbook(box_summary_first: bool) -> bytes:
+    """A real client's Xero VAT Return export came as a 3-sheet workbook -
+    the genuine box summary plus two structurally unrelated detail sheets
+    (an EC adjustments sheet, a transactions-by-tax-rate breakdown). Every
+    sheet gets the same report_type forced on it (the upload was dropped
+    into the VAT Return section), but only the box summary sheet is a
+    genuine Xero-native match - see test below for why sheet order used
+    to matter."""
+    wb = Workbook()
+    box_summary = wb.active
+    box_summary.title = "VAT Return"
+    box_summary.append(("Regression Test Client",))
+    box_summary.append(("For the period 01 Jan 2025 - 31 Mar 2025",))
+    box_summary.append(("VAT Calculations",))
+    box_summary.append(("VAT due in the period on sales and other outputs", "1", 492.36))
+    box_summary.append(("Total VAT due (the sum of boxes 1 and 2)", "3", 492.36))
+    box_summary.append(("VAT reclaimed in the period on purchases", "4", 0))
+    box_summary.append(("VAT to pay HMRC", "5", 492.36))
+
+    unrelated = wb.create_sheet("Transactions by Tax Rate")
+    unrelated.append(("Tax Rate", "Net", "VAT"))
+    unrelated.append(("20% (VAT on Income)", "1000.00", "200.00"))
+
+    if not box_summary_first:
+        wb.move_sheet("VAT Return", offset=1)  # unrelated sheet now comes first
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+@pytest.mark.parametrize("box_summary_first", [True, False])
+def test_generic_sibling_sheet_does_not_overwrite_the_native_vat_return_match(http_client, box_summary_first):
+    # Regression: a real client's VAT Return upload came through as a
+    # multi-sheet workbook where a type_hint (the VAT Return upload
+    # section) forces every sheet to share report_type="vat_return", but
+    # only one sheet is a genuine box-summary match - the other has no
+    # box-number column at all and gets an empty/garbage generic mapping.
+    # _load_canonical_data used to write data["vat_return"] for EVERY
+    # confirmed vat_return upload with no regard for which one was the
+    # genuine match, so whichever sheet got processed last silently won -
+    # usually the junk one. Parametrized over sheet order since the bug
+    # was order-dependent, same as the TB regression above.
+    c = http_client
+    practice_id = _signup(c, admin_email=f"vatmulti-{box_summary_first}@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "VAT Multi-Sheet Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+        "comparative_period_start": "2024-01-01", "comparative_period_end": "2024-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    content = _multi_sheet_vat_return_workbook(box_summary_first)
+    xlsx_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    resp = c.post(
+        f"/jobs/{job_id}/uploads",
+        files=[("files", ("vat_return.xlsx", content, xlsx_type))],
+        data={"section_report_type": "vat_return"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    from app import storage
+    from app.main import _load_canonical_data
+    job = storage.get_job(job_id)
+
+    vat_uploads = [u for u in job["uploads"].values() if u["report_type"] == "vat_return"]
+    assert len(vat_uploads) == 2
+    native = [u for u in vat_uploads if u.get("xero_native")]
+    assert len(native) == 1, "exactly the genuine box-summary sheet should structurally match"
+
+    # The native box-summary sheet auto-confirms on upload, but the
+    # unrelated sheet doesn't - it still needs a human to click through
+    # its mapping (same as any non-native upload). Confirming it here
+    # mimics a preparer who doesn't notice anything's wrong (the file
+    # WAS dropped into the right section, after all) and confirms it
+    # with whatever mapping got suggested - exactly what corrupted data
+    # on the real client file this is modelled on.
+    unrelated = next(u for u in vat_uploads if not u.get("xero_native"))
+    resp = c.post(
+        f"/jobs/{job_id}/uploads/{unrelated['id']}/mapping",
+        data={"action": "confirm", "report_type": "vat_return", "period": unrelated["period"]},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    job = storage.get_job(job_id)
+    assert job["uploads"][unrelated["id"]]["confirmed"] is True
+
+    data = _load_canonical_data(job)
+    assert data["vat_return"].iloc[0]["box1"] == pytest.approx(492.36), (
+        f"data['vat_return'] should hold the genuine box-summary sheet's figures regardless of sheet order "
+        f"(box_summary_first={box_summary_first}), got {data['vat_return'].to_dict('records')}"
     )
 
 

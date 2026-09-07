@@ -321,6 +321,59 @@ silently produces wrong numbers on them. What was true on real client data:
   the job's comparative period) become `data["tb_comparative"]` - correct
   regardless of upload order.
 
+- **A PDF export with no drawn table gridlines used to raise "no table
+  found" on a perfectly real, non-scanned file.** pdfplumber's default
+  table detection only looks for ruled borders; found live on a real
+  client's Aged Payables Detail PDF, whose data rows have none (only the
+  Total/Percentage summary rows happened to sit on a line). PDF table
+  extraction now falls back to a text-position-based strategy when the
+  line-based one finds nothing, and picks the real header row (most
+  filled cells in the first few rows) rather than mistaking a
+  title/client-name/period row swept into the same region for it - see
+  `app/pdf_extraction.py`.
+- **One unparseable file in a batch upload used to take the whole batch
+  down as a raw 500**, including any other files dropped in the same
+  action that parsed fine. A file that genuinely can't be read now
+  becomes its own upload record, clearly marked with a `parse_error`
+  instead of a "Confirm mapping" link, so one bad file doesn't block the
+  rest.
+- **An Aged Payables/Receivables Detail PDF (not a genuine Xero-native
+  export) had no protection at all against the payables/receivables
+  ambiguity** described above - `classify_report_type` only scores
+  column headers, which carry no debtor/creditor signal for this report,
+  and the file's title text never reached the classifier (table
+  extraction already drops it as pre-header noise). The PDF's first page
+  is now sniffed independently for its title and used to override the
+  guess when it clearly says otherwise - the same fix as the Xero-native
+  case above, reached through the generic upload path this time.
+- **A report that's genuinely empty of data rows** (e.g. a PDF aged
+  receivables export for a client with zero outstanding receivables -
+  just a title/client-name/period/footer block, no table) used to be
+  misread as a bogus one-column "table" by the text-strategy fallback
+  above (it clusters that leftover text into several 1-cell rows, which
+  passes a naive "at least 2 rows" sanity check). This landed the upload
+  in Unclassified with nothing sensible to map. Table extraction now
+  rejects a candidate whose header row has only one filled cell - a real
+  tabular report's header has one cell per column - so this now raises
+  the same clear "no table found" error instead.
+- **Xero's exported VAT Return isn't a table either** - it's a vertical
+  label/box-number/value listing (one row per HMRC box), with title and
+  scheme-detail rows above it that carry no box number. Found live: a
+  real client's VAT Return upload came through as a 3-sheet workbook
+  (the box summary plus two unrelated detail sheets), and the generic
+  column-mapper found nothing to map on any of the three - the top-level
+  VAT cross-check silently had nothing to work with. `vat_return` is now
+  a Xero-native report type (`parse_vat_return_box_summary` in
+  `xero_reports.py`) that reads the box-number column directly; the two
+  non-matching sheets still fail to match and fall back to a manual
+  confirm as before. Because a type_hint forces every sheet of a
+  multi-sheet upload to share one report_type, a sibling sheet that
+  isn't a genuine match could otherwise still silently overwrite the
+  native match's good data during canonical-data assembly (whichever
+  sheet's upload happened to be processed last) - `_load_canonical_data`
+  now refuses to let a non-native upload overwrite a key a genuine
+  native match on the same job already populated.
+
 See `app/xero_reports.py` for the parsers and the docstrings for the exact
 quirks each one works around.
 

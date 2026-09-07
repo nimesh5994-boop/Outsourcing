@@ -192,10 +192,17 @@
       {% for u in section_uploads %}
       <tr>
         <td class="muted">{{ u.display_name or u.filename }}</td>
+        {% if u.parse_error %}
+        <td><span class="badge" style="background:#fde7e6;color:#b42318;">failed to parse</span></td>
+        <td class="muted">Re-upload as Excel/CSV, or a text-based PDF</td>
+        {% else %}
         <td><span class="badge {{ 'confirmed' if u.confirmed else 'pending' }}">{{ 'confirmed' if u.confirmed else 'needs review' }}</span></td>
         <td><a class="button secondary" href="/jobs/{{ job.id }}/uploads/{{ u.id }}/mapping">{{ 'Edit mapping' if u.confirmed else 'Confirm mapping' }}</a></td>
+        {% endif %}
       </tr>
-      {% if u.validation_note %}
+      {% if u.parse_error %}
+      <tr><td colspan="3" style="color:#b42318; font-size:13px; padding-top:0;">&#9888; {{ u.parse_error }}</td></tr>
+      {% elif u.validation_note %}
       <tr><td colspan="3" style="color:#b42318; font-size:13px; padding-top:0;">&#9888; {{ u.validation_note }}</td></tr>
       {% endif %}
       {% endfor %}
@@ -447,8 +454,15 @@
     {% for u in uploads_by_type[''] %}
     <tr>
       <td class="muted">{{ u.display_name or u.filename }}</td>
+      {% if u.parse_error %}
+      <td class="muted">Failed to parse &mdash; re-upload as Excel/CSV, or a text-based PDF</td>
+      {% else %}
       <td><a class="button secondary" href="/jobs/{{ job.id }}/uploads/{{ u.id }}/mapping">Confirm mapping</a></td>
+      {% endif %}
     </tr>
+    {% if u.parse_error %}
+    <tr><td colspan="2" style="color:#b42318; font-size:13px; padding-top:0;">&#9888; {{ u.parse_error }}</td></tr>
+    {% endif %}
     {% endfor %}
   </table>
 </div>

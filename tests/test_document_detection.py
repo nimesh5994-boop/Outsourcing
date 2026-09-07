@@ -156,6 +156,52 @@ def test_guess_period_does_not_swap_day_and_month_on_iso_dates():
     assert latest == pd.Timestamp("2025-06-15")
 
 
+def test_vat_return_box_summary_native_detection_and_parsing():
+    """Regression: Xero's exported VAT Return isn't a table - it's a
+    vertical label/box-number/value listing (one row per HMRC box), with
+    title/scheme-detail rows above it that carry no box number. A real
+    client's VAT Return upload came through as a 3-sheet workbook (this
+    report plus two structurally unrelated detail sheets), and the
+    generic column-mapper found nothing to map on any of the three - the
+    top-level VAT cross-check silently had nothing to work with. Now a
+    Xero-native report type: try_xero_native must recognise the genuine
+    box summary sheet and reject the two that aren't."""
+    from app import xero_reports
+
+    box_summary = _make_generic_workbook(
+        ["", "", ""],
+        [
+            ["Acme Ltd", None, None],
+            ["For the period 01 Apr 2025 - 30 Jun 2025", None, None],
+            ["VAT Calculations", None, None],
+            ["VAT due in the period on sales and other outputs", "1", 492.36],
+            ["VAT due in the period on acquisitions", "2", 0],
+            ["Total VAT due (the sum of boxes 1 and 2)", "3", 492.36],
+            ["VAT reclaimed in the period on purchases", "4", 0],
+            ["VAT to pay HMRC", "5", 492.36],
+            ["Total value of sales excluding VAT", "6", 3938],
+            ["Total value of purchases excluding VAT", "7", 0],
+        ],
+    )
+    src = parsers.FileDataSource(box_summary, filename="vat_return.xlsx")
+    assert dd.try_xero_native(src) == "vat_return"
+    df = xero_reports.parse_vat_return_box_summary(src)
+    row = df.iloc[0]
+    assert row["box1"] == 492.36
+    assert row["box5"] == 492.36
+    assert row["box6"] == 3938
+    assert row["box8"] == 0.0  # omitted from this export - defaults to 0
+
+    unrelated_detail_sheet = _make_generic_workbook(
+        ["Tax Rate", "Net", "VAT"],
+        [["20% (VAT on Income)", "1000.00", "200.00"]],
+    )
+    src2 = parsers.FileDataSource(unrelated_detail_sheet, filename="vat_return.xlsx")
+    assert dd.try_xero_native(src2) is None
+    with pytest.raises(ValueError, match="couldn't find boxes"):
+        xero_reports.parse_vat_return_box_summary(src2)
+
+
 def _make_test_pdf(rows: list[list[str]]) -> bytes:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
@@ -196,6 +242,79 @@ def test_pdf_flows_through_file_data_source_and_classifier():
     report_type, confidence = dd.classify_report_type(src.raw_columns())
     assert report_type == "trial_balance"
     assert confidence > 0.5
+
+
+def test_pdf_extraction_falls_back_to_text_strategy_and_finds_the_real_header():
+    """Regression: a real client's Aged Payables Detail PDF had no visible
+    gridlines around its data rows - only its Total/Percentage summary
+    rows happened to sit on a drawn line - so pdfplumber's default line-
+    based table detection found just those two 1-row fragments and this
+    raised "no table found" on a perfectly real, non-scanned export. This
+    reproduces the same shape: a borderless table (no GRID style) with
+    title/client-name/period rows ahead of the real multi-column header -
+    extract_table_from_pdf must fall back to the text-position strategy
+    (which needs no drawn borders) and correctly pick the real header row
+    (the one with the most filled cells), not the title row above it."""
+    pytest.importorskip("reportlab", reason="reportlab is a dev-only dependency for building test PDFs")
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Table
+
+    rows = [
+        ["Aged Payables Detail", "", "", ""],
+        ["Acme Ltd", "", "", ""],
+        ["As at 31 December 2025", "", "", ""],
+        ["Invoice Date", "Reference", "Contact", "Total"],
+        ["01 Jan 2025", "INV-1", "Acme Supplier", "100.00"],
+        ["02 Jan 2025", "INV-2", "Beta Supplier", "200.00"],
+    ]
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    doc.build([Table(rows)])  # deliberately no TableStyle/GRID - no drawn borders at all
+
+    from app.pdf_extraction import extract_table_from_pdf
+    df = extract_table_from_pdf(buf.getvalue())
+
+    assert "Aged Payables Detail" not in df.columns  # the title row must not be mistaken for the header
+    assert "Reference" in df.columns
+    assert "Contact" in df.columns
+    assert set(df["Reference"]) >= {"INV-1", "INV-2"}
+
+
+def test_pdf_extraction_rejects_a_genuinely_empty_report_instead_of_a_one_column_table():
+    """Regression: a real client's Aged Receivables Detail PDF for a
+    client with zero outstanding receivables has no data table at all -
+    just a title/client-name/period/footer block. The text-strategy
+    fallback (added for the borderless-table case above) clustered that
+    into a bogus 9-row, 1-column "table" (['Aged Receiv'], [''],
+    ["Shpendi'sLtd"], ...), which passed the len(table) >= 2 sanity check
+    and produced a nonsense single-column DataFrame instead of a clear
+    error - this then got auto-classified as an unrecognisable upload
+    with report_type left blank, stranding the file in Unclassified with
+    no way to map it (there's nothing to map). extract_table_from_pdf
+    must recognise this isn't real tabular data (its header row has only
+    one filled cell, not one per column) and raise the "no table" error,
+    which the upload route already turns into a clear parse_error instead
+    of corrupting the batch."""
+    pytest.importorskip("reportlab", reason="reportlab is a dev-only dependency for building test PDFs")
+    from reportlab.lib.pagesizes import A4
+    from reportlab.platypus import SimpleDocTemplate, Table
+
+    rows = [
+        ["Aged Receivables Detail"],
+        [""],
+        ["Acme Ltd"],
+        [""],
+        ["As at 31 March 2026"],
+        [""],
+        ["Ageing by due date"],
+    ]
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4)
+    doc.build([Table(rows)])  # no GRID - and only ever one cell per row, no real columns
+
+    from app.pdf_extraction import extract_table_from_pdf
+    with pytest.raises(ValueError, match="No table could be found"):
+        extract_table_from_pdf(buf.getvalue())
 
 
 def test_pdf_with_no_table_raises_clear_error():
