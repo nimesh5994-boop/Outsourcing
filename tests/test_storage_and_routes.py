@@ -605,6 +605,88 @@ def _multi_sheet_vat_return_workbook(box_summary_first: bool) -> bytes:
 
 
 @pytest.mark.parametrize("box_summary_first", [True, False])
+def _vat_return_box_summary_workbook(period_text: str, box1: float, box4: float, box5: float) -> bytes:
+    """A single-sheet Xero VAT Return box summary - see
+    xero_reports.parse_vat_return_box_summary. period_text goes straight
+    into the title row exactly as Xero writes it, e.g. 'For the period 01
+    Mar 2025 - 31 May 2025' (a dash, not 'to')."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "VAT Return"
+    ws.append(("Regression Test Client",))
+    ws.append((period_text,))
+    ws.append(("VAT Calculations",))
+    ws.append(("VAT due in the period on sales and other outputs", "1", box1))
+    ws.append(("Total VAT due (the sum of boxes 1 and 2)", "3", box1))
+    ws.append(("VAT reclaimed in the period on purchases", "4", box4))
+    ws.append(("VAT to pay HMRC", "5", box5))
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_quarterly_vat_returns_are_summed_into_one_annual_total_per_year(http_client):
+    """A client who files quarterly needs several VAT Return uploads
+    combined into one annual figure per year before the VAT cross-check
+    against the TB means anything - see main.py's _load_canonical_data
+    handling of report_type "vat_return"/"vat_return_comparative". Three
+    quarters land in the job's current year, one lands in the comparative
+    year (by the quarter's own title-row dates, not upload order), and
+    the combined current-year total should be the sum of its three
+    quarters' box1/box4/box5 figures."""
+    c = http_client
+    practice_id = _signup(c, admin_email="vatquarters@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Quarterly VAT Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-03-01", "current_period_end": "2026-02-28",
+        "comparative_period_start": "2024-03-01", "comparative_period_end": "2025-02-28",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    xlsx_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    quarters = [
+        ("For the period 01 Mar 2025 - 31 May 2025", 1000.0, 400.0, 600.0),  # current Q1
+        ("For the period 01 Jun 2025 - 31 Aug 2025", 1100.0, 450.0, 650.0),  # current Q2
+        ("For the period 01 Sep 2025 - 30 Nov 2025", 1200.0, 500.0, 700.0),  # current Q3
+        ("For the period 01 Dec 2024 - 28 Feb 2025", 900.0, 350.0, 550.0),   # comparative Q4
+    ]
+    for period_text, box1, box4, box5 in quarters:
+        content = _vat_return_box_summary_workbook(period_text, box1, box4, box5)
+        resp = c.post(
+            f"/jobs/{job_id}/uploads",
+            files=[("files", (f"vat_return_{box1}.xlsx", content, xlsx_type))],
+            data={"section_report_type": "vat_return"},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+
+    from app import storage
+    from app.main import _load_canonical_data
+    job = storage.get_job(job_id)
+
+    vat_uploads = [u for u in job["uploads"].values() if u["report_type"] == "vat_return"]
+    assert len(vat_uploads) == 4
+    by_period = {"current": 0, "comparative": 0}
+    for u in vat_uploads:
+        by_period[u["period"]] += 1
+    assert by_period == {"current": 3, "comparative": 1}, (
+        f"expected 3 quarters bucketed current and 1 comparative by their own title-row dates, got {vat_uploads}"
+    )
+
+    data = _load_canonical_data(job)
+    current = data["vat_return"].iloc[0]
+    assert current["box1"] == pytest.approx(1000.0 + 1100.0 + 1200.0)
+    assert current["box4"] == pytest.approx(400.0 + 450.0 + 500.0)
+    assert current["box5"] == pytest.approx(600.0 + 650.0 + 700.0)
+
+    comparative = data["vat_return_comparative"].iloc[0]
+    assert comparative["box1"] == pytest.approx(900.0)
+    assert comparative["box4"] == pytest.approx(350.0)
+    assert comparative["box5"] == pytest.approx(550.0)
+
+
+@pytest.mark.parametrize("box_summary_first", [True, False])
 def test_generic_sibling_sheet_does_not_overwrite_the_native_vat_return_match(http_client, box_summary_first):
     # Regression: a real client's VAT Return upload came through as a
     # multi-sheet workbook where a type_hint (the VAT Return upload

@@ -48,7 +48,17 @@ def _sliced_with_header(raw: pd.DataFrame, header_row: int) -> pd.DataFrame:
 
 
 _AS_AT = re.compile(r"as at\s+(.+)", re.IGNORECASE)
-_FOR_PERIOD = re.compile(r"for the period\s+(.+?)\s+to\s+(.+)", re.IGNORECASE)
+# Most Xero reports (TB, P&L) write "For the period 1 January 2025 to 31
+# December 2025", but the VAT Return export writes the exact same thing as
+# "For the period 01 Feb 2025 - 28 Feb 2025" - a dash, not the word "to".
+# Found live: this meant extract_period_info returned "unknown" for every
+# single real VAT Return file tested (six full periods, zero exceptions),
+# which silently broke guess_period's date-based bucketing for VAT returns
+# entirely - with no date signal, it fell back to the order-dependent
+# "second upload of this type = comparative" heuristic, so period bucketing
+# depended on upload order rather than the file's own dates. Matching
+# either separator fixes both the label text and the underlying bug.
+_FOR_PERIOD = re.compile(r"for the period\s+(.+?)\s+(?:to|-|–|—)\s+(.+)", re.IGNORECASE)
 
 
 def extract_period_info(source: DataSource) -> dict:

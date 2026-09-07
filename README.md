@@ -392,6 +392,34 @@ silently produces wrong numbers on them. What was true on real client data:
   sheet's upload happened to be processed last) - `_load_canonical_data`
   now refuses to let a non-native upload overwrite a key a genuine
   native match on the same job already populated.
+- **A client who files quarterly (or monthly) needs several VAT Return
+  uploads combined into one annual figure** before the VAT cross-check
+  against the TB means anything - `_load_canonical_data` now sums every
+  confirmed VAT Return upload's box1..box9 figures into a single combined
+  row per year (current vs comparative), rather than the single latest
+  upload silently overwriting every earlier one under the same key. Which
+  year a given quarter belongs to is decided by its own title-row dates,
+  not upload order - which surfaced two further real bugs while verifying
+  this against six real periods for the same client:
+  - `extract_period_info`'s "For the period X to Y" regex only matched
+    the word "to" - but every real VAT Return export actually writes "For
+    the period 01 Feb 2025 - 28 Feb 2025" (a dash), so it silently
+    returned "unknown" for every VAT Return file, with no exception and
+    no visible symptom beyond wrong numbers downstream. With no date
+    found, `guess_period` fell back to its date-blind "second upload of
+    this type = comparative" heuristic - so which year a quarter landed
+    in depended on upload *order*, not its own dates, silently combining
+    the wrong quarters into the wrong year's total. Fixed by accepting
+    "to", "-", "–" and "—" as the separator.
+  - Even once a date is found, comparing it against the *nearer* of the
+    job's two period-end dates is the wrong algorithm for a sub-annual
+    period: a real client's Mar-May quarter - genuinely the first quarter
+    of the *current* year - sat only 92 days from the *comparative*
+    year-end but 273 days from the current year-end, so "closest wins"
+    filed it as comparative. `guess_period` now checks whether the file's
+    date actually falls *within* each year's declared start/end span
+    first, only falling back to closest-end-date when neither span
+    contains it (e.g. no comparative period was set up at all).
 
 See `app/xero_reports.py` for the parsers and the docstrings for the exact
 quirks each one works around.

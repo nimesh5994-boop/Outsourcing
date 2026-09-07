@@ -65,6 +65,7 @@ DATA_KEY = {
     ("aged_debtors", "current"): "aged_debtors",
     ("aged_creditors", "current"): "aged_creditors",
     ("vat_return", "current"): "vat_return",
+    ("vat_return", "comparative"): "vat_return_comparative",
     ("bank_statement", "current"): "bank_statement",
     ("profit_and_loss", "current"): "pl_current",
     ("profit_and_loss", "comparative"): "pl_comparative",
@@ -1181,7 +1182,17 @@ def _load_canonical_data(job: dict) -> dict:
             elif report_type == "aged_creditors":
                 data["aged_creditors"] = xero_reports.parse_aged_report(source, "supplier")
             elif report_type == "vat_return":
-                data["vat_return"] = xero_reports.parse_vat_return_box_summary(source)
+                # A client typically files quarterly (or monthly), so a
+                # full accounting year's worth of VAT needs several VAT
+                # Return uploads combined into one annual figure to cross-
+                # check against the TB - each upload's own box1..box9
+                # collected here (keyed by which of the job's own two
+                # years it falls into, via guess_period's date-range
+                # check above) and summed box-by-box below, rather than
+                # the single latest upload silently overwriting every
+                # earlier one under the same key.
+                key = "vat_return" if upload["period"] == "current" else "vat_return_comparative"
+                data.setdefault(key, []).append(xero_reports.parse_vat_return_box_summary(source))
             elif report_type == "vat_box_transactions":
                 # One upload feeds BOTH filed-detail pools at once - see
                 # xero_reports.parse_vat_box_transactions - concatenated
@@ -1238,11 +1249,26 @@ def _load_canonical_data(job: dict) -> dict:
             # overwrite the good data the native match already produced.
             continue
         df = parsers.apply_mapping(source, report_type, upload["mapping"] or {})
-        data[key] = df
+        if report_type == "vat_return":
+            # Same reasoning as the native vat_return branch above - a
+            # non-Xero client's VAT return can also arrive generically
+            # mapped (a flat box1..box9 row), and needs to combine with
+            # any other period's VAT return the same way, not just
+            # overwrite whatever was there under this key.
+            data.setdefault(key, []).append(df)
+        else:
+            data[key] = df
 
     for rt in VAT_RECON_TYPES + PAYE_RECON_TYPES:
         frames = data.get(rt)
         data[rt] = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    for rt in ("vat_return", "vat_return_comparative"):
+        frames = data.get(rt)
+        if not frames:
+            continue
+        combined = pd.concat(frames, ignore_index=True)
+        data[rt] = pd.DataFrame([combined.sum(numeric_only=True)])
 
     # Xero's TB already categorises every account (Sales/Direct Costs/Overhead
     # = P&L, Bank/Current Asset/Current Liability/Equity/etc. = B/S), so P&L

@@ -87,6 +87,50 @@ def test_guess_period_second_upload_of_same_type_is_comparative():
     assert dd.guess_period(src, "vat_return", job_with_no_existing, None) == "current"
 
 
+def test_guess_period_uses_vat_return_title_dates_for_range_containment():
+    """Regression, found live against a real client's VAT returns: Xero's
+    VAT Return export writes its title row as 'For the period 01 May 2025
+    - 31 Jul 2025' (a dash, not the word 'to' that extract_period_info's
+    regex used to require) - so extract_period_info silently returned
+    "unknown" for every VAT return, and guess_period fell back to the
+    order-dependent "second upload = comparative" heuristic instead of
+    the file's own dates. Also checks that once a date IS found, range
+    containment - not closest-end-date - decides the bucket: this
+    quarter's end (31 Jul 2025) sits closer to the comparative year-end
+    (28 Feb 2025, 153 days away) than the current year-end (28 Feb 2026,
+    212 days away), even though it genuinely falls inside the current
+    year's own span."""
+    from app import xero_reports
+
+    box_summary = _make_generic_workbook(
+        ["", "", ""],
+        [
+            ["Acme Ltd", None, None],
+            ["For the period 01 May 2025 - 31 Jul 2025", None, None],
+            ["VAT Calculations", None, None],
+            ["VAT due in the period on sales and other outputs", "1", 492.36],
+            ["VAT due in the period on acquisitions", "2", 0],
+            ["Total VAT due (the sum of boxes 1 and 2)", "3", 492.36],
+            ["VAT reclaimed in the period on purchases", "4", 0],
+            ["VAT to pay HMRC", "5", 492.36],
+            ["Total value of sales excluding VAT", "6", 3938],
+            ["Total value of purchases excluding VAT", "7", 0],
+        ],
+    )
+    src = parsers.FileDataSource(box_summary, filename="vat_return.xlsx")
+
+    info = xero_reports.extract_period_info(src)
+    assert info["kind"] == "range"
+    assert str(info["end"]) == "2025-07-31"
+
+    job = {
+        "current_period_start": "2025-03-01", "current_period_end": "2026-02-28",
+        "comparative_period_start": "2024-03-01", "comparative_period_end": "2025-02-28",
+        "uploads": {},
+    }
+    assert dd.guess_period(src, "vat_return", job, "vat_return") == "current"
+
+
 def _make_generic_workbook(headers: list[str], rows: list[list]) -> bytes:
     from openpyxl import Workbook
     wb = Workbook()

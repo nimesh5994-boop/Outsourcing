@@ -151,9 +151,13 @@ def _latest_date_in_columns(source: DataSource, report_type: str) -> "pd.Timesta
 def guess_period(source: DataSource, report_type: str, job: dict, xero_native_report_type: str | None) -> str:
     from datetime import date as _date
 
+    current_start = job.get("current_period_start")
     current_end = job.get("current_period_end")
+    comparative_start = job.get("comparative_period_start")
     comparative_end = job.get("comparative_period_end")
+    current_start = _date.fromisoformat(current_start) if current_start else None
     current_end = _date.fromisoformat(current_end) if current_end else None
+    comparative_start = _date.fromisoformat(comparative_start) if comparative_start else None
     comparative_end = _date.fromisoformat(comparative_end) if comparative_end else None
 
     found_end = None
@@ -166,6 +170,20 @@ def guess_period(source: DataSource, report_type: str, job: dict, xero_native_re
             found_end = latest.date()
 
     if found_end is not None:
+        # Range containment first, "closest end date" only as a fallback -
+        # correct for a sub-annual period (e.g. a quarterly VAT return)
+        # whose own end date can land numerically closer to the WRONG
+        # year's boundary than the year it actually falls within. Found
+        # live: a real client's Mar-May VAT return - genuinely the first
+        # quarter of the CURRENT accounting year - sat only 92 days from
+        # the comparative year-end but 273 days from the current year-
+        # end, so "closest wins" filed an entire quarter's return as
+        # comparative. Containment has no such distortion: a date is
+        # either inside a year's own span or it isn't.
+        if current_start and current_end and current_start <= found_end <= current_end:
+            return "current"
+        if comparative_start and comparative_end and comparative_start <= found_end <= comparative_end:
+            return "comparative"
         current_delta = abs((found_end - current_end).days) if current_end else None
         comparative_delta = abs((found_end - comparative_end).days) if comparative_end else None
         if comparative_delta is not None and (current_delta is None or comparative_delta < current_delta):
