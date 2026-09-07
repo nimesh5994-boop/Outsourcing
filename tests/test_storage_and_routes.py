@@ -2181,3 +2181,135 @@ def test_debtors_creditors_standalone_run_through_http(http_client):
     assert resp.status_code == 200
     assert "Debtors &amp; Creditors" in resp.text or "Debtors & Creditors" in resp.text
     assert "Acme Ltd" in resp.text
+
+
+# --- delete a job / switch a client's template --------------------------
+# Neither existed before this was added - a client's job was permanent
+# once created, and its template could only be set at client-creation
+# time. Added per a real user report: after a bug fix landed, an
+# already-generated job for a real client still showed the old (buggy)
+# output, because there was no way to discard it and start over - and no
+# way to move that client off a bespoke template onto the system's own
+# default layout without recreating the client from scratch.
+
+def test_delete_job_removes_job_and_its_files_but_not_the_client(http_client):
+    c = http_client
+    practice_id = _signup(c, admin_email="deletejob@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Delete Job Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    xlsx_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    resp = c.post(
+        f"/jobs/{job_id}/uploads",
+        files=[("files", ("tb.xlsx", _make_template_bytes(), xlsx_type))],
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    from app import storage
+    job = storage.get_job(job_id)
+    assert len(job["uploads"]) == 1
+    file_id = next(iter(job["uploads"].values()))["file_id"]
+    assert storage.load_file(file_id) is not None
+
+    resp = c.post(f"/jobs/{job_id}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/clients/{client_id}"
+
+    assert storage.get_job(job_id) is None
+    assert storage.load_file(file_id) is None  # the upload's own file row is gone too
+    assert storage.get_client(client_id) is not None  # the client itself is untouched
+    assert c.get(f"/clients/{client_id}").status_code == 200
+
+
+def test_delete_job_denied_for_preparer(http_client):
+    c = http_client
+    practice_id = _signup(c, admin_email="deletejob-rbac@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "RBAC Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.post(f"/practices/{practice_id}/users", data={
+        "name": "Prep Two", "email": "prep2@acme.test", "password": "prepper-pass", "role": "preparer",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    from app import storage
+    prep_user = storage.get_user_by_email("prep2@acme.test")
+    c.post(f"/practices/{practice_id}/users/{prep_user['id']}/client-access", data={"client_ids": [client_id]}, follow_redirects=False)
+
+    c.post("/logout")
+    c.post("/login", data={"email": "prep2@acme.test", "password": "prepper-pass"}, follow_redirects=False)
+
+    assert c.post(f"/jobs/{job_id}/delete", follow_redirects=False).status_code == 403
+    assert storage.get_job(job_id) is not None  # nothing was deleted
+
+
+def test_set_client_template_switches_to_and_from_system_default(http_client):
+    c = http_client
+    practice_id = _signup(c, admin_email="clienttemplate@acme.test")
+    resp = c.post(
+        f"/practices/{practice_id}/templates",
+        data={"name": "Bespoke Template"},
+        files={"file": ("template.xlsx", _make_template_bytes(),
+                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    from app import storage
+    template_id = storage.list_templates(practice_id)[0]["id"]
+
+    # a client created without picking a template falls back to the
+    # practice's default (the only template that exists, set automatically)
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Template Switch Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    assert storage.get_client(client_id)["template_id"] == template_id
+
+    # switch to the system's own default (no custom template)
+    resp = c.post(f"/clients/{client_id}/template", data={"template_id": ""}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/clients/{client_id}"
+    assert storage.get_client(client_id)["template_id"] is None
+
+    page = c.get(f"/clients/{client_id}")
+    assert "System default (no custom template)" in page.text
+
+    # switch back to the bespoke template
+    resp = c.post(f"/clients/{client_id}/template", data={"template_id": template_id}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert storage.get_client(client_id)["template_id"] == template_id
+
+
+def test_set_client_template_rejects_foreign_template(http_client):
+    c = http_client
+    practice_a_id = _signup(c, admin_email="foreigntemplate-a@acme.test")
+    resp = c.post(f"/practices/{practice_a_id}/clients", data={"name": "Client A"}, follow_redirects=False)
+    client_a_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    from app.main import app as fastapi_app
+    other = TestClient(fastapi_app)
+    resp = other.post("/practices", data={
+        "practice_name": "Firm B Templates", "admin_name": "B Partner",
+        "admin_email": "foreigntemplate-b@firm-b.test", "admin_password": "firm-b-password",
+    }, follow_redirects=False)
+    practice_b_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = other.post(
+        f"/practices/{practice_b_id}/templates",
+        data={"name": "Firm B's Template"},
+        files={"file": ("template.xlsx", _make_template_bytes(),
+                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    from app import storage
+    foreign_template_id = storage.list_templates(practice_b_id)[0]["id"]
+
+    resp = c.post(f"/clients/{client_a_id}/template", data={"template_id": foreign_template_id}, follow_redirects=False)
+    assert resp.status_code == 404
+    assert storage.get_client(client_a_id)["template_id"] is None

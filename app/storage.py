@@ -360,6 +360,17 @@ def list_jobs(client_id: str | None = None) -> list[dict]:
     return _list_entities("job", client_id, order_by_id_desc=True)
 
 
+def delete_job(job_id: str) -> None:
+    """Removes a job and every file that belongs to it - every confirmed
+    upload plus the generated output workbook, if one exists (files.job_id
+    is set on both, from save_file()'s job_id argument). Leaves the client
+    and every other job untouched, so a preparer can start this job over
+    (re-upload, re-confirm, re-generate) without losing anything else."""
+    with _get_conn().cursor() as cur:
+        cur.execute("DELETE FROM files WHERE job_id = %s", (job_id,))
+        cur.execute("DELETE FROM entities WHERE kind = %s AND id = %s", ("job", job_id))
+
+
 def add_upload(job: dict, report_type: str, period: str, platform: str, filename: str, content: bytes, columns: list[str]) -> str:
     file_id = save_file("upload", job["id"], filename, content)
     upload_id = _new_id("upload")

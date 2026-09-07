@@ -6,7 +6,7 @@
   <p class="muted">Working paper jobs for this client</p>
   {% if jobs %}
   <table>
-    <tr><th>Period</th><th>Comparative</th><th>Status</th><th>Created</th><th></th></tr>
+    <tr><th>Period</th><th>Comparative</th><th>Status</th><th>Created</th><th></th><th></th></tr>
     {% for j in jobs %}
     <tr>
       <td>{{ j.current_label }}</td>
@@ -14,6 +14,13 @@
       <td><span class="badge {{ 'ok' if j.status == 'generated' else 'pending' }}">{{ j.status }}</span></td>
       <td class="muted">{{ j.created_at[:10] }}</td>
       <td><a class="button secondary" href="/jobs/{{ j.id }}">Open</a></td>
+      <td>
+        {% if current_user.role in ("partner", "manager") %}
+        <form method="post" action="/jobs/{{ j.id }}/delete" onsubmit="return confirm('Delete this job? This removes all its uploads and any generated workbook - the client itself is unaffected. This cannot be undone.')">
+          <button type="submit" class="button secondary">Delete</button>
+        </form>
+        {% endif %}
+      </td>
     </tr>
     {% endfor %}
   </table>
@@ -21,6 +28,26 @@
   <p class="muted">No jobs yet for this client.</p>
   {% endif %}
 </div>
+
+{% if current_user.role in ("partner", "manager") %}
+<div class="card">
+  <h2>Template</h2>
+  <p class="muted">
+    Which workbook layout new jobs for this client build into.
+    Currently: <strong>{{ (practice_templates | selectattr("id", "equalto", client.template_id) | first).name if client.template_id else "System default (no custom template)" }}</strong>.
+    Only affects jobs generated after this is changed - an already-generated job's output isn't touched.
+  </p>
+  <form method="post" action="/clients/{{ client.id }}/template">
+    <select name="template_id">
+      <option value="" {{ "selected" if not client.template_id else "" }}>System default (no custom template)</option>
+      {% for t in practice_templates %}
+      <option value="{{ t.id }}" {{ "selected" if client.template_id == t.id else "" }}>{{ t.name }}</option>
+      {% endfor %}
+    </select>
+    <button type="submit">Save</button>
+  </form>
+</div>
+{% endif %}
 
 <div class="card">
   <h2>Start a new working paper job</h2>

@@ -29,6 +29,25 @@ the default, and every client created under that practice inherits it
 (overridable per client). Each client is then processed job-by-job,
 period-by-period, building up history over time.
 
+A client's template can be changed after creation too (`POST /clients/
+{client_id}/template`, partner/manager only) - a dropdown on the client
+page, including a "System default (no custom template)" option that clears
+`client["template_id"]` so future jobs build into the system's own generic
+layout instead of a bespoke one. Only affects jobs generated *after* the
+change; an already-generated job's output is untouched, since it was built
+into whatever template was active at the time.
+
+A job can be deleted (`POST /jobs/{job_id}/delete`, partner/manager only,
+with a confirm prompt) - removes the job and every file that belongs to it
+(every confirmed upload, plus the generated output workbook if one exists)
+so a preparer can start it over from scratch, e.g. after a bug fix lands
+and the existing job's output needs regenerating against the corrected
+logic, or after switching the client onto a different template. The client
+itself, its other jobs, and its saved mapping profiles are untouched.
+Neither of these existed before a real user found out the hard way: an
+already-generated job kept showing stale output after a fix landed, with
+no way in the app to discard it and start clean.
+
 ## Navigation
 
 Every page in the Practice → Client → Job hierarchy carries a breadcrumb

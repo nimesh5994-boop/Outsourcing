@@ -300,14 +300,48 @@ def client_detail(request: Request, client_id: str, user: dict = Depends(auth.cu
     client = _authorize_client(user, client_id)
     jobs = storage.list_jobs(client_id)
     practice = storage.get_practice(client["practice_id"])
+    practice_templates = storage.list_templates(client["practice_id"])
     return templates.TemplateResponse("client_detail.html", {
         "request": request, "current_user": user, "client": client, "jobs": jobs,
+        "practice_templates": practice_templates,
         "breadcrumbs": [
             {"label": practice["name"], "url": f"/practices/{client['practice_id']}"},
             {"label": "Clients", "url": f"/practices/{client['practice_id']}/clients"},
             {"label": client["name"]},
         ],
     })
+
+
+@app.post("/clients/{client_id}/template")
+def set_client_template(client_id: str, template_id: str = Form(""), user: dict = Depends(auth.current_user_dep)):
+    """Switches which template this client's jobs build into - an empty
+    template_id means the system's own generic workbook layout (no custom
+    template), the same as a client created without one. Only affects
+    jobs generated AFTER this change; an already-generated job's output
+    isn't touched."""
+    client = _authorize_client(user, client_id)
+    auth.require_role(user, "partner", "manager")
+    if template_id:
+        if not storage.get_template(client["practice_id"], template_id):
+            raise HTTPException(status_code=404, detail="Template not found")
+        client["template_id"] = template_id
+    else:
+        client["template_id"] = None
+    storage.save_client(client)
+    return RedirectResponse(f"/clients/{client_id}", status_code=303)
+
+
+@app.post("/jobs/{job_id}/delete")
+def delete_job(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Deletes a job and everything that belongs to it (uploads, generated
+    output) so a preparer can start it over from scratch - e.g. after a
+    template/config change, or to re-run against corrected source files.
+    The client itself, its other jobs, and its saved mapping profiles are
+    untouched."""
+    job, client = _authorize_job(user, job_id)
+    auth.require_role(user, "partner", "manager")
+    storage.delete_job(job_id)
+    return RedirectResponse(f"/clients/{client['id']}", status_code=303)
 
 
 @app.post("/clients/{client_id}/jobs")
