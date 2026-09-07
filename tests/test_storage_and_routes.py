@@ -686,6 +686,74 @@ def test_quarterly_vat_returns_are_summed_into_one_annual_total_per_year(http_cl
     assert comparative["box5"] == pytest.approx(550.0)
 
 
+def test_vat_setup_wizard_flags_missing_filing_periods(http_client):
+    """The VAT period wizard (main.py's /jobs/{id}/vat-setup route and
+    _vat_period_coverage) lets a preparer pick a VAT scheme once and see
+    exactly which quarters are still outstanding, matched against each
+    upload's own detected period-end date (see the
+    "detected_period_end" field set in _ingest_one_upload's Xero-native
+    branch) rather than upload order or count."""
+    from app import storage
+    from app.main import _vat_period_coverage
+    c = http_client
+
+    practice_id = _signup(c, admin_email="vatwizard@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "VAT Wizard Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    # No VAT scheme chosen yet - no coverage checklist at all.
+    job = storage.get_job(job_id)
+    assert _vat_period_coverage(job) is None
+
+    resp = c.post(f"/jobs/{job_id}/vat-setup", data={"vat_period_type": "quarterly"}, follow_redirects=False)
+    assert resp.status_code == 303
+    job = storage.get_job(job_id)
+    assert job["vat_period_type"] == "quarterly"
+    coverage = _vat_period_coverage(job)
+    assert [p["covered"] for p in coverage["current"]] == [False, False, False, False]
+    assert coverage["comparative"] is None  # job has no comparative period set up
+
+    xlsx_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    content = _vat_return_box_summary_workbook("For the period 01 Apr 2025 - 30 Jun 2025", 500.0, 200.0, 300.0)
+    resp = c.post(
+        f"/jobs/{job_id}/uploads",
+        files=[("files", ("q2.xlsx", content, xlsx_type))],
+        data={"section_report_type": "vat_return"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    job = storage.get_job(job_id)
+    coverage = _vat_period_coverage(job)
+    from datetime import date
+    by_end = {p["expected_end"]: p["covered"] for p in coverage["current"]}
+    assert by_end[date(2025, 6, 30)] is True
+    assert by_end[date(2025, 3, 31)] is False
+    assert by_end[date(2025, 9, 30)] is False
+    assert by_end[date(2025, 12, 31)] is False
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert "VAT filing periods" in resp.text
+    assert "period ending 30 Jun 2025" in resp.text
+
+
+def test_vat_setup_rejects_invalid_period_type(http_client):
+    c = http_client
+    practice_id = _signup(c, admin_email="vatwizardbad@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Bad Scheme Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/jobs/{job_id}/vat-setup", data={"vat_period_type": "fortnightly"}, follow_redirects=False)
+    assert resp.status_code == 400
+
+
 @pytest.mark.parametrize("box_summary_first", [True, False])
 def test_generic_sibling_sheet_does_not_overwrite_the_native_vat_return_match(http_client, box_summary_first):
     # Regression: a real client's VAT Return upload came through as a

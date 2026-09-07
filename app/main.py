@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mapping, nominal_matrix, parsers, paye_reconciliation, pdf_extraction, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, vat_reconciliation, xero_reports
+from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mapping, nominal_matrix, parsers, paye_reconciliation, pdf_extraction, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, vat_periods, vat_reconciliation, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
 from app.models import PAYE_RECON_TYPES, PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS, VAT_RECON_TYPES
 
@@ -361,6 +361,41 @@ def create_job(
     return RedirectResponse(f"/jobs/{job['id']}", status_code=303)
 
 
+def _vat_period_coverage(job: dict) -> dict | None:
+    """For a job that's opted into a VAT scheme (see the vat-setup route
+    below), works out which of the expected quarterly/monthly filing
+    periods are covered by an already-uploaded, confirmed VAT Return and
+    which are still missing - so a preparer knows exactly what to chase
+    before trusting the combined annual total _load_canonical_data builds
+    (see main.py's DATA_KEY handling of report_type "vat_return"). Returns
+    None if the job hasn't set a VAT period type at all."""
+    vat_period_type = job.get("vat_period_type")
+    if not vat_period_type:
+        return None
+
+    def _detected_ends(period: str) -> list[date | None]:
+        return [
+            date.fromisoformat(u["detected_period_end"]) if u.get("detected_period_end") else None
+            for u in job["uploads"].values()
+            if u["report_type"] == "vat_return" and u["period"] == period and u["confirmed"]
+        ]
+
+    current_expected = vat_periods.expected_period_ends(
+        job["current_period_start"], job["current_period_end"], vat_period_type,
+    )
+    result = {
+        "vat_period_type": vat_period_type,
+        "current": vat_periods.period_coverage(current_expected, _detected_ends("current")),
+        "comparative": None,
+    }
+    if job.get("comparative_period_start") and job.get("comparative_period_end"):
+        comparative_expected = vat_periods.expected_period_ends(
+            job["comparative_period_start"], job["comparative_period_end"], vat_period_type,
+        )
+        result["comparative"] = vat_periods.period_coverage(comparative_expected, _detected_ends("comparative"))
+    return result
+
+
 @app.get("/jobs/{job_id}")
 def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_user_dep)):
     job, client = _authorize_job(user, job_id)
@@ -378,6 +413,8 @@ def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_
         "progress_summary": _summarize_progress(job.get("progress")),
         "vat_recon_types": VAT_RECON_TYPES,
         "paye_recon_types": PAYE_RECON_TYPES,
+        "vat_period_types": vat_periods.VAT_PERIOD_TYPE_LABELS,
+        "vat_period_coverage": _vat_period_coverage(job),
         "breadcrumbs": [
             {"label": practice["name"], "url": f"/practices/{client['practice_id']}"},
             {"label": "Clients", "url": f"/practices/{client['practice_id']}/clients"},
@@ -385,6 +422,21 @@ def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_
             {"label": job["current_label"]},
         ],
     })
+
+
+@app.post("/jobs/{job_id}/vat-setup")
+def save_vat_setup(job_id: str, vat_period_type: str = Form(""), user: dict = Depends(auth.current_user_dep)):
+    """One-time choice of VAT scheme (quarterly/monthly) for this job - once
+    set, the VAT Return upload section shows exactly which filing periods
+    are still missing (see _vat_period_coverage) instead of a preparer
+    having to work that out by hand. An empty value clears it back to no
+    checklist at all."""
+    job, _client = _authorize_job(user, job_id)
+    if vat_period_type and vat_period_type not in vat_periods.VAT_PERIOD_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid VAT period type")
+    job["vat_period_type"] = vat_period_type or None
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}", status_code=303)
 
 
 @app.post("/jobs/{job_id}/tax-inputs")
@@ -875,7 +927,8 @@ async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: byt
     if xero_report_type:
         period = document_detection.guess_period(source, xero_report_type, job, xero_report_type)
         expected_end = _expected_period_end(job, period)
-        period_check = xero_reports.check_period(xero_reports.extract_period_info(source), expected_end)
+        period_info = xero_reports.extract_period_info(source)
+        period_check = xero_reports.check_period(period_info, expected_end)
         columns = source.raw_columns()
         upload_id = storage.add_upload(job, xero_report_type, period, "xero", filename, content, columns)
         job["uploads"][upload_id]["mapping"] = {}
@@ -884,6 +937,13 @@ async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: byt
         job["uploads"][upload_id]["period_check"] = period_check
         job["uploads"][upload_id]["sheet_name"] = sheet_name
         job["uploads"][upload_id]["display_name"] = display_name
+        # The VAT filing-period checklist (see vat_periods.py and the VAT
+        # Return section of job_detail.html) needs each upload's own
+        # detected period-end date to work out which expected quarter/
+        # month it covers - stored as an ISO string since job/upload dicts
+        # are serialised straight to JSONB (see storage._put_entity).
+        detected_end = period_info.get("end")
+        job["uploads"][upload_id]["detected_period_end"] = detected_end.isoformat() if detected_end else None
         storage.save_job(job)
         return
 

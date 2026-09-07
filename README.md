@@ -533,6 +533,34 @@ labelled this way, so a preparer isn't required to individually
 re-investigate every one to reach that conclusion - purely advisory, never
 excluded from the list.
 
+### VAT filing period wizard
+
+A client who files quarterly or monthly VAT returns needs several uploads
+combined into one annual total (see "Why Xero gets special handling"
+above) - working out which quarters/months to expect and chasing down
+whichever hasn't turned up yet used to be entirely manual. The VAT Return
+upload section now has a one-time setup: pick a VAT scheme (Quarterly or
+Monthly) and save, and the system works out the expected period-end dates
+itself from the job's own current period dates (required) and comparative
+period dates (optional, only shown if the job has a comparative period at
+all) - walking backward from each year's own period-end in exact 3-month
+(or 1-month) steps, so a part-year first job still gets a sensible,
+non-overlapping set of expected dates rather than assuming a clean 4/12
+split (`app/vat_periods.py`, `expected_period_ends`).
+
+Each expected period is shown as **uploaded** or **missing**, matched
+against the detected period-end date of every confirmed VAT Return upload
+(the same date `extract_period_info` already reads from the file's own
+title row to decide current vs comparative - see above - now also stored
+per upload and compared against each expected date within a few days'
+tolerance, one upload satisfying at most one expected period so a
+duplicate upload can't mask a genuinely missing quarter). This is purely
+a visibility/coverage checklist on top of the existing single VAT Return
+upload zone (already the "one place to drop files for this category" the
+rest of the report-type sections use) - it doesn't gate uploading or
+generation, just tells a preparer at a glance what's still outstanding
+before trusting the combined annual total.
+
 ### VAT Reconciliation workspace
 
 The VAT cross-check above compares totals (VAT return boxes vs the P&L

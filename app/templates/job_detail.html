@@ -404,6 +404,53 @@
     </form>
   </details>
 
+  {% if rt == 'vat_return' %}
+  <div style="background:var(--bg-subtle,#f7f7f8); border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:14px">
+    <p style="margin:0 0 10px; font-size:13px; font-weight:600">VAT filing periods</p>
+    <form method="post" action="/jobs/{{ job.id }}/vat-setup" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap">
+      <label style="font-size:13px; margin:0">VAT scheme
+        <select name="vat_period_type" style="margin-left:6px">
+          <option value="">Not set</option>
+          {% for value, label in vat_period_types.items() %}
+          <option value="{{ value }}" {% if job.vat_period_type == value %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+      <button type="submit" class="secondary">Save</button>
+    </form>
+
+    {% if vat_period_coverage %}
+    <p class="muted" style="margin:10px 0 6px; font-size:12px">
+      Expected {{ vat_period_types[vat_period_coverage.vat_period_type] | lower }} filing periods, picked up automatically from the job's own current{{ ' and comparative' if vat_period_coverage.comparative }} period dates &mdash; upload each return above and it's matched to the period it covers.
+    </p>
+    <div style="display:flex; gap:24px; flex-wrap:wrap">
+      <div>
+        <p style="margin:0 0 4px; font-size:12px; font-weight:600">Current year</p>
+        {% for p in vat_period_coverage.current %}
+        <div style="font-size:12px; margin:2px 0">
+          <span class="badge {{ 'ok' if p.covered else 'error' }}">{{ 'uploaded' if p.covered else 'missing' }}</span>
+          period ending {{ p.expected_end.strftime('%d %b %Y') }}
+        </div>
+        {% endfor %}
+      </div>
+      {% if vat_period_coverage.comparative %}
+      <div>
+        <p style="margin:0 0 4px; font-size:12px; font-weight:600">Comparative year</p>
+        {% for p in vat_period_coverage.comparative %}
+        <div style="font-size:12px; margin:2px 0">
+          <span class="badge {{ 'ok' if p.covered else 'error' }}">{{ 'uploaded' if p.covered else 'missing' }}</span>
+          period ending {{ p.expected_end.strftime('%d %b %Y') }}
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+    {% else %}
+    <p class="muted" style="margin:10px 0 0; font-size:12px">Choose a VAT scheme and save to see which quarterly/monthly periods this job still needs, based on its own current/comparative period dates.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
   {% set section_uploads = uploads_by_type.get(rt, []) %}
   {% if section_uploads %}
   <table>
