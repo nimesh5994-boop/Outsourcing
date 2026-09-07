@@ -451,6 +451,25 @@
   </div>
   {% endif %}
 
+  {% if rt in simple_period_coverage %}
+  {% set cov = simple_period_coverage[rt] %}
+  <div style="background:var(--bg-subtle,#f7f7f8); border:1px solid var(--border); border-radius:8px; padding:14px; margin-bottom:14px">
+    <p style="margin:0 0 8px; font-size:13px; font-weight:600">Checklist</p>
+    <div style="font-size:12px; margin:2px 0">
+      <span class="badge {{ 'ok' if cov.current else 'error' }}">{{ 'uploaded' if cov.current else 'missing' }}</span>
+      Current period ({{ job.current_label }}) &mdash; required
+    </div>
+    {% if cov.comparative is not none %}
+    <div style="font-size:12px; margin:2px 0">
+      <span class="badge {{ 'ok' if cov.comparative else 'error' }}">{{ 'uploaded' if cov.comparative else 'missing' }}</span>
+      Comparative period ({{ job.comparative_label }}) &mdash; optional
+    </div>
+    {% elif job.comparative_period_end %}
+    <p class="muted" style="margin:6px 0 0; font-size:12px">A comparative {{ report_labels[rt] }} isn't used by this system's checks - only the current period is needed here.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
   {% set section_uploads = uploads_by_type.get(rt, []) %}
   {% if section_uploads %}
   <table>

@@ -561,6 +561,19 @@ rest of the report-type sections use) - it doesn't gate uploading or
 generation, just tells a preparer at a glance what's still outstanding
 before trusting the combined annual total.
 
+The same uploaded/missing visibility is also shown, without a scheme
+picker, on the Trial Balance and Aged Debtors/Aged Creditors sections -
+these are always exactly one file per period (no quarterly/monthly
+frequency to choose), so it's just a simple checklist: **Current period
+(required)** always shown, plus **Comparative period (optional)** for
+Trial Balance specifically when the job has a comparative period set up
+(`app/main.py`, `SIMPLE_CHECKLIST_TYPES`/`_simple_period_coverage`).
+Aged Debtors/Aged Creditors only ever show the current-period row - a
+comparative aged listing isn't wired into any check (the debtors/
+creditors control recon only ever needs the current listing against the
+current TB - see the table below), so the checklist says so explicitly
+rather than offering a row that would never do anything.
+
 ### VAT Reconciliation workspace
 
 The VAT cross-check above compares totals (VAT return boxes vs the P&L

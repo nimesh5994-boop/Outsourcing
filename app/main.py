@@ -396,6 +396,37 @@ def _vat_period_coverage(job: dict) -> dict | None:
     return result
 
 
+# report types that give a preparer a simple current/comparative "is it
+# here yet" checklist (see _simple_period_coverage) - unlike VAT's
+# multi-file-per-year quarterly/monthly wizard above, these are always
+# exactly one file per period, so there's no scheme to choose and nothing
+# to auto-generate; comparative is only ever meaningful for the ones
+# DATA_KEY actually feeds a comparative-year figure from (trial_balance -
+# used by the TB self-balance check and variance analysis both years;
+# aged_debtors/aged_creditors have no comparative-year DATA_KEY entry at
+# all, since the debtors/creditors control recon only ever needs the
+# current listing against the current TB).
+SIMPLE_CHECKLIST_TYPES = {
+    "trial_balance": True,
+    "aged_debtors": False,
+    "aged_creditors": False,
+}
+
+
+def _simple_period_coverage(job: dict, report_type: str, supports_comparative: bool) -> dict:
+    def _has_confirmed(period: str) -> bool:
+        return any(
+            u["report_type"] == report_type and u["period"] == period and u["confirmed"]
+            for u in job["uploads"].values()
+        )
+
+    has_comparative_period = bool(job.get("comparative_period_start") and job.get("comparative_period_end"))
+    return {
+        "current": _has_confirmed("current"),
+        "comparative": _has_confirmed("comparative") if supports_comparative and has_comparative_period else None,
+    }
+
+
 @app.get("/jobs/{job_id}")
 def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_user_dep)):
     job, client = _authorize_job(user, job_id)
@@ -415,6 +446,10 @@ def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_
         "paye_recon_types": PAYE_RECON_TYPES,
         "vat_period_types": vat_periods.VAT_PERIOD_TYPE_LABELS,
         "vat_period_coverage": _vat_period_coverage(job),
+        "simple_period_coverage": {
+            rt: _simple_period_coverage(job, rt, supports_comparative)
+            for rt, supports_comparative in SIMPLE_CHECKLIST_TYPES.items()
+        },
         "breadcrumbs": [
             {"label": practice["name"], "url": f"/practices/{client['practice_id']}"},
             {"label": "Clients", "url": f"/practices/{client['practice_id']}/clients"},

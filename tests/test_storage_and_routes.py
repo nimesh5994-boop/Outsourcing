@@ -754,6 +754,70 @@ def test_vat_setup_rejects_invalid_period_type(http_client):
     assert resp.status_code == 400
 
 
+def test_simple_period_checklist_for_tb_and_aged_listings(http_client):
+    """The same "is it here yet" visibility the VAT wizard gives quarterly
+    returns, but for the report types that are always exactly one file per
+    period so there's no scheme to pick - see main.py's
+    SIMPLE_CHECKLIST_TYPES/_simple_period_coverage. Trial Balance checks
+    both current (required) and comparative (optional, only when the job
+    has a comparative period); Aged Debtors/Creditors only ever check
+    current, since DATA_KEY has no comparative entry for them at all - the
+    debtors/creditors control recon only ever needs the current listing
+    against the current TB."""
+    from app import storage
+    from app.main import _simple_period_coverage
+    c = http_client
+
+    practice_id = _signup(c, admin_email="simplechecklist@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Simple Checklist Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+        "comparative_period_start": "2024-01-01", "comparative_period_end": "2024-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    # Nothing uploaded yet - everything missing, TB shows a comparative
+    # row (job has one), aged listings don't offer one at all.
+    job = storage.get_job(job_id)
+    tb_cov = _simple_period_coverage(job, "trial_balance", True)
+    debtors_cov = _simple_period_coverage(job, "aged_debtors", False)
+    assert tb_cov == {"current": False, "comparative": False}
+    assert debtors_cov == {"current": False, "comparative": None}
+
+    resp = c.get(f"/jobs/{job_id}")
+    assert "Comparative period" in resp.text  # appears at least once, for TB
+
+    xlsx_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    for section_report_type, filename, content in [
+        ("trial_balance", "tb.xlsx", _control_accounts_tb_workbook()),
+        ("aged_debtors", "aged_debtors.xlsx", _aged_debtors_workbook()),
+    ]:
+        resp = c.post(
+            f"/jobs/{job_id}/uploads", data={"section_report_type": section_report_type},
+            files={"files": (filename, content, xlsx_type)},
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303
+    _confirm_all_pending_uploads(c, job_id)
+
+    job = storage.get_job(job_id)
+    tb_cov = _simple_period_coverage(job, "trial_balance", True)
+    debtors_cov = _simple_period_coverage(job, "aged_debtors", False)
+    assert tb_cov == {"current": True, "comparative": False}
+    assert debtors_cov == {"current": True, "comparative": None}
+
+    resp = c.get(f"/jobs/{job_id}")
+    html = resp.text
+    tb_i = html.find("Trial Balance</h2>")
+    debtors_i = html.find("Aged Debtors</h2>")
+    tb_section = html[tb_i:tb_i + 1500]
+    debtors_section = html[debtors_i:debtors_i + 1500]
+    assert 'badge ok">uploaded</span>' in tb_section
+    assert "Current period" in tb_section
+    assert "isn't used by this system's checks" in debtors_section
+
+
 @pytest.mark.parametrize("box_summary_first", [True, False])
 def test_generic_sibling_sheet_does_not_overwrite_the_native_vat_return_match(http_client, box_summary_first):
     # Regression: a real client's VAT Return upload came through as a
