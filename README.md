@@ -490,6 +490,7 @@ PDF, in any order), and the system works out what each one is:
 | Fixed asset register (category) | Cost/depreciation rollforward per asset category, derived from TB + nominal activity, checked against the TB - runnable and viewable on its own as its own "Fixed Asset Register" card, same treatment as VAT/PAYE - see below |
 | Fixed asset register (asset detail) | Prior-year register rolled forward asset-by-asset, new additions/possible disposals flagged from nominal activity, totals checked against TB - same standalone card as above |
 | Accruals & Prepayments schedule | Every Prepayment-typed and accrual-named account, side by side in one table, b/fwd + movement = c/fwd checked against TB - runnable and viewable on its own as its own "Accruals & Prepayments" card, same treatment as VAT/PAYE - see below |
+| P&L Variance Review | Every P&L account, current vs comparative, flagged beyond materiality - with the contacts/nominal codes driving a flagged movement and, once a client has prior years on record, whether the swing is a recurring pattern or new - runnable on its own, plus a separate plain-English client-facing summary to download - see below |
 | Contact coding consistency | A contact whose postings are mostly on one nominal code but a small minority land on a different one - the "BT: 10 postings to Telephone, 2 to Light & Heat" pattern - flags the minority transactions with the likely correct code |
 | Duplicate transaction check | Same contact+date+amount(+VAT, when the upload carries it) posted more than once, or the same reference/invoice number reused on the same nominal code, amount and date - excludes the natural double-entry legs of one transaction (same reference on different codes, or an invoice and its later payment, which share a reference but have opposite signs); flags (but doesn't exclude) postings that look like Xero's own opening-balance migration pairs - see below |
 | Unusual posting date check | Manual journals (not bank feed or trading transactions, which legitimately happen any day) posted on a weekend |
@@ -1410,6 +1411,62 @@ render columns in that stored order rather than trusting a JSONB-
 reloaded record's own key order - this fix applies to every standalone
 section's on-screen tables, not just the Nominal Matrix, since all of
 them round-trip through the same Postgres JSONB storage.
+
+## P&L Variance Review
+
+Built from `app/pl_variance.py` - every Profit & Loss account, current
+vs comparative year, flagged if it moves beyond materiality (same
+mechanics as the TB-wide variance analysis, scoped to just the P&L this
+time), with two pieces of context a bare two-column variance table can't
+give a reviewer on its own:
+
+**Which contacts/nominal codes are actually driving a flagged
+movement.** For every contact who posted to a flagged account this year,
+shows every OTHER nominal code that same contact also posted to
+(`extra_detail`, "posted to multiple codes") - the shape a genuine
+misallocation usually leaves behind (a supplier's invoice coded to the
+wrong overhead line), though just as often it's a contact whose spend
+genuinely spans several real categories. Left for the reviewer to judge
+which; a contact who only ever posted to the one flagged account isn't
+shown at all, since there's nothing to compare.
+
+**Whether this year's swing has happened before for THIS client.** A
+single job only ever sees two years (current vs comparative) - it has no
+way to tell a recurring seasonal pattern from a first-time anomaly.
+Solved with a small year-on-year history kept per client
+(`client["pl_history"]`, keyed by accounting year-end): every time the
+review runs, this year's own account figures are snapshotted into it
+(`pl_variance.snapshot_into_history`), and the next job for the same
+client checks its own flagged accounts against that history
+(`pl_variance.annotate_with_history`) - "Recurring - flagged in N of M
+prior year(s) too - may be normal for this client" vs "New this year -
+not flagged in N prior year(s) on record" vs "No prior-year history yet"
+for a client's first job. Purely descriptive, same as everything else in
+this system - it tells the reviewer what's on record, never an automatic
+accept/reject.
+
+**Runnable and viewable on its own**, same treatment as every other
+standalone section: a "P&L Variance Review" card on the job page reuses
+whatever Profit & Loss (uploaded directly, or derived from a Trial
+Balance the same way the Profit & Loss/Balance Sheet sheets already are)
+and Nominal Activity uploads are already confirmed, with its own "Run"
+button independent of the full Generate pipeline - and also folds into
+Generate itself as its own numbered sheet, same as every other check.
+
+**A separate client-facing copy.** The internal review above is a
+working-paper schedule - review status, materiality-driven flags, the
+nominal-code investigation detail. `pl_variance.build_client_report`
+builds a deliberately simpler standalone workbook meant to go straight to
+the client for their own comment/confirmation: every P&L account in
+normal P&L order (category, then account name), a one-line plain-English
+comment only on the lines that moved meaningfully ("Increased by 17,000
+(212%) compared to last year. First time this account has moved by this
+much."), no internal jargon at all. Downloadable from the same card
+(`GET /jobs/{id}/pl-variance/client-report`), computed fresh on every
+download so it always reflects whatever's currently uploaded - it
+deliberately does NOT touch the client's history snapshot, so pulling a
+client copy never silently affects next year's comparison; only an
+explicit "Run" on the review itself records one.
 
 ## Upload safety
 

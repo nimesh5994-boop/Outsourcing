@@ -10,7 +10,7 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mapping, nominal_matrix, parsers, paye_reconciliation, pdf_extraction, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, vat_periods, vat_reconciliation, xero_reports
+from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mapping, nominal_matrix, parsers, paye_reconciliation, pdf_extraction, pl_variance, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, vat_periods, vat_reconciliation, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
 from app.models import PAYE_RECON_TYPES, PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS, VAT_RECON_TYPES
 
@@ -840,6 +840,78 @@ def run_accruals_prepayments(job_id: str, user: dict = Depends(auth.current_user
     return RedirectResponse(f"/jobs/{job_id}#accruals-prepayments", status_code=303)
 
 
+def _run_pl_variance(job: dict, client: dict, materiality: float, variance_pct_threshold: float):
+    """Shared by the standalone run route and generate() - computes the
+    P&L variance review, annotates it against the client's own
+    year-on-year history (see pl_variance.annotate_with_history), and
+    snapshots this year's own figures into that history for next year's
+    run to compare against (pl_variance.snapshot_into_history). Mutates
+    client in place; the caller still needs storage.save_client(client)
+    (deliberately not done here, so a caller that only wants a preview -
+    e.g. the client-facing report route - can skip persisting a snapshot
+    for a run nobody asked to record)."""
+    data = _load_canonical_data(job)
+    result = pl_variance.pl_variance_analysis(
+        data.get("pl_current"), data.get("pl_comparative"), data.get("nominal_current"),
+        materiality, variance_pct_threshold,
+    )
+    if result.detail is not None and not result.detail.empty:
+        result.detail = pl_variance.annotate_with_history(result.detail, client.get("pl_history", {}))
+    return result
+
+
+@app.post("/jobs/{job_id}/pl-variance/run")
+def run_pl_variance(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Computes the P&L Variance Review independently of the main Generate
+    pipeline, same "test this section on its own" treatment as every
+    other standalone section above (see app/pl_variance.py) - reuses
+    whatever Profit & Loss (current/comparative, uploaded directly or
+    derived from a Trial Balance)/Nominal Activity uploads are already
+    confirmed for this job. Also records this year's own P&L figures into
+    the client's persistent year-on-year history, so a LATER job for the
+    same client can tell whether a flagged account's movement has
+    happened before."""
+    job, client = _authorize_job(user, job_id)
+    template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
+    materiality, variance_pct_threshold = _job_materiality(template)
+    result = _run_pl_variance(job, client, materiality, variance_pct_threshold)
+    if result.detail is not None and not result.detail.empty:
+        pl_variance.snapshot_into_history(client, job.get("current_period_end"), result.detail)
+        storage.save_client(client)
+    job["pl_variance_results"] = [_recon_result_to_dict(result)]
+    job["pl_variance_computed_at"] = datetime.now(timezone.utc).isoformat()
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#pl-variance", status_code=303)
+
+
+@app.get("/jobs/{job_id}/pl-variance/client-report")
+def download_pl_variance_client_report(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """A separate, deliberately simpler export of the same P&L variance
+    review meant to go straight to the client for their own comment/
+    confirmation - plain account names and a one-line plain-English
+    comment per line, no internal workpaper language (no "flag"/"ok"
+    status codes, no materiality thresholds shown), and none of the
+    contact/nominal-code investigation detail the internal review needs
+    (see app/pl_variance.py and the P&L Variance Review card on the job
+    page for that). Computed fresh on every download rather than reusing
+    a stored run, so it always reflects whatever's currently uploaded;
+    doesn't touch the client's history snapshot (see _run_pl_variance) -
+    only an explicit "Run" on the review itself records one, so merely
+    downloading a client copy never silently affects next year's
+    comparison."""
+    job, client = _authorize_job(user, job_id)
+    template = storage.get_template(client["practice_id"], client["template_id"]) if client.get("template_id") else None
+    materiality, variance_pct_threshold = _job_materiality(template)
+    result = _run_pl_variance(job, client, materiality, variance_pct_threshold)
+    workbook_bytes = pl_variance.build_client_report(client["name"], job["current_label"], result.detail)
+    filename = f"{client['name']} - P&L Variance Summary - {job['current_label']}.xlsx"
+    return Response(
+        content=workbook_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @app.post("/clients/{client_id}/notes/{report_type}")
 def save_report_note(client_id: str, report_type: str, note: str = Form(""), next: str = Form(""),
                       user: dict = Depends(auth.current_user_dep)):
@@ -1551,6 +1623,15 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
     results = results + [related_party_transactions.find_related_party_transactions(
         data.get("tb_current"), data.get("nominal_current"), materiality,
     )]
+    pl_variance_result = pl_variance.pl_variance_analysis(
+        data.get("pl_current"), data.get("pl_comparative"), data.get("nominal_current"),
+        materiality, variance_pct_threshold,
+    )
+    if pl_variance_result.detail is not None and not pl_variance_result.detail.empty:
+        pl_variance_result.detail = pl_variance.annotate_with_history(pl_variance_result.detail, client.get("pl_history", {}))
+        pl_variance.snapshot_into_history(client, job.get("current_period_end"), pl_variance_result.detail)
+        storage.save_client(client)
+    results = results + [pl_variance_result]
     yield event(4, "done")
 
     if template and template["config"].get("ai_reconciliation_notes", {}).get("enabled"):

@@ -714,6 +714,134 @@ def test_quarterly_vat_returns_are_summed_into_one_annual_total_per_year(http_cl
     assert comparative["box5"] == pytest.approx(550.0)
 
 
+def _pl_variance_workbook(rows: list[list]) -> bytes:
+    """A generic-mapped Profit & Loss export - real header names matching
+    the alias dictionaries, so the auto-suggested mapping already needs
+    no manual override."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Account Code", "Account Name", "P&L Category", "Amount"])
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_pl_variance_review_end_to_end_with_client_history(http_client):
+    """Full P&L Variance Review flow across two jobs for the same client:
+    year 1 has nothing worth flagging and seeds the client's year-on-year
+    history (client["pl_history"] - see app/pl_variance.py); year 2's
+    Marketing account spikes well beyond materiality, driven by one
+    contact who also posts to a different code (the "posted to multiple
+    codes" misallocation-candidate check), and gets annotated as "New
+    this year" against a client with exactly one prior (unflagged) year
+    on record. Also checks the client-facing report downloads and that
+    the standalone review folds into the full Generate pipeline."""
+    from app import storage
+    c = http_client
+
+    practice_id = _signup(c, admin_email="plvariance@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Acme Trading Ltd"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    # --- Job 1: year ended 2024-12-31 - quiet year, seeds history ---
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2024-01-01", "current_period_end": "2024-12-31",
+        "comparative_period_start": "2023-01-01", "comparative_period_end": "2023-12-31",
+    }, follow_redirects=False)
+    job1_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    _upload_and_confirm_with_period(
+        c, job1_id, "profit_and_loss", "pl_current_1.xlsx",
+        _pl_variance_workbook([["4000", "Sales", "Turnover", -100000], ["6000", "Marketing", "Overheads", 8000]]),
+        "current",
+    )
+    _upload_and_confirm_with_period(
+        c, job1_id, "profit_and_loss", "pl_comp_1.xlsx",
+        _pl_variance_workbook([["4000", "Sales", "Turnover", -95000], ["6000", "Marketing", "Overheads", 7500]]),
+        "comparative",
+    )
+
+    resp = c.post(f"/jobs/{job1_id}/pl-variance/run", follow_redirects=False)
+    assert resp.status_code == 303
+    job1 = storage.get_job(job1_id)
+    assert job1["pl_variance_results"][0]["status"] == "ok"
+
+    client = storage.get_client(client_id)
+    assert "2024-12-31" in client["pl_history"]
+    assert client["pl_history"]["2024-12-31"]["6000|Marketing"]["flagged"] is False
+
+    # --- Job 2: year ended 2025-12-31 - Marketing spikes ---
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+        "comparative_period_start": "2024-01-01", "comparative_period_end": "2024-12-31",
+    }, follow_redirects=False)
+    job2_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    _upload_and_confirm_with_period(
+        c, job2_id, "profit_and_loss", "pl_current_2.xlsx",
+        _pl_variance_workbook([["4000", "Sales", "Turnover", -120000], ["6000", "Marketing", "Overheads", 25000]]),
+        "current",
+    )
+    _upload_and_confirm_with_period(
+        c, job2_id, "profit_and_loss", "pl_comp_2.xlsx",
+        _pl_variance_workbook([["4000", "Sales", "Turnover", -100000], ["6000", "Marketing", "Overheads", 8000]]),
+        "comparative",
+    )
+    _upload_and_confirm_with_period(
+        c, job2_id, "nominal_activity", "gl_2.xlsx",
+        _control_accounts_nominal_workbook_variant([
+            ["2025-03-01", "6000", "Marketing", "INV1", "ads", "Acme Agency", 15000, 0],
+            ["2025-04-01", "6200", "Travel", "INV2", "travel", "Acme Agency", 4000, 0],
+            ["2025-05-01", "6000", "Marketing", "INV3", "campaign", "Acme Agency", 10000, 0],
+        ]),
+        "current",
+    )
+
+    resp = c.post(f"/jobs/{job2_id}/pl-variance/run", follow_redirects=False)
+    assert resp.status_code == 303
+    job2 = storage.get_job(job2_id)
+    result = job2["pl_variance_results"][0]
+    assert result["status"] == "review"
+
+    marketing = next(r for r in result["detail"] if r["account_name"] == "Marketing")
+    assert marketing["flag"] is True
+    assert marketing["current_year"] == pytest.approx(25000.0)
+    assert marketing["comparative_year"] == pytest.approx(8000.0)
+    assert "New this year" in marketing["historical_pattern"]
+
+    extra_contacts = {row["Contact"] for row in result["extra_detail"]}
+    assert extra_contacts == {"Acme Agency"}
+    extra_accounts = {row["Account"] for row in result["extra_detail"]}
+    assert "6200 - Travel" in extra_accounts
+
+    # Client-facing report downloads and is a real xlsx
+    resp = c.get(f"/jobs/{job2_id}/pl-variance/client-report")
+    assert resp.status_code == 200
+    assert resp.headers["content-type"].startswith("application/vnd.openxmlformats")
+    assert resp.content[:2] == b"PK"  # zip signature - a real xlsx
+
+    # Folds into the full Generate pipeline too
+    resp = c.post(f"/jobs/{job2_id}/generate", follow_redirects=False)
+    assert resp.status_code == 303
+    job2 = storage.get_job(job2_id)
+    assert job2["status"] == "generated"
+    summary_names = {s["name"] for s in job2["summary"]}
+    assert "P&L variance review (current vs comparative)" in summary_names
+
+
+def _control_accounts_nominal_workbook_variant(rows: list[list]) -> bytes:
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Date", "Account Code", "Account Name", "Reference", "Description", "Contact", "Debit", "Credit"])
+    for row in rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def test_vat_setup_wizard_flags_missing_filing_periods(http_client):
     """The VAT period wizard (main.py's /jobs/{id}/vat-setup route and
     _vat_period_coverage) lets a preparer pick a VAT scheme once and see

@@ -47,6 +47,7 @@ DEFAULT_TEMPLATE_CONFIG = {
         "fixed_asset_register": {"enabled": True, "insert_after_sheet": None},
         "control_account_rollforward": {"enabled": True, "insert_after_sheet": None},
         "nominal_matrix": {"enabled": True, "insert_after_sheet": None, "max_accounts": 6},
+        "pl_variance_review": {"enabled": True, "insert_after_sheet": None},
         "debtors_recon": {"enabled": True, "insert_after_sheet": None},
         "creditors_recon": {"enabled": True, "insert_after_sheet": None},
         "bank_recon": {"enabled": True, "insert_after_sheet": None},

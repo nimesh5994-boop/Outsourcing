@@ -1659,6 +1659,7 @@ def _generate_schedules(
     RESULT_SCHEDULE_INFO = {
         "TB self-balance check": ("tb_balance_check", "TB Balance Check"),
         "Current vs comparative variance analysis": (None, None),
+        "P&L variance review (current vs comparative)": ("pl_variance_review", "PL Variance Review"),
         "Debtors control account reconciliation": ("debtors_recon", "Debtors Recon"),
         "Creditors control account reconciliation": ("creditors_recon", "Creditors Recon"),
         "Bank reconciliation": ("bank_recon", "Bank Recon"),

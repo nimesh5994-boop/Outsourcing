@@ -76,6 +76,7 @@
   <a href="#debtors-creditors">Debtors &amp; Creditors</a>
   <a href="#fixed-asset-register">Fixed Assets</a>
   <a href="#bank-recon">Bank</a>
+  <a href="#pl-variance">P&amp;L Variance</a>
   <a href="#nominal-matrix">Nominal Matrix</a>
   <a href="#accruals-prepayments">Accruals &amp; Prepayments</a>
   <a href="#source-documents" class="muted-link">Source Documents &darr;</a>
@@ -359,6 +360,21 @@
   </div>
 
   {{ render_standalone_results(job.bank_recon_results, job.bank_recon_computed_at) }}
+</div>
+
+<div class="card" id="pl-variance">
+  <h2>P&amp;L Variance Review</h2>
+  <p class="muted">Every Profit &amp; Loss account, current vs comparative year, flagged if it moves beyond materiality &mdash; with the contacts driving a flagged account's movement (and any other nominal codes they also post to, the shape a genuine misallocation usually leaves behind) and, once this client has at least one prior year on record, whether this year's swing is a repeat of a pattern already seen for them or something new.</p>
+
+  <div style="margin-top:20px">
+    <form method="post" action="/jobs/{{ job.id }}/pl-variance/run">
+      <button type="submit">Run P&amp;L Variance Review</button>
+    </form>
+    <p class="muted" style="margin-top:8px">Uses the Profit &amp; Loss (or a Trial Balance it can be derived from) / Nominal Activity sections below &mdash; no separate upload here. Runs independently of Generate, so you can test and refine those inputs on their own before building the full working paper. Also records this year's figures into the client's own year-on-year history, so a later job for the same client can tell whether a flagged account has moved like this before.</p>
+    <p class="muted" style="margin-top:8px"><a href="/jobs/{{ job.id }}/pl-variance/client-report">Download client-facing summary (.xlsx)</a> &mdash; a simpler copy of this same review, plain account names and comments only, meant to send straight to the client for their own review/confirmation.</p>
+  </div>
+
+  {{ render_standalone_results(job.pl_variance_results, job.pl_variance_computed_at) }}
 </div>
 
 <div class="card" id="nominal-matrix">
