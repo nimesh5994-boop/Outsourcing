@@ -213,6 +213,31 @@ def test_miscoding_suggestion_aged_listing_wins_regardless_of_account_order():
     assert result.detail.iloc[0]["Normally clears through"] == "TRADE DEBTORS CONTROL"
 
 
+def test_miscoding_suggestion_ignores_opening_balance_migration_postings():
+    # Regression: found live against a real client's file, where EVERY
+    # SINGLE ONE of 643 flagged "possible miscodings" was actually every
+    # contact's migrated opening balance landing on Xero's own "Opening
+    # Balance" suspense account - not a genuine posting to another
+    # contact's control account. That account is typed as a current
+    # asset/liability (so it otherwise passes the ROLLFORWARD_ACCOUNT_
+    # TYPES filter) but it's a shared clearing bucket for every contact's
+    # historic-balance import by design, not "a different control account
+    # this contact normally clears through" - the entire 100%-false-
+    # positive finding needs excluding outright, not just flagging.
+    tb_current = _tb([
+        {"account_code": "610A", "account_name": "ACCOUNTS RECEIVABLE", "account_type": "Current Asset", "balance": 900.0},
+        {"account_code": "8160", "account_name": "Opening Balance", "account_type": "Current Asset", "balance": -900.0},
+    ])
+    nominal = pd.DataFrame([
+        _nom_row("2025-01-03", "8160", "Opening Balance", credit=900.0, contact="Whalebone Building Supplies Ltd.", reference="1/2025"),
+    ])
+    aged_debtors = pd.DataFrame([{"customer": "Whalebone Building Supplies Ltd.", "total": 900.0}])
+    control_accounts = [("610A", "ACCOUNTS RECEIVABLE"), ("8160", "Opening Balance")]
+    result = ca.suggest_control_account_miscoding(tb_current, nominal, control_accounts, aged_debtors=aged_debtors)
+    assert result.status == "ok"
+    assert result.detail.empty
+
+
 def test_miscoding_suggestion_na_without_required_inputs():
     assert ca.suggest_control_account_miscoding(None, None, []).status == "n/a"
     assert ca.suggest_control_account_miscoding(pd.DataFrame(), pd.DataFrame(), []).status == "n/a"

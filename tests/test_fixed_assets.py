@@ -197,6 +197,58 @@ def test_capex_suggestion_uses_prior_register_categories_too():
 
 def test_capex_suggestion_na_without_tb_or_nominal_activity():
     assert fa.suggest_capital_expenditure_reclassification(None, None).status == "n/a"
+
+
+def test_capex_suggestion_does_not_substring_match_inside_unrelated_words():
+    # Regression: found live against a real client's file - "car" (a
+    # generic capex keyword) matched "CAREY" (a contact's own company
+    # name, "Carey Transport"), and "van" matched inside "ADVANCE"
+    # ("OFFICE RENT- ADVANCE-MAY-25"), flagging a freight invoice and a
+    # rent payment as possible vehicle purchases. Keyword matching must
+    # respect word boundaries, not just check `kw in text`.
+    tb_current = pd.DataFrame([
+        _fa_tb_row("6350", "MOTOR VEHICLES - COST", "Fixed Asset", 5000.0, 0.0),
+        _fa_tb_row("2020", "FREIGHT ON SALES", "Overhead", 0.0, 0.0),
+        _fa_tb_row("2300", "RENT RE OPERATING LEASES", "Overhead", 0.0, 0.0),
+    ])
+    nominal = pd.DataFrame([
+        _nom_row("2025-07-01", "2020", "FREIGHT ON SALES", debit=2648.10, description="FREIGHT INV NO. CC/1066", contact="CAREY TRANSPORT"),
+        _nom_row("2025-05-01", "2300", "RENT RE OPERATING LEASES", debit=1550.0, description="OFFICE RENT- ADVANCE-MAY-25", contact="W NEAL SERVICES LTD"),
+    ])
+    result = fa.suggest_capital_expenditure_reclassification(tb_current, nominal)
+    assert result.status == "ok"
+    assert result.detail.empty
+
+    # a genuine, standalone "van"/"car" mention must still match
+    nominal_genuine = pd.DataFrame([
+        _nom_row("2025-07-01", "2020", "FREIGHT ON SALES", debit=2648.10, description="Purchase of new delivery van", contact="Vehicle Direct Ltd"),
+    ])
+    result_genuine = fa.suggest_capital_expenditure_reclassification(tb_current, nominal_genuine)
+    assert result_genuine.status == "review"
+    assert "van" in result_genuine.detail.iloc[0]["Matched on"]
+
+
+def test_category_keywords_excludes_generic_financial_terms():
+    # Regression: a perfectly normal fixed asset category - "INVESTMENTS
+    # IN NON-CURRENT FINANCIAL ASSETS", a real client's own TB category -
+    # tokenises word-by-word into "investments", "non", "current",
+    # "financial", none of which say anything capex-specific once split
+    # from the rest of the phrase. Found live: "financial" alone matched
+    # a routine audit fee's "financial statements" description.
+    tb_current = pd.DataFrame([
+        _fa_tb_row("2110", "INVESTMENTS IN NON-CURRENT FINANCIAL ASSETS", "Fixed Asset", 20000.0, 0.0),
+        _fa_tb_row("3650", "AUDIT FEES", "Overhead", 0.0, 0.0),
+    ])
+    nominal = pd.DataFrame([
+        _nom_row(
+            "2025-02-10", "3650", "AUDIT FEES", debit=2000.0,
+            description="Professional services rendered: carrying out audit on the company financial statements",
+            contact="IG Accounting & Auditing Limited",
+        ),
+    ])
+    result = fa.suggest_capital_expenditure_reclassification(tb_current, nominal)
+    assert result.status == "ok"
+    assert result.detail.empty
     assert fa.suggest_capital_expenditure_reclassification(pd.DataFrame(), pd.DataFrame()).status == "n/a"
 
 

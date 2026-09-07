@@ -28,6 +28,7 @@ from dataclasses import dataclass, field
 
 import pandas as pd
 
+from app.fixed_assets import _MIGRATION_KEYWORDS
 from app.recon import ReconResult
 
 MATERIALITY_AMOUNT = 500.0
@@ -317,9 +318,26 @@ def suggest_control_account_miscoding(
     if not contact_home:
         return ReconResult(name, "n/a", "No contacts found on any control account to check against.")
 
+    # Exclude postings coded to a suspense/clearing account used for a
+    # historic-balance import (e.g. Xero's own "Opening Balance" account) -
+    # found live against a real client's file, where EVERY SINGLE one of
+    # 643 flagged "possible miscodings" was actually every contact's
+    # migrated opening balance landing on that one generic suspense
+    # account, not a genuine posting to another contact's control account.
+    # It's typed as a balance-sheet account (so it otherwise passes the
+    # ROLLFORWARD_ACCOUNT_TYPES filter above) but it's a shared bucket for
+    # every contact's migration by design, not "a different control
+    # account this contact normally clears through" in any meaningful
+    # sense - so unlike the same signal in the duplicate-transaction check
+    # (advisory only, since a genuine duplicate can still coexist with a
+    # migration entry), there's no real miscoding signal to preserve here.
+    is_migration_account = activity["account_name"].astype(str).str.lower().apply(
+        lambda n: any(k in n for k in _MIGRATION_KEYWORDS)
+    )
     candidates = activity[
         activity["_contact_key"].isin(contact_home)
         & activity["account_code"].map(type_by_code).fillna("").isin(ROLLFORWARD_ACCOUNT_TYPES)
+        & ~is_migration_account
     ].copy()
     if candidates.empty:
         return ReconResult(name, "ok", ok_message)

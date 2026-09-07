@@ -983,6 +983,21 @@ entirely. Aged-listing home assignment now runs as its own pass, before
 any posting-based fallback, so it wins outright regardless of account
 order.
 
+**Excludes opening-balance migration postings** - found live against a
+real client's file, where every single one of 643 flagged "possible
+miscodings" was actually every contact's migrated opening balance
+landing on Xero's own generic "Opening Balance" suspense account, not a
+genuine posting to another contact's control account. That account is
+typed as a current asset/liability (so it otherwise passes the balance-
+sheet-account filter above) but it's a shared clearing bucket for every
+contact's historic-balance import by design, not "a different control
+account this contact normally clears through" in any meaningful sense -
+so postings to it are excluded outright now, using the same suspense/
+migration keyword signal `fixed_assets.py` already uses (see below). The
+whole 100%-false-positive finding disappeared entirely once excluded -
+this check now correctly reports "ok" on that file instead of 643
+candidates that were never worth a preparer's time.
+
 ## Fixed asset register
 
 Built from `app/fixed_assets.py`, in two parts that work independently,
@@ -1129,6 +1144,28 @@ client's categories catch different things. Runs as its own check
 with a candidate table of exactly what matched and why - never
 reclassifies anything itself, since a keyword match on a description is
 a starting point for the preparer to check, not proof of capital nature.
+
+**Word-boundary matching, and a stopword list wide enough to cover
+generic accounting vocabulary** - two compounding bugs found live
+against a real client's file that together produced 9 flagged postings,
+8 of them false positives. First: matching was a plain substring check
+(`keyword in text`), so the generic keyword "car" matched inside "CAREY"
+(a contact's own company name, "Carey Transport"), and "van" matched
+inside "ADVANCE" ("OFFICE RENT- ADVANCE-MAY-25") - neither posting had
+anything to do with a vehicle. Now word-boundary matching (`\bcar\b`).
+Second: this client's own fixed asset category "INVESTMENTS IN NON-
+CURRENT FINANCIAL ASSETS" - a perfectly ordinary category - tokenises
+word-by-word into "investments", "non", "current", "financial", none of
+which say anything capex-specific once split from the rest of the
+phrase; "financial" alone matched a routine audit fee's "financial
+statements" description. The stopword list that filters out category-
+derived words now also excludes this kind of generic accounting
+vocabulary (current, financial, investment(s), value(s), total(s),
+cost(s), capital, account(s), balance(s)) that a real category name can
+easily contain without being distinctively about a fixed asset. Together
+these cut the same file's flagged count from 9 to 1 - the one remaining
+match ("VEHICLE (VAN) INSURANCE") is a genuine word match a preparer can
+dismiss in seconds, not eight unrelated postings to wade through first.
 
 ## Bank Reconciliation (standalone section)
 

@@ -612,7 +612,21 @@ _GENERIC_CAPEX_KEYWORDS = {
     "renovation", "refurbishment", "refurb", "fit-out", "fitout", "extension", "installation",
 }
 
-_VOCAB_STOPWORDS = {"and", "the", "for", "other", "general", "misc", "miscellaneous", "office", "assets", "asset"}
+_VOCAB_STOPWORDS = {
+    "and", "the", "for", "other", "general", "misc", "miscellaneous", "office", "assets", "asset",
+    # Generic accounting/financial vocabulary - a single word split out of
+    # a multi-word category name loses whatever made the category specific
+    # (e.g. "INVESTMENTS IN NON-CURRENT FINANCIAL ASSETS" - a perfectly
+    # normal fixed asset category - tokenises to "investments", "non",
+    # "current", "financial", none of which say anything capex-specific
+    # on their own). Found live: "financial" (from that exact category)
+    # matched a routine audit fee's "financial statements" description,
+    # and "current" would have matched almost any finance-related text at
+    # all - excluded here rather than trusting single-word splits of a
+    # category name to stay meaningful in isolation.
+    "current", "non", "financial", "investment", "investments", "value", "values",
+    "total", "totals", "cost", "costs", "capital", "account", "accounts", "balance", "balances",
+}
 _VOCAB_WORD_RE = re.compile(r"[a-z0-9]+")
 
 
@@ -658,8 +672,14 @@ def suggest_capital_expenditure_reclassification(
     candidates = candidates[candidates["debit"].astype(float) > threshold]
 
     def matched_keywords(row) -> list[str]:
+        # Word-boundary matching, not a plain substring check - found live
+        # against a real client's file: "car" (a stock generic capex
+        # keyword) matched "CAREY" (a contact's own company name,
+        # "Carey Transport"), and "van" matched inside "ADVANCE" ("OFFICE
+        # RENT- ADVANCE-MAY-25") - neither posting had anything to do with
+        # a car or a van.
         text = f"{row.get('description', '')} {row.get('account_name', '')} {row.get('reference', '')}".lower()
-        return sorted(kw for kw in vocabulary if kw in text)
+        return sorted(kw for kw in vocabulary if re.search(rf"\b{re.escape(kw)}\b", text))
 
     ok_message = (
         f"No expense postings above £{threshold:,.2f} matched this client's fixed asset vocabulary "
