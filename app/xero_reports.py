@@ -9,6 +9,7 @@ directly. QBO/Sage/other exports still go through the generic mapping path
 in parsers.py + mapping.py.
 """
 import re
+from datetime import datetime
 
 import pandas as pd
 
@@ -360,7 +361,7 @@ def parse_vat_return_box_summary(source: DataSource) -> pd.DataFrame:
     return out
 
 
-_VAT_BOX_SECTION_HEADER = re.compile(r"^Box\s+(\d)\s*$", re.IGNORECASE)
+_VAT_BOX_ANY_CELL = re.compile(r"^Box\s+(\d)$", re.IGNORECASE)
 _VAT_BOX_DETAIL_COLUMNS = ("date", "reference", "contact", "description", "net_amount", "vat_amount")
 
 
@@ -378,10 +379,25 @@ def parse_vat_box_transactions(source: DataSource) -> dict[int, pd.DataFrame]:
     Structure: a 'Box N - <description>' row (with that box's total, no
     date), then one or more tax-rate sub-groups (e.g. '20% (VAT on
     Income)', 'Zero Rated Expenses') each with their own repeated 'Date |
-    Account | Reference | Details | VAT | Net' header and detail rows -
-    found live with FOUR sub-groups under one Box 4, so the detail-row
-    scan below re-enters on every repeated header rather than assuming
-    one header per box. Boxes 6/7 repeat the exact same underlying
+    Account | Reference | Details | VAT | Net' header and detail rows.
+    Deliberately doesn't trust a fixed column position for any of this -
+    found live across several real periods for the same client that a
+    longer (quarterly) period's export inserts an extra leading column
+    holding the *current* box number, repeated on every single row of
+    that box's section (not just its header) - shifting Date/Account/../
+    Net one column to the right of where a shorter (monthly) period's
+    export puts them, and turning a fixed-column "is this cell exactly
+    'Box N'" check into a false match on every ordinary data row, since
+    that leading column keeps saying 'Box 1' for 160+ rows straight. So:
+    1) every header row is found by CONTENT ('Date' immediately followed
+    by 'Account', wherever that pair of cells actually sits) rather than
+    assumed to be at column 0/1, and each one's own detail rows are read
+    relative to ITS OWN column offset; 2) which box a header belongs to
+    is resolved by scanning backwards from it for the nearest row with a
+    'Box N' cell ANYWHERE in it - correct whether that cell appears once
+    (monthly) or is repeated down every row of the section (quarterly),
+    since either way the nearest one behind a given header is that
+    header's own box. Boxes 6/7 repeat the exact same underlying
     transactions as boxes 1/4 (net-only, no VAT column, since 6/7 are
     "excluding VAT" totals) - skipped as pure duplicates of 1/4's own Net
     column. 'Details' is used for both contact and description: on the
@@ -398,34 +414,80 @@ def parse_vat_box_transactions(source: DataSource) -> dict[int, pd.DataFrame]:
     actually has transaction detail for (an export can have one without
     the other, e.g. a period with only sales or only purchases)."""
     raw = _load_raw(source)
-    if raw.shape[1] < 6:
-        raise ValueError("Not a 'Transactions by VAT Box' export - expected at least 6 columns.")
+    n_rows, n_cols = raw.shape
+    if n_cols < 5:
+        raise ValueError("Not a 'Transactions by VAT Box' export - expected at least 5 columns.")
+
+    def cell(r: int, c: int):
+        return raw.iat[r, c] if 0 <= c < n_cols else None
+
+    def cell_str(r: int, c: int) -> str:
+        v = cell(r, c)
+        return str(v).strip() if v is not None else ""
+
+    header_positions: list[tuple[int, int]] = []  # (row, column offset of "Date")
+    for r in range(n_rows):
+        for c in range(n_cols - 1):
+            if cell_str(r, c).lower() == "date" and cell_str(r, c + 1).lower() == "account":
+                header_positions.append((r, c))
+                break
+
+    if not header_positions:
+        raise ValueError("Not a 'Transactions by VAT Box' export - no 'Date | Account | ...' header row found.")
+
+    box_marks: list[tuple[int, int]] = []  # (row, box number), every "Box N" cell anywhere
+    for r in range(n_rows):
+        for c in range(n_cols):
+            m = _VAT_BOX_ANY_CELL.match(cell_str(r, c))
+            if m:
+                box_marks.append((r, int(m.group(1))))
+                break
+
+    def box_for_header(header_row: int) -> int | None:
+        for r, box in reversed(box_marks):
+            if r <= header_row:
+                return box
+        return None
 
     rows_by_box: dict[int, list[dict]] = {}
-    current_box: int | None = None
-    in_detail = False
-    for _, row in raw.iterrows():
-        first = str(row.iloc[0]).strip() if row.iloc[0] is not None else ""
-        m = _VAT_BOX_SECTION_HEADER.match(first)
-        if m:
-            current_box = int(m.group(1))
-            in_detail = False
+    for header_row, offset in header_positions:
+        box = box_for_header(header_row)
+        if box not in (1, 4):  # boxes 6/7 duplicate 1/4's own transactions net-only - skip
             continue
-        if first == "Date" and str(row.iloc[1]).strip() == "Account":
-            in_detail = current_box in (1, 4)  # skip 6/7 - same transactions, net-only duplicates of 1/4
+        # A Northern Ireland/EU acquisition affects boxes 2 and 4 (and 9)
+        # from the SAME underlying transaction, so Xero cross-references it
+        # into the Box 4 section as a duplicated pair of tax-rate sub-
+        # groups: "EC Acquisitions (NN%)" (the acquisition-due side - Box
+        # 2's own transaction, not a Box 4 addition) immediately followed
+        # by "EC Acquisitions (NN%) Reclaimed VAT" (the actual Box 4
+        # input-VAT reclaim) - found live with BOTH showing the identical
+        # VAT figure for the identical transaction, which double-counted
+        # it into Box 4's total when both were collected. Only the
+        # "Reclaimed VAT" one belongs to Box 4; skip the acquisition-due
+        # one (its own real home, Box 2, isn't collected here at all).
+        sub_group_label = cell_str(header_row - 1, offset).lower()
+        if box == 4 and "ec acquisitions" in sub_group_label and "reclaim" not in sub_group_label:
             continue
-        if not in_detail:
-            continue
-        date = pd.to_datetime(first, dayfirst=True, errors="coerce")
-        if pd.isna(date):
-            in_detail = False  # blank separator row, or the next sub-group's tax-rate label
-            continue
-        details = row.iloc[3] if row.iloc[3] is not None else ""
-        rows_by_box.setdefault(current_box, []).append({
-            "date": date, "reference": row.iloc[2] if row.iloc[2] is not None else "",
-            "contact": details, "description": details,
-            "net_amount": row.iloc[5], "vat_amount": row.iloc[4],
-        })
+        r = header_row + 1
+        while r < n_rows:
+            date_val = cell(r, offset)
+            # already a real datetime for a genuine date cell (openpyxl
+            # reads Excel dates that way) - stringifying it first before
+            # re-parsing needlessly ambiguates an unambiguous value and
+            # trips pandas' dayfirst-format warning for no reason.
+            if isinstance(date_val, (pd.Timestamp, datetime)):
+                date = pd.Timestamp(date_val)
+            else:
+                date = pd.to_datetime(cell_str(r, offset), dayfirst=True, errors="coerce")
+            if pd.isna(date):
+                break  # blank separator row, the next sub-group's tax-rate label, or another header
+            details = cell(r, offset + 3)
+            rows_by_box.setdefault(box, []).append({
+                "date": date, "reference": cell(r, offset + 2) if cell(r, offset + 2) is not None else "",
+                "contact": details if details is not None else "", "description": details if details is not None else "",
+                "net_amount": cell(r, offset + 5), "vat_amount": cell(r, offset + 4),
+            })
+            r += 1
 
     if not rows_by_box:
         raise ValueError("Not a 'Transactions by VAT Box' export - no Box 1/Box 4 transaction detail found.")

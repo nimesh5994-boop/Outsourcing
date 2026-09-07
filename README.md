@@ -558,6 +558,39 @@ detail already covers what VAT Reconciliation needs; it still uploads
 fine as an ordinary generic-mapped file if a practice wants it for
 something else.
 
+Verified against six real periods for the same client (monthly and
+quarterly, spanning two tax years) after two further real-data bugs
+surfaced parsing was originally blind to:
+
+- **A longer (quarterly) period's export shifts every column one place
+  right** - it inserts an extra leading column holding the *current* box
+  number, repeated on every single row of that box's section (not just
+  its header), where a shorter (monthly) period's export puts the actual
+  Date value there instead. Fixed-column reading turned this into a
+  double bug: a "does this cell say 'Box N'" check kept matching on
+  every ordinary data row (since that leading column repeats the label
+  for 160+ rows straight), immediately discarding each one as a false
+  "new section boundary." Parsing no longer trusts a fixed column at
+  all: every header row is found by content (`Date` immediately followed
+  by `Account`, wherever that pair actually sits), each one's data is
+  read relative to *its own* column offset, and which box a header
+  belongs to is resolved by scanning backwards for the nearest `Box N`
+  cell anywhere in the sheet - correct whether that cell appears once or
+  is repeated down every row of the section.
+- **A Northern Ireland/EU acquisition affects boxes 2 and 4 (and 9) from
+  the same underlying transaction**, so the export cross-references it
+  into the Box 4 section as a duplicated pair of tax-rate sub-groups
+  sharing the identical VAT figure - "EC Acquisitions (NN%)" (the
+  acquisition-due side, genuinely Box 2's own transaction) immediately
+  followed by "EC Acquisitions (NN%) Reclaimed VAT" (the actual Box 4
+  input-VAT reclaim). Collecting both double-counted it into Box 4's
+  total by exactly that transaction's VAT amount - a real file's Box 4
+  sum came out £33.38 over its own VAT Return summary because of this
+  one pair. Only the "Reclaimed VAT" sub-group is counted now.
+
+All six files' Box 1 and Box 4 VAT totals now tie out exactly to the same
+file's own VAT Return box summary.
+
 **Matching** cascades through five passes per box, strongest and least
 ambiguous first: (1) invoice/reference number alone (deliberately not
 gated on amount, so a real invoice with the *wrong* VAT amount posted

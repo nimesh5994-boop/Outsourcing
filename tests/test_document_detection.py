@@ -260,6 +260,85 @@ def test_vat_box_transactions_splits_one_upload_into_box1_and_box4():
     assert set(box4["contact"]) == {"Shell", "Royal Mail", "Van purchase VAT reclaim"}
 
 
+def test_vat_box_transactions_handles_the_quarterly_shifted_column_shape():
+    """Regression: found live across several real periods for the same
+    client - a longer (quarterly) period's export inserts an extra
+    leading column holding the *current* box number, repeated on every
+    single row of that box's section (not just its header row) - e.g.
+    column 0 says 'Box 1' for 160+ consecutive rows, then switches to
+    'Box 4' for the next section, etc. This shifts Date/Account/../Net
+    one column to the right of where a shorter (monthly) period's export
+    puts them (column 0 IS the Date value there), and turned a fixed-
+    column "is this cell exactly 'Box N'" check into a false match on
+    every ordinary data row - since that leading column keeps repeating
+    the box label, "start a new section" fired again on every single
+    data row, immediately discarding it. This reproduces that shifted
+    shape and confirms parsing still finds the real header/data by
+    content, not by column position."""
+    from app import xero_reports
+
+    rows = [
+        ["Box 1", "Box 1", "VAT due in the period on sales and other outputs", "", "", 60.0, ""],
+        ["Box 1", "20% (VAT on Income)", None, None, None, None, None],
+        ["Box 1", "Date", "Account", "Reference", "Details", "VAT", "Net"],
+        ["Box 1", "01/03/2025", "Sales(200)", "INV-1", "Acme Ltd", 60.0, 300.0],
+        ["Box 4", "Box 4", "VAT reclaimed in the period on purchases and other inputs", "", "", 40.0, ""],
+        ["Box 4", "20% (VAT on Expenses)", None, None, None, None, None],
+        ["Box 4", "Date", "Account", "Reference", "Details", "VAT", "Net"],
+        ["Box 4", "02/03/2025", "Motor Vehicle Expenses(449)", "", "Shell", 40.0, 200.0],
+    ]
+    content = _make_generic_workbook(["", "", "", "", "", "", ""], rows)
+    src = parsers.FileDataSource(content, filename="vat_box_quarterly.xlsx")
+
+    result = xero_reports.parse_vat_box_transactions(src)
+    assert set(result.keys()) == {1, 4}
+    assert len(result[1]) == 1
+    assert result[1].iloc[0]["contact"] == "Acme Ltd"
+    assert result[1]["vat_amount"].sum() == pytest.approx(60.0)
+    assert len(result[4]) == 1
+    assert result[4].iloc[0]["contact"] == "Shell"
+    assert result[4]["vat_amount"].sum() == pytest.approx(40.0)
+
+
+def test_vat_box_transactions_does_not_double_count_ec_acquisition_reclaim():
+    """Regression: a Northern Ireland/EU acquisition affects boxes 2 and 4
+    (and 9) from the SAME underlying transaction, so a real client's
+    export cross-references it into the Box 4 section as a duplicated
+    pair of tax-rate sub-groups sharing the identical VAT figure -
+    'EC Acquisitions (20%)' (the acquisition-due side, genuinely Box 2's
+    own transaction) immediately followed by 'EC Acquisitions (20%)
+    Reclaimed VAT' (the actual Box 4 input-VAT reclaim). Collecting both
+    double-counted it into Box 4's total by exactly that transaction's
+    VAT amount - found live, a real file's Box 4 sum came out £33.38
+    over its own VAT Return summary because of this one pair. Only the
+    'Reclaimed VAT' sub-group belongs to Box 4."""
+    from app import xero_reports
+
+    rows = [
+        ["Box 4", "VAT reclaimed in the period on purchases and other inputs", "", "", 100.0, ""],
+        ["20% (VAT on Expenses)", None, None, None, None, None],
+        ["Date", "Account", "Reference", "Details", "VAT", "Net"],
+        ["02/03/2025", "Motor Vehicle Expenses(449)", "", "Shell", 66.62, 333.10],
+        [None, None, None, None, None, None],
+        ["EC Acquisitions (20%)", None, None, None, None, None],
+        ["Date", "Account", "Reference", "Details", "VAT", "Net"],
+        ["01/05/2025", "Motor Vehicle Expenses(449)", "SI-1", "West Tanfield Garage Ltd", 33.38, 166.91],
+        [None, None, None, None, None, None],
+        ["EC Acquisitions (20%) Reclaimed VAT", None, None, None, None, None],
+        ["Date", "Account", "Reference", "Details", "VAT", "Net"],
+        ["01/05/2025", "Motor Vehicle Expenses(449)", "SI-1", "West Tanfield Garage Ltd", 33.38, 0.0],
+    ]
+    content = _make_generic_workbook(["", "", "", "", "", ""], rows)
+    src = parsers.FileDataSource(content, filename="vat_box_ec.xlsx")
+
+    result = xero_reports.parse_vat_box_transactions(src)
+    box4 = result[4]
+    assert len(box4) == 2  # the ordinary Shell row + exactly ONE EC acquisition row, not two
+    assert box4["vat_amount"].sum() == pytest.approx(100.0)  # 66.62 + 33.38, not 133.38
+    reclaim_rows = box4[box4["reference"] == "SI-1"]
+    assert len(reclaim_rows) == 1
+
+
 def test_vat_box_transactions_rejects_unrelated_workbook():
     from app import xero_reports
 
