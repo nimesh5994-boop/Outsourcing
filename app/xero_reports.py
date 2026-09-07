@@ -214,6 +214,7 @@ def parse_account_transactions(source: DataSource) -> pd.DataFrame:
         "source_type": detail.get("Source", "").fillna(""),
         "debit": _to_numeric(detail.get("Debit", 0)),
         "credit": _to_numeric(detail.get("Credit", 0)),
+        "vat_amount": _to_numeric(detail.get("VAT", 0)),
         "contra_code": [c[0] for c in contra],
         "contra_name": [c[1] for c in contra],
         "contra_needs_review": [c[2] for c in contra],

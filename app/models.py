@@ -56,6 +56,7 @@ REPORT_SCHEMAS = {
         "source_type": "Source (Journal/Invoice/Bill/Bank/etc.)",
         "debit": "Debit",
         "credit": "Credit",
+        "vat_amount": "VAT Amount (optional - not every export carries this)",
     },
     "aged_debtors": {
         "customer": "Customer",

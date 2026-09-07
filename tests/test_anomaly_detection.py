@@ -7,10 +7,11 @@ import pytest
 from app import anomaly_detection as ad
 
 
-def _row(date, code, name, contact, debit=0.0, credit=0.0, reference="", description="", source_type="Bill"):
+def _row(date, code, name, contact, debit=0.0, credit=0.0, reference="", description="", source_type="Bill", vat=0.0):
     return {
         "date": pd.Timestamp(date), "account_code": code, "account_name": name, "reference": reference,
         "description": description, "contact": contact, "source_type": source_type, "debit": debit, "credit": credit,
+        "vat_amount": vat,
     }
 
 
@@ -66,13 +67,12 @@ def test_duplicate_transactions_flags_same_contact_date_amount():
     assert all("same contact, date and amount" in r.lower() for r in result.detail["Flag reason"])
 
 
-def test_duplicate_transactions_flags_repeated_reference_on_same_code_and_amount():
-    # same reference, code, and amount but a different date - a genuine
-    # "entered twice by mistake" signal, distinct from the amount-based
-    # check (which requires the same date)
+def test_duplicate_transactions_flags_repeated_reference_on_same_code_amount_and_date():
+    # same reference, code, amount AND date - a genuine "entered twice by
+    # mistake" signal
     rows = [
         _row("2025-03-01", "5000", "Materials", "ACME LTD", debit=500.0, reference="INV-777"),
-        _row("2025-06-01", "5000", "Materials", "ACME LTD", debit=500.0, reference="INV-777"),
+        _row("2025-03-01", "5000", "Materials", "ACME LTD", debit=500.0, reference="INV-777"),
     ]
     nominal = pd.DataFrame(rows)
     result = ad.duplicate_transactions(nominal)
@@ -80,6 +80,24 @@ def test_duplicate_transactions_flags_repeated_reference_on_same_code_and_amount
     assert result.status == "review"
     assert len(result.detail) == 2
     assert all("reference" in r.lower() for r in result.detail["Flag reason"])
+
+
+def test_duplicate_transactions_does_not_flag_a_reused_reference_on_a_different_date():
+    # Regression: a real client's reference numbers are short, reused
+    # sequence numbers (order/pallet numbers), not unique invoice IDs - the
+    # same reference recurs for the same contact across entirely different
+    # invoices weeks apart. Without requiring the same date too, this alone
+    # produced 3489 flagged "duplicates" on one real file, the overwhelming
+    # majority genuinely unrelated transactions that just happened to reuse
+    # a low sequence number.
+    rows = [
+        _row("2025-03-01", "5000", "Materials", "ACME LTD", debit=500.0, reference="2"),
+        _row("2025-06-01", "5000", "Materials", "ACME LTD", debit=500.0, reference="2"),
+    ]
+    nominal = pd.DataFrame(rows)
+    result = ad.duplicate_transactions(nominal)
+    assert result.status == "ok"
+    assert result.detail.empty
 
 
 def test_duplicate_transactions_ignores_double_entry_legs_of_one_invoice():
@@ -96,6 +114,55 @@ def test_duplicate_transactions_ignores_double_entry_legs_of_one_invoice():
     result = ad.duplicate_transactions(nominal)
     assert result.status == "ok"
     assert result.detail.empty
+
+
+def test_duplicate_transactions_vat_narrows_the_amount_based_key():
+    # Same contact/date/amount but different VAT treatment - narrowing the
+    # key with VAT (when the upload carries it) tells these apart as two
+    # different transactions rather than one entered twice.
+    rows = [
+        _row("2025-03-01", "5000", "Materials", "ACME LTD", debit=120.0, vat=20.0),   # standard-rated
+        _row("2025-03-01", "5000", "Materials", "ACME LTD", debit=120.0, vat=0.0),    # zero-rated - genuinely different
+    ]
+    nominal = pd.DataFrame(rows)
+    result = ad.duplicate_transactions(nominal)
+    assert result.status == "ok"
+    assert result.detail.empty
+
+    # but a genuine same contact/date/amount/VAT repeat is still flagged,
+    # now with the VAT figure shown alongside it
+    rows_dup = [
+        _row("2025-03-01", "5000", "Materials", "ACME LTD", debit=120.0, vat=20.0, reference="A"),
+        _row("2025-03-01", "5000", "Materials", "ACME LTD", debit=120.0, vat=20.0, reference="B"),
+    ]
+    result_dup = ad.duplicate_transactions(pd.DataFrame(rows_dup))
+    assert result_dup.status == "review"
+    assert len(result_dup.detail) == 2
+    assert "VAT" in result_dup.detail.columns
+    assert list(result_dup.detail["VAT"]) == [20.0, 20.0]
+    assert all("and vat" in r.lower() for r in result_dup.detail["Flag reason"])
+
+
+def test_duplicate_transactions_advises_opening_balance_migration_entries():
+    # Regression: Xero's own opening-balance import posts a mirrored pair
+    # (the real control account + a suspense "Opening Balance" account) for
+    # every migrated historic balance, sharing date/contact/amount/
+    # reference by design - a known, expected artifact of the import, not
+    # a risk. Found live: this pattern alone accounted for a large share
+    # of a 3489-transaction "duplicate" flag on one real client's file.
+    # The Advisory column should call this out so a preparer doesn't have
+    # to individually re-investigate every one of these.
+    rows = [
+        _row("2025-04-29", "610A", "Accounts Receivable", "AC PAVINGS CO LTD", debit=479.52, reference="1"),
+        _row("2025-04-29", "Opening Balance", "Opening Balance", "AC PAVINGS CO LTD", debit=479.52, reference="416/2025"),
+    ]
+    nominal = pd.DataFrame(rows)
+    result = ad.duplicate_transactions(nominal)
+    assert result.status == "review"
+    assert "Advisory" in result.detail.columns
+    advisories = list(result.detail["Advisory"])
+    assert any("opening-balance migration" in a.lower() for a in advisories)
+    assert "opening-balance migration entries" in result.message.lower()
 
 
 def test_duplicate_transactions_ok_when_nothing_repeats():

@@ -444,7 +444,7 @@ PDF, in any order), and the system works out what each one is:
 | Fixed asset register (asset detail) | Prior-year register rolled forward asset-by-asset, new additions/possible disposals flagged from nominal activity, totals checked against TB - same standalone card as above |
 | Accruals & Prepayments schedule | Every Prepayment-typed and accrual-named account, side by side in one table, b/fwd + movement = c/fwd checked against TB - runnable and viewable on its own as its own "Accruals & Prepayments" card, same treatment as VAT/PAYE - see below |
 | Contact coding consistency | A contact whose postings are mostly on one nominal code but a small minority land on a different one - the "BT: 10 postings to Telephone, 2 to Light & Heat" pattern - flags the minority transactions with the likely correct code |
-| Duplicate transaction check | Same contact+date+amount posted more than once, or the same reference/invoice number reused on the same nominal code for the same amount - excludes the natural double-entry legs of one transaction (same reference on different codes, or an invoice and its later payment, which share a reference but have opposite signs) |
+| Duplicate transaction check | Same contact+date+amount(+VAT, when the upload carries it) posted more than once, or the same reference/invoice number reused on the same nominal code, amount and date - excludes the natural double-entry legs of one transaction (same reference on different codes, or an invoice and its later payment, which share a reference but have opposite signs); flags (but doesn't exclude) postings that look like Xero's own opening-balance migration pairs - see below |
 | Unusual posting date check | Manual journals (not bank feed or trading transactions, which legitimately happen any day) posted on a weekend |
 
 Every check produces a status (`ok` / `review` / `error` / `n/a`) and a
@@ -463,6 +463,28 @@ exclusion above, found by running this against real sample data and
 noticing every ordinary invoice was getting flagged as its own duplicate).
 They surface candidates for a human to confirm, the same as every other
 check in this system - not an auto-fixer.
+
+The duplicate check's keys were tightened after running it against a real
+client's file: reference numbers there are short, reused sequence numbers
+(order/pallet numbers, not unique invoice IDs), and the reference-based
+rule didn't require a matching date - so the same reference recurring for
+the same contact on genuinely unrelated invoices weeks apart alone produced
+3489 flagged "duplicates," the overwhelming majority not duplicates at all.
+The reference rule now also requires the same date, and the amount-based
+rule additionally keys on VAT when the upload carries a `vat_amount` column
+(a real Xero Account Transactions export does - Net/VAT/Gross columns per
+line - even though it isn't part of the base `nominal_activity` schema
+other platforms are expected to fill in). Together these cut the same real
+file's flagged count from 3489 to 2395. The remaining flagged rows also get
+an Advisory column: Xero's own opening-balance import posts a mirrored pair
+of lines (the real control account + a suspense "Opening Balance" account)
+for every migrated historic balance, sharing date/contact/amount/reference
+by design - a known, expected artifact of the import, not a risk. Reusing
+the same signal `fixed_assets.py` already uses to tell a genuine addition
+from a migration entry, 1416 of that file's 2395 remaining flags are
+labelled this way, so a preparer isn't required to individually
+re-investigate every one to reach that conclusion - purely advisory, never
+excluded from the list.
 
 ### VAT Reconciliation workspace
 

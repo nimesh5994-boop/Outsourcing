@@ -38,6 +38,7 @@ ALIASES = {
         "source_type": {"sourcetype", "transactiontype", "type"},
         "debit": {"debit", "debitamount", "dr"},
         "credit": {"credit", "creditamount", "cr"},
+        "vat_amount": {"vatamount", "vat", "taxamount", "gst", "vatgbp"},
     },
     "aged_debtors": {
         "customer": {"customer", "customername", "name", "contact"},

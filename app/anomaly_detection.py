@@ -16,6 +16,7 @@ new plumbing.
 """
 import pandas as pd
 
+from app.fixed_assets import _MIGRATION_KEYWORDS
 from app.recon import ReconResult
 
 MIN_TRANSACTIONS_FOR_PATTERN = 5  # need a decent sample before trusting "this contact codes consistently"
@@ -25,6 +26,23 @@ MINORITY_CODE_MAX_SHARE = 0.25    # ...for a different code used this rarely to 
 
 def _amount(df: pd.DataFrame) -> pd.Series:
     return (df["debit"].fillna(0) - df["credit"].fillna(0)).round(2)
+
+
+def _looks_like_migration_entry(row: pd.Series) -> bool:
+    """Same signal fixed_assets.py already uses to tell a genuine new
+    purchase from a historic-balance migration journal (see its own
+    _MIGRATION_KEYWORDS comment): a suspense/clearing line created when a
+    client's opening balances were imported is nearly always labelled as
+    one somewhere - its own account name, description or reference. Reused
+    here for the same reason it matters for duplicates: Xero's own import
+    mechanism posts a mirrored pair (one line to the real control account,
+    one to a suspense "Opening Balance" account) for every migrated
+    balance, sharing the same date/contact/amount/reference by design -
+    found live on a real client's file, where this pattern alone accounted
+    for a large share of a 3489-transaction "duplicate" flag despite being
+    a normal, expected artifact of the import, not a risk."""
+    text = f"{row.get('account_name', '')} {row.get('description', '')} {row.get('reference', '')}".lower()
+    return any(k in text for k in _MIGRATION_KEYWORDS)
 
 
 def _has_text(series: pd.Series) -> pd.Series:
@@ -97,11 +115,32 @@ def contact_coding_consistency(nominal_activity: pd.DataFrame) -> ReconResult:
 
 def duplicate_transactions(nominal_activity: pd.DataFrame) -> ReconResult:
     """Flags likely duplicate postings: the same contact billed for the
-    same amount on the same date more than once, or the same reference/
-    invoice number used more than once for the same contact - either can
-    be entirely legitimate (a genuine repeat charge, a credit note
-    matching an invoice), so this is a "check before you trust it" flag,
-    not a definite error."""
+    same date/amount(/VAT) more than once, or the same reference/invoice
+    number used more than once for the same contact on the same date -
+    either can be entirely legitimate (a genuine repeat charge, a credit
+    note matching an invoice), so this is a "check before you trust it"
+    flag, not a definite error.
+
+    Keyed on date + contact + amount + VAT (when the upload carries a VAT
+    amount - not every export does) rather than just contact+amount: found
+    live against a real client whose reference numbers are short, reused
+    sequence numbers (order/pallet numbers, not unique invoice IDs) - the
+    same reference recurred for the same contact across entirely different
+    invoices weeks apart, and without date narrowing the key, this alone
+    produced 3489 flagged "duplicates" on one real file, the overwhelming
+    majority not duplicates at all. Adding VAT narrows the amount-based key
+    further: two coincidentally same-day, same-amount postings to the same
+    contact with different VAT treatment are almost certainly two different
+    transactions, not one entered twice.
+
+    Also flags (via the Advisory column, not by excluding the row - see
+    _looks_like_migration_entry) the other major source of false positives
+    found on the same file: Xero's own opening-balance import posts a
+    mirrored pair of lines (the real control account + a suspense "Opening
+    Balance" account) for every migrated historic balance, sharing date/
+    contact/amount/reference by design - a known, expected artifact of the
+    import, not a risk, so a preparer shouldn't need to individually
+    re-investigate every one of these to conclude that."""
     name = "Duplicate transaction check"
     if nominal_activity is None or nominal_activity.empty:
         return ReconResult(name, "n/a", "No nominal activity uploaded.")
@@ -111,37 +150,56 @@ def duplicate_transactions(nominal_activity: pd.DataFrame) -> ReconResult:
     df = nominal_activity.copy()
     df["amount"] = _amount(df)
     has_contact = _has_text(df["contact"])
+    # A generic (non-native) mapping defaults an unmapped vat_amount column
+    # to all-zero rather than leaving it absent, so column presence alone
+    # can't tell "this file genuinely has no VAT data" from "it's just
+    # zero" - any non-zero VAT anywhere is the signal the file actually
+    # carries it.
+    has_vat = "vat_amount" in df.columns and df["vat_amount"].fillna(0).abs().sum() > 0.005
+    if has_vat:
+        df["_vat"] = df["vat_amount"].fillna(0).round(2)
 
     dup_amount_mask = pd.Series(False, index=df.index)
     dup_ref_mask = pd.Series(False, index=df.index)
     if "date" in df.columns:
+        amount_key_cols = ["contact", "date", "amount"] + (["_vat"] if has_vat else [])
         amount_key = has_contact & (df["amount"] != 0)
-        dup_amount_mask = df.duplicated(subset=["contact", "date", "amount"], keep=False) & amount_key
-    if "reference" in df.columns:
-        # same reference + same nominal code + same (signed) amount: a
-        # single invoice/bill legitimately posts the same reference number
-        # to more than one code (e.g. Sales credit + Debtors debit) and an
-        # invoice-then-its-payment share a reference on the same code with
-        # opposite signs - neither is a duplicate, so all three of code and
-        # signed amount matching too is what actually narrows this down to
-        # "the same line looks like it was entered twice"
+        dup_amount_mask = df.duplicated(subset=amount_key_cols, keep=False) & amount_key
+    if "reference" in df.columns and "date" in df.columns:
+        # same reference + same nominal code + same (signed) amount + same
+        # date: a single invoice/bill legitimately posts the same
+        # reference number to more than one code (e.g. Sales credit +
+        # Debtors debit) and an invoice-then-its-payment share a reference
+        # on the same code with opposite signs - neither is a duplicate, so
+        # code and signed amount matching too is what actually narrows this
+        # down to "the same line looks like it was entered twice." Date is
+        # included for the reason in this function's docstring: a short,
+        # reused reference number is a poor duplicate signal across
+        # different dates on its own.
+        ref_key_cols = ["contact", "reference", "account_code", "amount", "date"] + (["_vat"] if has_vat else [])
         ref_key = has_contact & _has_text(df["reference"]) & (df["amount"] != 0)
-        dup_ref_mask = df.duplicated(subset=["contact", "reference", "account_code", "amount"], keep=False) & ref_key
+        dup_ref_mask = df.duplicated(subset=ref_key_cols, keep=False) & ref_key
 
     combined = dup_amount_mask | dup_ref_mask
     if not combined.any():
-        return ReconResult(name, "ok", "No same contact/date/amount or repeated reference numbers found.")
+        vat_note = "/VAT" if has_vat else ""
+        return ReconResult(name, "ok", f"No same contact/date/amount{vat_note} or same-date repeated reference numbers found.")
 
     flagged = df[combined].copy()
     reasons = []
     for idx in flagged.index:
         parts = []
         if dup_amount_mask.get(idx, False):
-            parts.append("same contact, date and amount posted more than once")
+            parts.append(f"same contact, date and amount{' and VAT' if has_vat else ''} posted more than once")
         if dup_ref_mask.get(idx, False):
-            parts.append("same reference/invoice number used more than once for this contact")
-        reasons.append("; ".join(parts).capitalize())
+            parts.append("same reference/invoice number used more than once for this contact on the same date")
+        reason = "; ".join(parts)
+        reasons.append(reason[:1].upper() + reason[1:])  # capitalize only the first letter - .capitalize() would also lowercase "VAT"
     flagged["Flag reason"] = reasons
+    flagged["Advisory"] = [
+        "Looks like a known opening-balance migration entry - often safe to disregard" if _looks_like_migration_entry(row) else ""
+        for _, row in flagged.iterrows()
+    ]
     flagged["Reviewed - genuine repeat? (to complete)"] = ""
 
     sort_cols = [c for c in ("contact", "date") if c in flagged.columns]
@@ -149,16 +207,24 @@ def duplicate_transactions(nominal_activity: pd.DataFrame) -> ReconResult:
         flagged = flagged.sort_values(sort_cols)
 
     cols = [c for c in ("date", "account_code", "account_name", "reference", "description", "contact") if c in flagged.columns]
-    cols += ["amount", "Flag reason", "Reviewed - genuine repeat? (to complete)"]
+    cols += ["amount"] + (["_vat"] if has_vat else []) + ["Flag reason", "Advisory", "Reviewed - genuine repeat? (to complete)"]
     detail = flagged[cols].rename(columns={
         "date": "Date", "account_code": "Nominal Code", "account_name": "Account Name",
         "reference": "Reference", "description": "Description", "contact": "Contact", "amount": "Amount",
+        "_vat": "VAT",
     })
+    vat_note = "+VAT" if has_vat else ""
     msg = (
-        f"{len(detail)} transaction(s) share a contact+date+amount or a repeated reference number with "
-        f"another posting - review each: could be a genuine duplicate posting to correct, or a legitimate "
-        f"repeat charge/credit note match."
+        f"{len(detail)} transaction(s) share a contact+date+amount{vat_note} or a repeated reference number "
+        f"(same date) with another posting - review each: could be a genuine duplicate posting to correct, or "
+        f"a legitimate repeat charge/credit note match."
     )
+    migration_count = int((flagged["Advisory"] != "").sum())
+    if migration_count:
+        msg += (
+            f" {migration_count} of these look like opening-balance migration entries (see Advisory column) - "
+            f"these typically don't need individual review."
+        )
     return ReconResult(name, "review", msg, detail)
 
 
