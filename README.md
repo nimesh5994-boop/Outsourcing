@@ -532,6 +532,32 @@ separate Summary/Detail tabs becomes two uploads automatically):
   from (`Source File`) so a finding can be traced back to a specific
   return.
 
+Dropped into any of the three zones (report type is structurally
+detected, not read from which zone it landed in), Xero's own "Transactions
+by VAT Box" export - the third sheet of the same workbook the VAT Return
+box summary (see "Why Xero gets special handling") comes from - is
+recognised natively and needs no manual mapping: it's the actual
+transaction-level detail behind boxes 1 and 4, which is exactly the Filed
+Return Sales/Purchases data above, normally sourced from a separately-
+exported filed-return file the client may not readily have. One upload
+auto-splits into BOTH the Box 1 and Box 4 pools at once
+(`xero_reports.parse_vat_box_transactions`), so a client's ordinary VAT
+Return export alone can feed the whole workspace. Found live on a real
+client's file: a real "Box 4" section had FOUR separate tax-rate sub-
+groups (standard-rated, an "adjusted" standard-rated group, zero-rated,
+and manual adjustments with no accounting transactions behind them -
+e.g. VAT reclaimed on a vehicle purchase entered as a standalone
+adjustment), each with its own repeated column header row - parsing
+re-enters detail mode on every repeated header rather than assuming one
+per box. Boxes 6/7 (net sales/purchases) repeat the same underlying
+transactions as 1/4 without a VAT column, so they're skipped as
+duplicates rather than double-counted. The workbook's third sheet,
+"Transactions by Tax Rate", covers largely the same transactions grouped
+by VAT rate instead of by box - not natively parsed, since box 1/4's own
+detail already covers what VAT Reconciliation needs; it still uploads
+fine as an ordinary generic-mapped file if a practice wants it for
+something else.
+
 **Matching** cascades through five passes per box, strongest and least
 ambiguous first: (1) invoice/reference number alone (deliberately not
 gated on amount, so a real invoice with the *wrong* VAT amount posted

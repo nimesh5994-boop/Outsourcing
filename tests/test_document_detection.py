@@ -202,6 +202,76 @@ def test_vat_return_box_summary_native_detection_and_parsing():
         xero_reports.parse_vat_return_box_summary(src2)
 
 
+def test_vat_box_transactions_splits_one_upload_into_box1_and_box4():
+    """Regression: Xero's 'Transactions by VAT Box' export has the actual
+    transaction-level detail behind boxes 1 and 4 - exactly the
+    vat_filed_sales/vat_filed_purchases data the VAT Reconciliation
+    workspace needs, normally sourced from a separate filed-return
+    detail file the client may not readily have. Found live: a real
+    client's Box 4 section had FOUR separate tax-rate sub-groups (20% on
+    Expenses, 20% on Expenses - Adjusted, Zero Rated Expenses,
+    Adjustments with no accounting transactions), each with its own
+    repeated 'Date | Account | Reference | Details | VAT | Net' header -
+    the detail-row scan must re-enter on every repeated header, not
+    assume one header per box. Boxes 6/7 repeat the same transactions
+    net-only (no VAT column) and must be skipped as duplicates."""
+    from app import xero_reports
+
+    rows = [
+        ["Box 1", "VAT due in the period on sales and other outputs", "", "", 100.0, ""],
+        ["20% (VAT on Income)", None, None, None, None, None],
+        ["Date", "Account", "Reference", "Details", "VAT", "Net"],
+        ["01/03/2025", "Sales(200)", "INV-1", "Acme Ltd", 60.0, 300.0],
+        ["05/03/2025", "Sales(200)", "INV-2", "Beta Ltd", 40.0, 200.0],
+        [None, None, None, None, None, None],
+        ["Box 4", "VAT reclaimed in the period on purchases and other inputs", "", "", 90.0, ""],
+        ["20% (VAT on Expenses)", None, None, None, None, None],
+        ["Date", "Account", "Reference", "Details", "VAT", "Net"],
+        ["02/03/2025", "Motor Vehicle Expenses(449)", "", "Shell", 10.0, 50.0],
+        [None, None, None, None, None, None],
+        ["Zero Rated Expenses", None, None, None, None, None],
+        ["Date", "Account", "Reference", "Details", "VAT", "Net"],
+        ["03/03/2025", "General Expenses(429)", "", "Royal Mail", 0.0, 25.0],
+        [None, None, None, None, None, None],
+        ["Adjustments with no accounting transactions", None, None, None, None, None],
+        ["Date", "Account", "Reference", "Details", "VAT", "Net"],
+        ["28/03/2025", "N/A", "Created on 01/04/2025", "Van purchase VAT reclaim", 80.0, 0.0],
+        [None, None, None, None, None, None],
+        ["Box 6", "Total value of sales excluding VAT", "", "", "", 500.0],
+        ["20% (VAT on Income)", None, None, None, None, None],
+        ["Date", "Account", "Reference", "Details", "VAT", "Net"],
+        ["01/03/2025", "Sales(200)", "INV-1", "Acme Ltd", "", 300.0],
+    ]
+    content = _make_generic_workbook(["", "", "", "", "", ""], rows)
+    src = parsers.FileDataSource(content, filename="vat_box.xlsx")
+
+    result = xero_reports.parse_vat_box_transactions(src)
+    assert set(result.keys()) == {1, 4}  # Box 6 correctly skipped - same transactions as Box 1, net-only
+
+    box1 = result[1]
+    assert len(box1) == 2
+    assert box1["vat_amount"].sum() == pytest.approx(100.0)
+    assert box1["net_amount"].sum() == pytest.approx(500.0)
+    assert set(box1["contact"]) == {"Acme Ltd", "Beta Ltd"}
+
+    box4 = result[4]
+    assert len(box4) == 3  # one row from each of the three tax-rate sub-groups
+    assert box4["vat_amount"].sum() == pytest.approx(90.0)  # 10 + 0 + 80
+    assert set(box4["contact"]) == {"Shell", "Royal Mail", "Van purchase VAT reclaim"}
+
+
+def test_vat_box_transactions_rejects_unrelated_workbook():
+    from app import xero_reports
+
+    unrelated = _make_generic_workbook(
+        ["Tax Rate", "Net", "VAT"],
+        [["20% (VAT on Income)", "1000.00", "200.00"]],
+    )
+    src = parsers.FileDataSource(unrelated, filename="unrelated.xlsx")
+    with pytest.raises(ValueError):
+        xero_reports.parse_vat_box_transactions(src)
+
+
 def _make_test_pdf(rows: list[list[str]]) -> bytes:
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4

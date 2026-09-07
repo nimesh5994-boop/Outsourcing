@@ -360,6 +360,85 @@ def parse_vat_return_box_summary(source: DataSource) -> pd.DataFrame:
     return out
 
 
+_VAT_BOX_SECTION_HEADER = re.compile(r"^Box\s+(\d)\s*$", re.IGNORECASE)
+_VAT_BOX_DETAIL_COLUMNS = ("date", "reference", "contact", "description", "net_amount", "vat_amount")
+
+
+def parse_vat_box_transactions(source: DataSource) -> dict[int, pd.DataFrame]:
+    """Xero's 'Transactions by VAT Box' export: the actual postings behind
+    each HMRC box on the VAT Return - the same file parse_vat_return_box_
+    summary reads the box TOTALS from, but this sheet has the transaction-
+    level detail behind boxes 1 and 4 specifically (sales/purchases with
+    VAT), which is exactly the vat_filed_sales/vat_filed_purchases data
+    the VAT Reconciliation workspace (app/vat_reconciliation.py) needs -
+    normally sourced from a separately-exported filed-return detail file,
+    but a client's Xero VAT Return export already has it, box-tagged, in
+    one sheet.
+
+    Structure: a 'Box N - <description>' row (with that box's total, no
+    date), then one or more tax-rate sub-groups (e.g. '20% (VAT on
+    Income)', 'Zero Rated Expenses') each with their own repeated 'Date |
+    Account | Reference | Details | VAT | Net' header and detail rows -
+    found live with FOUR sub-groups under one Box 4, so the detail-row
+    scan below re-enters on every repeated header rather than assuming
+    one header per box. Boxes 6/7 repeat the exact same underlying
+    transactions as boxes 1/4 (net-only, no VAT column, since 6/7 are
+    "excluding VAT" totals) - skipped as pure duplicates of 1/4's own Net
+    column. 'Details' is used for both contact and description: on the
+    sales side (Box 1) it's reliably a customer/payee name, but on the
+    purchases side (Box 4) real exports mix genuine vendor names with
+    free-text card-transaction descriptions ("BP S/S - BP", "Starbucks -
+    Subsistence") - an honest limitation of the source data, not
+    something parsing can fix, and the reason Box 4 GL-matching may find
+    more "no match" candidates than Box 1 does on the same file.
+
+    Returns {box_number: DataFrame} in vat_filed_sales/vat_filed_purchases'
+    own canonical shape (date, reference, contact, description,
+    net_amount, vat_amount) - only for whichever of boxes 1/4 this file
+    actually has transaction detail for (an export can have one without
+    the other, e.g. a period with only sales or only purchases)."""
+    raw = _load_raw(source)
+    if raw.shape[1] < 6:
+        raise ValueError("Not a 'Transactions by VAT Box' export - expected at least 6 columns.")
+
+    rows_by_box: dict[int, list[dict]] = {}
+    current_box: int | None = None
+    in_detail = False
+    for _, row in raw.iterrows():
+        first = str(row.iloc[0]).strip() if row.iloc[0] is not None else ""
+        m = _VAT_BOX_SECTION_HEADER.match(first)
+        if m:
+            current_box = int(m.group(1))
+            in_detail = False
+            continue
+        if first == "Date" and str(row.iloc[1]).strip() == "Account":
+            in_detail = current_box in (1, 4)  # skip 6/7 - same transactions, net-only duplicates of 1/4
+            continue
+        if not in_detail:
+            continue
+        date = pd.to_datetime(first, dayfirst=True, errors="coerce")
+        if pd.isna(date):
+            in_detail = False  # blank separator row, or the next sub-group's tax-rate label
+            continue
+        details = row.iloc[3] if row.iloc[3] is not None else ""
+        rows_by_box.setdefault(current_box, []).append({
+            "date": date, "reference": row.iloc[2] if row.iloc[2] is not None else "",
+            "contact": details, "description": details,
+            "net_amount": row.iloc[5], "vat_amount": row.iloc[4],
+        })
+
+    if not rows_by_box:
+        raise ValueError("Not a 'Transactions by VAT Box' export - no Box 1/Box 4 transaction detail found.")
+
+    out = {}
+    for box, box_rows in rows_by_box.items():
+        df = pd.DataFrame(box_rows, columns=list(_VAT_BOX_DETAIL_COLUMNS))
+        df["net_amount"] = _to_numeric(df["net_amount"])
+        df["vat_amount"] = _to_numeric(df["vat_amount"])
+        out[box] = df.reset_index(drop=True)
+    return out
+
+
 def derive_pl_bs_from_tb(tb: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Xero's TB carries an Account Type per row (Sales/Direct Costs/Overhead/
     Expense = P&L; Bank/Current Asset/Fixed Asset/Current Liability/

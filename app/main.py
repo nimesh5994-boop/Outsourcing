@@ -886,6 +886,30 @@ async def _ingest_one_upload(job_id: str, job: dict, filename: str, content: byt
         storage.save_job(job)
         return
 
+    try:
+        xero_reports.parse_vat_box_transactions(source)
+    except Exception:
+        pass
+    else:
+        # Xero's "Transactions by VAT Box" export - the box 1/box 4
+        # transaction-level detail behind the VAT Return, which is exactly
+        # the vat_filed_sales/vat_filed_purchases data the VAT
+        # Reconciliation workspace needs. A structural match here is as
+        # certain as any other Xero-native report, so it auto-confirms the
+        # same way - see xero_reports.parse_vat_box_transactions and
+        # _load_canonical_data's own handling of "vat_box_transactions"
+        # for how one upload ends up feeding BOTH filed-sales and
+        # filed-purchases pools at once.
+        columns = source.raw_columns()
+        upload_id = storage.add_upload(job, "vat_box_transactions", "current", "xero", filename, content, columns)
+        job["uploads"][upload_id]["mapping"] = {}
+        job["uploads"][upload_id]["confirmed"] = True
+        job["uploads"][upload_id]["xero_native"] = True
+        job["uploads"][upload_id]["sheet_name"] = sheet_name
+        job["uploads"][upload_id]["display_name"] = display_name
+        storage.save_job(job)
+        return
+
     brightpay_report_type = brightpay_reports.try_brightpay_native(source)
     if brightpay_report_type:
         # Same reasoning as the Xero-native branch above: a genuine
@@ -1158,6 +1182,22 @@ def _load_canonical_data(job: dict) -> dict:
                 data["aged_creditors"] = xero_reports.parse_aged_report(source, "supplier")
             elif report_type == "vat_return":
                 data["vat_return"] = xero_reports.parse_vat_return_box_summary(source)
+            elif report_type == "vat_box_transactions":
+                # One upload feeds BOTH filed-detail pools at once - see
+                # xero_reports.parse_vat_box_transactions - concatenated
+                # the same way VAT_RECON_TYPES uploads are below, so a
+                # client's VAT Return export and a separately-sourced
+                # filed-detail file can coexist in the same job.
+                by_box = xero_reports.parse_vat_box_transactions(source)
+                source_file = upload.get("display_name") or upload["filename"]
+                if 1 in by_box:
+                    df = by_box[1].copy()
+                    df["source_file"] = source_file
+                    data.setdefault("vat_filed_sales", []).append(df)
+                if 4 in by_box:
+                    df = by_box[4].copy()
+                    df["source_file"] = source_file
+                    data.setdefault("vat_filed_purchases", []).append(df)
             continue
 
         if report_type in VAT_RECON_TYPES:

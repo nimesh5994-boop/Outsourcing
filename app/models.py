@@ -31,6 +31,7 @@ REPORT_LABELS = {
     "vat_gl": "VAT Reconciliation - General Ledger",
     "vat_filed_sales": "VAT Reconciliation - Filed Return, Sales Detail (Box 1)",
     "vat_filed_purchases": "VAT Reconciliation - Filed Return, Purchases Detail (Box 4)",
+    "vat_box_transactions": "VAT Return - Transactions by VAT Box (auto-splits into Box 1/Box 4 filed detail)",
     "paye_summary": "PAYE Reconciliation - BrightPay Payroll Summary",
     "paye_p32": "PAYE Reconciliation - BrightPay P32",
     "paye_pensions": "PAYE Reconciliation - BrightPay Pensions",

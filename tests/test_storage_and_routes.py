@@ -1282,6 +1282,100 @@ def test_vat_reconciliation_end_to_end_through_http_and_into_the_workbook(http_c
     assert any("VAT Recon - Box 4" in name for name in wb.sheetnames)
 
 
+def _vat_box_transactions_workbook(box1_rows: list[list], box4_rows: list[list]) -> bytes:
+    """A synthetic 'Transactions by VAT Box' export in Xero's real shape -
+    see xero_reports.parse_vat_box_transactions. Each row is
+    [date, account, reference, details, vat, net]."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    # pandas treats the sheet's first row as the header, discarding its
+    # content - a real export always has title/client-name/period rows
+    # before the first "Box N" section, so these are needed for the file
+    # to parse the same way a real one does (see xero_reports._load_raw).
+    ws.append(["Transactions by VAT Box"])
+    ws.append(["Test Client Ltd"])
+    ws.append(["For the period 01 Jan 2025 - 31 Dec 2025"])
+    ws.append([])
+    ws.append(["Box 1", "VAT due in the period on sales and other outputs", "", "", sum(r[4] for r in box1_rows), ""])
+    ws.append(["20% (VAT on Income)"])
+    ws.append(["Date", "Account", "Reference", "Details", "VAT", "Net"])
+    for row in box1_rows:
+        ws.append(row)
+    ws.append([])
+    ws.append(["Box 4", "VAT reclaimed in the period on purchases and other inputs", "", "", sum(r[4] for r in box4_rows), ""])
+    ws.append(["20% (VAT on Expenses)"])
+    ws.append(["Date", "Account", "Reference", "Details", "VAT", "Net"])
+    for row in box4_rows:
+        ws.append(row)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_vat_box_transactions_upload_feeds_both_box1_and_box4_through_http(http_client):
+    """A single 'Transactions by VAT Box' upload (Xero's real VAT Return
+    export shape) should auto-confirm without any mapping step and feed
+    BOTH the Box 1 (Sales) and Box 4 (Purchases) sides of the VAT
+    Reconciliation workspace on its own - see main.py's handling of
+    report_type "vat_box_transactions" and xero_reports.
+    parse_vat_box_transactions. Previously the workspace could only be
+    fed by two separately-sourced filed-return detail files; this is one
+    upload doing the job of both, straight from the client's own VAT
+    Return export."""
+    from app import storage
+    c = http_client
+
+    practice_id = _signup(c, admin_email="vatbox@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "VAT Box Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/clients/{client_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    gl_bytes = _vat_recon_workbook([
+        ["2025-01-15", "INV-100", "Acme Ltd", "Sale", 1000, 200],
+        ["2025-02-01", "BILL-200", "Gamma Supplies", "Purchase", 800, 160],
+    ])
+    resp = c.post(
+        f"/jobs/{job_id}/uploads", data={"section_report_type": "vat_gl"},
+        files={"files": ("gl.xlsx", gl_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    vat_box_bytes = _vat_box_transactions_workbook(
+        box1_rows=[["15/01/2025", "Sales(200)", "INV-100", "Acme Ltd", 200, 1000]],
+        box4_rows=[["01/02/2025", "Purchases(300)", "BILL-200", "Gamma Supplies", 160, 800]],
+    )
+    resp = c.post(
+        f"/jobs/{job_id}/uploads",
+        files={"files": ("vat_return_box_transactions.xlsx", vat_box_bytes, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    job = storage.get_job(job_id)
+    vat_box_uploads = [u for u in job["uploads"].values() if u["report_type"] == "vat_box_transactions"]
+    assert len(vat_box_uploads) == 1
+    assert vat_box_uploads[0]["confirmed"] is True  # auto-confirmed, no manual mapping needed
+    assert vat_box_uploads[0]["xero_native"] is True
+
+    _confirm_all_pending_uploads(c, job_id)  # just the GL upload - vat_box_transactions is already confirmed
+    job = storage.get_job(job_id)
+    assert all(u["confirmed"] for u in job["uploads"].values())
+
+    resp = c.post(f"/jobs/{job_id}/vat-recon/run", follow_redirects=False)
+    assert resp.status_code == 303
+
+    job = storage.get_job(job_id)
+    results = {r["name"]: r for r in job["vat_recon_results"]}
+    assert results["VAT Recon - Box 1 (Sales)"]["status"] == "ok"
+    assert results["VAT Recon - Box 4 (Purchases)"]["status"] == "ok"
+
+
 def test_vat_reconciliation_cash_basis_combination_matching_through_http(http_client):
     """Cash-basis combination matching (vat_reconciliation.match_box
     passes 4 and 5 - several GL legs summing to one filed row, and the
