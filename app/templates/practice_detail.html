@@ -57,4 +57,14 @@
   </form>
 </div>
 {% endif %}
+
+{% if current_user.role == 'partner' %}
+<div class="card" style="border-color:#d33">
+  <h2>Danger zone</h2>
+  <p class="muted">Permanently deletes {{ practice.name }}: every client (and their jobs, uploads, generated workbooks), every template, and every user account in this practice - including your own. You'll be logged out immediately. This cannot be undone.</p>
+  <form method="post" action="/practices/{{ practice.id }}/delete" onsubmit="return confirm('Delete {{ practice.name }} and everything in it - every client, job, template, and user, including your own account? This cannot be undone.')">
+    <button type="submit" class="button secondary" style="border-color:#d33; color:#d33">Delete this practice</button>
+  </form>
+</div>
+{% endif %}
 {% endblock %}

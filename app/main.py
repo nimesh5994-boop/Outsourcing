@@ -345,6 +345,35 @@ def delete_job(job_id: str, user: dict = Depends(auth.current_user_dep)):
     return RedirectResponse(f"/clients/{client['id']}", status_code=303)
 
 
+@app.post("/clients/{client_id}/delete")
+def delete_client(client_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Deletes a client and everything under it (every job, their uploads
+    and generated workbooks, saved GL-mapping profiles, preparer access
+    grants) - e.g. a client the practice no longer acts for, or one set up
+    by mistake. The practice, its other clients, its templates, and its
+    users are untouched. There is no undo."""
+    client = _authorize_client(user, client_id)
+    auth.require_role(user, "partner", "manager")
+    storage.delete_client(client_id)
+    return RedirectResponse(f"/practices/{client['practice_id']}/clients", status_code=303)
+
+
+@app.post("/practices/{practice_id}/delete")
+def delete_practice(practice_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Deletes the whole practice: every client (and their jobs/uploads),
+    every template, and every user account - including the account making
+    this request. Partner-only, since it also removes every other
+    partner/manager/preparer in the practice, not just the caller's own
+    access. There is no undo. Logs the caller out immediately afterwards,
+    since their own user row (and its session) no longer exists."""
+    practice = _authorize_practice(user, practice_id)
+    auth.require_role(user, "partner")
+    storage.delete_practice(practice_id)
+    response = RedirectResponse("/practices", status_code=303)
+    response.delete_cookie(auth.SESSION_COOKIE)
+    return response
+
+
 @app.post("/clients/{client_id}/jobs")
 def create_job(
     client_id: str,

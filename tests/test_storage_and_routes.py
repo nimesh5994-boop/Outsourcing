@@ -2715,6 +2715,118 @@ def test_delete_job_denied_for_preparer(http_client):
     assert storage.get_job(job_id) is not None  # nothing was deleted
 
 
+def test_delete_client_removes_jobs_uploads_and_mapping_but_not_other_clients(http_client):
+    c = http_client
+    practice_id = _signup(c, admin_email="deleteclient@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Doomed Client"}, follow_redirects=False)
+    doomed_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Survivor Client"}, follow_redirects=False)
+    survivor_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.post(f"/clients/{doomed_id}/jobs", data={
+        "current_period_start": "2025-01-01", "current_period_end": "2025-12-31",
+    }, follow_redirects=False)
+    job_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    xlsx_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    resp = c.post(
+        f"/jobs/{job_id}/uploads",
+        files=[("files", ("tb.xlsx", _make_template_bytes(), xlsx_type))],
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+
+    from app import storage
+    job = storage.get_job(job_id)
+    file_id = next(iter(job["uploads"].values()))["file_id"]
+    storage.save_mapping_profile(doomed_id, "trial_balance", "generic", {"Code": "Account Code"})
+    assert storage.load_mapping_profile(doomed_id, "trial_balance", "generic") is not None
+
+    resp = c.post(f"/clients/{doomed_id}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == f"/practices/{practice_id}/clients"
+
+    assert storage.get_client(doomed_id) is None
+    assert storage.get_job(job_id) is None
+    assert storage.load_file(file_id) is None
+    assert storage.load_mapping_profile(doomed_id, "trial_balance", "generic") is None
+    assert storage.get_client(survivor_id) is not None  # sibling client untouched
+    assert c.get(f"/practices/{practice_id}/clients").status_code == 200
+
+
+def test_delete_client_denied_for_preparer(http_client):
+    c = http_client
+    practice_id = _signup(c, admin_email="deleteclient-rbac@acme.test")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "RBAC Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+
+    resp = c.post(f"/practices/{practice_id}/users", data={
+        "name": "Prep Three", "email": "prep3@acme.test", "password": "prepper-pass", "role": "preparer",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    from app import storage
+    prep_user = storage.get_user_by_email("prep3@acme.test")
+    c.post(f"/practices/{practice_id}/users/{prep_user['id']}/client-access", data={"client_ids": [client_id]}, follow_redirects=False)
+
+    c.post("/logout")
+    c.post("/login", data={"email": "prep3@acme.test", "password": "prepper-pass"}, follow_redirects=False)
+
+    assert c.post(f"/clients/{client_id}/delete", follow_redirects=False).status_code == 403
+    assert storage.get_client(client_id) is not None  # nothing was deleted
+
+
+def test_delete_practice_removes_clients_templates_and_users_and_logs_out(http_client):
+    c = http_client
+    practice_id = _signup(c, admin_email="deletepractice@acme.test", admin_password="partner-pass")
+    resp = c.post(f"/practices/{practice_id}/clients", data={"name": "Only Client"}, follow_redirects=False)
+    client_id = resp.headers["location"].rsplit("/", 1)[-1]
+    resp = c.post(
+        f"/practices/{practice_id}/templates",
+        data={"name": "House Template"},
+        files={"file": ("template.xlsx", _make_template_bytes(),
+                         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    from app import storage
+    template = storage.list_templates(practice_id)[0]
+    template_file_id = template["file_id"]
+    partner_user = storage.get_user_by_email("deletepractice@acme.test")
+
+    resp = c.post(f"/practices/{practice_id}/delete", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/practices"
+    assert "Max-Age=0" in resp.headers.get("set-cookie", "")  # session cookie cleared
+
+    assert storage.get_practice(practice_id) is None
+    assert storage.get_client(client_id) is None
+    assert storage.list_templates(practice_id) == []
+    assert storage.load_file(template_file_id) is None
+    assert storage.get_user(partner_user["id"]) is None
+
+    # the session cookie no longer resolves to anyone - bounced to login
+    resp = c.get(f"/practices/{practice_id}", follow_redirects=False)
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/login")
+
+
+def test_delete_practice_denied_for_manager(http_client):
+    c = http_client
+    practice_id = _signup(c, admin_email="deletepractice-rbac@acme.test")
+
+    resp = c.post(f"/practices/{practice_id}/users", data={
+        "name": "Manager One", "email": "manager1@acme.test", "password": "manager-pass", "role": "manager",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+
+    c.post("/logout")
+    c.post("/login", data={"email": "manager1@acme.test", "password": "manager-pass"}, follow_redirects=False)
+
+    assert c.post(f"/practices/{practice_id}/delete", follow_redirects=False).status_code == 403
+    from app import storage
+    assert storage.get_practice(practice_id) is not None  # nothing was deleted
+
+
 def test_set_client_template_switches_to_and_from_system_default(http_client):
     c = http_client
     practice_id = _signup(c, admin_email="clienttemplate@acme.test")

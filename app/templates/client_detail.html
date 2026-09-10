@@ -2,7 +2,14 @@
 {% block content %}
 <div class="card">
   <p class="muted"><a href="/practices/{{ client.practice_id }}/clients">&larr; Back to clients</a></p>
-  <h1>{{ client.name }}</h1>
+  <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px;">
+    <h1>{{ client.name }}</h1>
+    {% if current_user.role in ("partner", "manager") %}
+    <form method="post" action="/clients/{{ client.id }}/delete" onsubmit="return confirm('Delete {{ client.name }}? This removes every job, upload, generated workbook, and saved GL mapping for this client - the practice, its other clients, its templates, and its users are unaffected. This cannot be undone.')">
+      <button type="submit" class="button secondary">Delete this client</button>
+    </form>
+    {% endif %}
+  </div>
   <p class="muted">Working paper jobs for this client</p>
   {% if jobs %}
   <table>

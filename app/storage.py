@@ -412,6 +412,24 @@ def delete_job(job_id: str) -> None:
         cur.execute("DELETE FROM entities WHERE kind = %s AND id = %s", ("job", job_id))
 
 
+@_with_reconnect
+def delete_client(client_id: str) -> None:
+    """Removes a client and everything scoped to it: every job under it
+    (and each job's own uploads/generated workbook, same as delete_job),
+    its saved GL-mapping profiles, and any preparer access grants pointing
+    at it. Leaves the practice, its other clients, its templates, and its
+    users untouched - this cannot be undone."""
+    with _get_conn().cursor() as cur:
+        cur.execute("SELECT id FROM entities WHERE kind = %s AND parent_id = %s", ("job", client_id))
+        job_ids = [row[0] for row in cur.fetchall()]
+        if job_ids:
+            cur.execute("DELETE FROM files WHERE job_id = ANY(%s)", (job_ids,))
+            cur.execute("DELETE FROM entities WHERE kind = %s AND id = ANY(%s)", ("job", job_ids))
+        cur.execute("DELETE FROM mapping_profiles WHERE client_id = %s", (client_id,))
+        cur.execute("DELETE FROM client_access WHERE client_id = %s", (client_id,))
+        cur.execute("DELETE FROM entities WHERE kind = %s AND id = %s", ("client", client_id))
+
+
 def add_upload(job: dict, report_type: str, period: str, platform: str, filename: str, content: bytes, columns: list[str]) -> str:
     file_id = save_file("upload", job["id"], filename, content)
     upload_id = _new_id("upload")
@@ -546,3 +564,32 @@ def list_client_access(user_id: str) -> list[str]:
     with _get_conn().cursor() as cur:
         cur.execute("SELECT client_id FROM client_access WHERE user_id = %s", (user_id,))
         return [row[0] for row in cur.fetchall()]
+
+
+# ---------- practice teardown ----------
+
+@_with_reconnect
+def delete_practice(practice_id: str) -> None:
+    """Removes a practice and everything under it: every client (via
+    delete_client, so each client's jobs/uploads/mapping profiles/access
+    grants go too), every template and its stored file, and every user
+    account in the practice (nobody can log into a deleted practice
+    afterwards). This is the top-level teardown - nothing about this
+    practice survives it, and there is no undo."""
+    for client in list_clients(practice_id):
+        delete_client(client["id"])
+
+    with _get_conn().cursor() as cur:
+        cur.execute("SELECT data FROM entities WHERE kind = %s AND parent_id = %s", ("template", practice_id))
+        template_file_ids = [row[0]["file_id"] for row in cur.fetchall() if row[0].get("file_id")]
+        if template_file_ids:
+            cur.execute("DELETE FROM files WHERE id = ANY(%s)", (template_file_ids,))
+        cur.execute("DELETE FROM entities WHERE kind = %s AND parent_id = %s", ("template", practice_id))
+
+        cur.execute("SELECT id FROM users WHERE practice_id = %s", (practice_id,))
+        user_ids = [row[0] for row in cur.fetchall()]
+        if user_ids:
+            cur.execute("DELETE FROM client_access WHERE user_id = ANY(%s)", (user_ids,))
+        cur.execute("DELETE FROM users WHERE practice_id = %s", (practice_id,))
+
+        cur.execute("DELETE FROM entities WHERE kind = %s AND id = %s", ("practice", practice_id))
