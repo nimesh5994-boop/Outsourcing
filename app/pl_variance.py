@@ -1,5 +1,5 @@
 """P&L variance review: current vs comparative movement on every P&L
-account, with two pieces of extra context a bare TB-wide variance check
+account, with three pieces of extra context a bare TB-wide variance check
 (recon.variance_analysis) doesn't give a reviewer:
 
   1. Which contacts/transactions are actually driving a flagged account's
@@ -16,8 +16,17 @@ account, with two pieces of extra context a bare TB-wide variance check
      as more jobs are generated for the same client, so the very first
      year has no history to compare against and every later one has
      progressively more.
+  3. The actual "P&L Notes" a preparer would build by hand: every
+     contact posting to EVERY P&L code (not just flagged ones) with its
+     own current/previous £, a per-code main variance driver (the single
+     contact whose own movement explains most of that code's swing), and
+     a duplicate-name flag - a contact who posted to more than one P&L
+     code this year, checked across the whole P&L regardless of whether
+     either code happened to breach the variance threshold (unlike
+     _split_across_codes, which only looks at contacts already tied to a
+     flagged account). See _pl_notes_detail.
 
-Both pieces are advisory, same as every other check in this system - they
+All three are advisory, same as every other check in this system - they
 surface candidates and context for a human reviewer to judge, never an
 automatic accept/reject. See main.py's /jobs/{id}/pl-variance/run route
 and the client-facing report route for how this gets used.
@@ -81,8 +90,120 @@ def _split_across_codes(nominal_current: pd.DataFrame, flagged_keys: set[str]) -
     return out.sort_values(["Contact", "This is the flagged account"], ascending=[True, False]).reset_index(drop=True)
 
 
+def _code_text(value) -> str:
+    return "" if value is None or (isinstance(value, float) and pd.isna(value)) else str(value).strip()
+
+
+def _natural_code_key(code: str) -> tuple:
+    """Sorts account codes numerically when they parse as numbers (a real
+    chart of accounts reads "90" before "100"), falling back to plain text
+    for alpha-numeric codes - used only for _pl_notes_detail's own output
+    order (a preparer expects a P&L note in ascending code order), never
+    for pl_variance_analysis's `merged` table, which stays ordered by
+    variance size (biggest movers first) for review priority."""
+    try:
+        return (0, float(code))
+    except ValueError:
+        return (1, code)
+
+
+def _pl_notes_detail(pl_summary: pd.DataFrame, nominal_current: pd.DataFrame, nominal_comparative: pd.DataFrame | None) -> pd.DataFrame:
+    """Builds the supplier/customer-level "P&L Notes" drill-down described
+    in this module's own docstring (point 3): every contact posting to
+    every P&L code this year (and last year too, when the practice has
+    also uploaded prior-year nominal activity - a comparative-year contact
+    breakdown isn't available from pl_comparative alone, which only ever
+    carries account-level totals), a per-code TOTAL row carrying that
+    code's own main variance driver, and a universal duplicate-name flag.
+
+    `pl_summary` is pl_variance_analysis's own already-computed `merged`
+    frame (account_code/account_name/current_year/comparative_year/
+    variance_pct/flag), reused rather than recomputed, so this table's
+    own numbers can never drift from the headline review table's for the
+    same code. Without a prior-year nominal upload, every "Previous Year"
+    contact figure here is 0 even though the code's own TOTAL row still
+    shows the real comparative_year total from pl_summary - the gap is
+    visible to the reviewer rather than silently papered over."""
+    if pl_summary is None or pl_summary.empty:
+        return pd.DataFrame()
+    if nominal_current is None or nominal_current.empty or "contact" not in nominal_current.columns:
+        return pd.DataFrame()
+
+    def _prepare(df: pd.DataFrame) -> pd.DataFrame:
+        out = df.copy()
+        out["amount"] = out["debit"].fillna(0.0) - out["credit"].fillna(0.0)
+        out["contact"] = out["contact"].fillna("").astype(str).str.strip()
+        out["account_code"] = out["account_code"].map(_code_text)
+        return out[out["contact"] != ""]
+
+    cur = _prepare(nominal_current)
+    comp = _prepare(nominal_comparative) if nominal_comparative is not None and not nominal_comparative.empty and "contact" in nominal_comparative.columns else pd.DataFrame(columns=cur.columns)
+
+    pl_codes = {c for c in pl_summary["account_code"].map(_code_text) if c}
+
+    # Universal duplicate-name check: every OTHER P&L code this contact has
+    # also posted to THIS YEAR, across the whole P&L range - not limited to
+    # contacts tied to an already-flagged account the way
+    # _split_across_codes' equivalent check is.
+    contact_codes: dict[str, set[str]] = {}
+    for contact, code in zip(cur["contact"], cur["account_code"]):
+        if code in pl_codes:
+            contact_codes.setdefault(contact, set()).add(code)
+
+    rows = []
+    ordered_summary = pl_summary.assign(_code_text=pl_summary["account_code"].map(_code_text))
+    ordered_summary = ordered_summary.sort_values("_code_text", key=lambda s: s.map(_natural_code_key))
+
+    for _, head in ordered_summary.iterrows():
+        code = head["_code_text"]
+        account_label = f"{code} - {head['account_name']}" if code else head["account_name"]
+
+        current_by_contact = cur.loc[cur["account_code"] == code].groupby("contact")["amount"].sum()
+        previous_by_contact = comp.loc[comp["account_code"] == code].groupby("contact")["amount"].sum() if not comp.empty else pd.Series(dtype=float)
+
+        contacts = sorted(set(current_by_contact.index) | set(previous_by_contact.index))
+        if not contacts:
+            continue
+
+        main_driver, main_movement = None, 0.0
+        for contact in contacts:
+            movement = float(current_by_contact.get(contact, 0.0)) - float(previous_by_contact.get(contact, 0.0))
+            if main_driver is None or abs(movement) > abs(main_movement):
+                main_driver, main_movement = contact, movement
+
+            duplicate = len(contact_codes.get(contact, set())) > 1
+            rows.append({
+                "Account": account_label,
+                "Contact": contact,
+                "Current Year": round(float(current_by_contact.get(contact, 0.0)), 2),
+                "Previous Year": round(float(previous_by_contact.get(contact, 0.0)), 2),
+                "Variance %": "",  # only meaningful at code level - see the TOTAL row below
+                "Duplicate Name": "Booked to more than one P&L head in current year" if duplicate else "",
+                "Main Variance Driver": "",
+            })
+
+        driver_text = ""
+        if bool(head.get("flag")) and main_driver is not None:
+            direction = "Higher" if main_movement > 0 else "Lower"
+            sign = "+" if main_movement >= 0 else "-"
+            driver_text = f"{direction} - {main_driver} ({sign}£{abs(main_movement):,.2f})"
+
+        rows.append({
+            "Account": account_label,
+            "Contact": "TOTAL",
+            "Current Year": round(float(head["current_year"]), 2),
+            "Previous Year": round(float(head["comparative_year"]), 2),
+            "Variance %": round(float(head["variance_pct"]) * 100, 1),
+            "Duplicate Name": "",
+            "Main Variance Driver": driver_text,
+        })
+
+    return pd.DataFrame(rows)
+
+
 def pl_variance_analysis(
     pl_current: pd.DataFrame, pl_comparative: pd.DataFrame, nominal_current: pd.DataFrame,
+    nominal_comparative: pd.DataFrame | None = None,
     materiality: float = MATERIALITY_AMOUNT, variance_pct_threshold: float = VARIANCE_PCT_THRESHOLD,
 ) -> ReconResult:
     if pl_current is None or pl_current.empty:
@@ -130,6 +251,11 @@ def pl_variance_analysis(
         if not split_detail.empty:
             result.extra_detail = split_detail
             result.extra_detail_label = "Contacts posting to a flagged account AND at least one other code this year"
+
+    notes_detail = _pl_notes_detail(merged, nominal_current, nominal_comparative)
+    if not notes_detail.empty:
+        result.matched_detail = notes_detail
+        result.matched_detail_label = "P&L Notes - supplier/customer analysis by nominal code"
     return result
 
 

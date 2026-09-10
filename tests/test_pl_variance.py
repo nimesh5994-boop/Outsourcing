@@ -93,6 +93,109 @@ def test_split_across_codes_empty_when_no_contact_posts_to_more_than_one_code():
     assert result.extra_detail.empty
 
 
+def test_pl_notes_detail_lists_every_contact_under_every_code_not_just_flagged():
+    """The supplier/customer drill-down (result.matched_detail) is a full
+    P&L note, not an exceptions list - a code that never breached the
+    variance threshold still gets its own contact breakdown + TOTAL row."""
+    cur = _pl([["6000", "Marketing", "Overheads", 25000], ["6300", "Postage", "Overheads", 1000]])
+    comp = _pl([["6000", "Marketing", "Overheads", 8000], ["6300", "Postage", "Overheads", 980]])
+    nominal = _gl([
+        ["6000", "Marketing", "2025-03-01", "INV1", "ads", "Acme Agency", 25000, 0],
+        ["6300", "Postage", "2025-06-01", "INV4", "stamps", "Solo Ltd", 1000, 0],
+    ])
+    result = pl_variance.pl_variance_analysis(cur, comp, nominal, materiality=500, variance_pct_threshold=0.1)
+    notes = result.matched_detail
+    assert set(notes["Account"]) == {"6000 - Marketing", "6300 - Postage"}
+    # Postage (6300) is unflagged (£20/2% - below threshold) but still appears.
+    postage_rows = notes[notes["Account"] == "6300 - Postage"]
+    assert set(postage_rows["Contact"]) == {"Solo Ltd", "TOTAL"}
+    postage_total = postage_rows[postage_rows["Contact"] == "TOTAL"].iloc[0]
+    assert postage_total["Main Variance Driver"] == ""  # not flagged - no driver text
+
+
+def test_pl_notes_detail_identifies_main_variance_driver_on_flagged_code():
+    cur = _pl([["6000", "Marketing", "Overheads", 25000]])
+    comp = _pl([["6000", "Marketing", "Overheads", 8000]])
+    nominal_cur = _gl([
+        ["6000", "Marketing", "2025-03-01", "INV1", "ads", "Acme Agency", 20000, 0],
+        ["6000", "Marketing", "2025-04-01", "INV2", "socials", "Small Co", 5000, 0],
+    ])
+    nominal_comp = _gl([
+        ["6000", "Marketing", "2024-03-01", "INV1", "ads", "Acme Agency", 6000, 0],
+        ["6000", "Marketing", "2024-04-01", "INV2", "socials", "Small Co", 2000, 0],
+    ])
+    result = pl_variance.pl_variance_analysis(cur, comp, nominal_cur, nominal_comp, materiality=500, variance_pct_threshold=0.1)
+    total_row = result.matched_detail[result.matched_detail["Contact"] == "TOTAL"].iloc[0]
+    # Acme Agency moved +14,000, Small Co only +3,000 - Acme is the main driver.
+    assert "Acme Agency" in total_row["Main Variance Driver"]
+    assert "+£14,000.00" in total_row["Main Variance Driver"]
+    assert total_row["Main Variance Driver"].startswith("Higher")
+
+
+def test_pl_notes_detail_main_variance_driver_can_be_a_decrease():
+    cur = _pl([["6000", "Marketing", "Overheads", 2000]])
+    comp = _pl([["6000", "Marketing", "Overheads", 20000]])
+    nominal_cur = _gl([["6000", "Marketing", "2025-03-01", "INV1", "ads", "Acme Agency", 2000, 0]])
+    nominal_comp = _gl([["6000", "Marketing", "2024-03-01", "INV1", "ads", "Acme Agency", 20000, 0]])
+    result = pl_variance.pl_variance_analysis(cur, comp, nominal_cur, nominal_comp, materiality=500, variance_pct_threshold=0.1)
+    total_row = result.matched_detail[result.matched_detail["Contact"] == "TOTAL"].iloc[0]
+    assert total_row["Main Variance Driver"].startswith("Lower")
+    assert "-£18,000.00" in total_row["Main Variance Driver"]
+
+
+def test_pl_notes_detail_duplicate_name_flagged_across_any_two_codes_even_when_neither_is_flagged():
+    """Unlike _split_across_codes (only checks contacts tied to an
+    ALREADY-flagged account), the notes drill-down's duplicate-name check
+    runs across every P&L code - a contact double-coded between two
+    perfectly quiet accounts still gets caught."""
+    cur = _pl([["6000", "Marketing", "Overheads", 5010], ["6100", "Rent", "Overheads", 5010]])
+    comp = _pl([["6000", "Marketing", "Overheads", 5000], ["6100", "Rent", "Overheads", 5000]])
+    nominal = _gl([
+        ["6000", "Marketing", "2025-03-01", "INV1", "ads", "Acme Agency", 5010, 0],
+        ["6100", "Rent", "2025-04-01", "INV2", "office", "Acme Agency", 5010, 0],
+        ["6000", "Marketing", "2025-05-01", "INV3", "stamps", "Solo Ltd", 0, 0],
+    ])
+    result = pl_variance.pl_variance_analysis(cur, comp, nominal, materiality=500, variance_pct_threshold=0.1)
+    assert result.status == "ok"  # neither code breached materiality/threshold
+    assert result.extra_detail.empty  # _split_across_codes has nothing flagged to key off
+    notes = result.matched_detail
+    acme_rows = notes[notes["Contact"] == "Acme Agency"]
+    assert (acme_rows["Duplicate Name"] != "").all()
+    assert set(acme_rows["Account"]) == {"6000 - Marketing", "6100 - Rent"}
+
+
+def test_pl_notes_detail_no_duplicate_flag_for_contact_on_only_one_code():
+    cur = _pl([["6000", "Marketing", "Overheads", 25000]])
+    comp = _pl([["6000", "Marketing", "Overheads", 8000]])
+    nominal = _gl([["6000", "Marketing", "2025-03-01", "INV1", "ads", "Acme Agency", 25000, 0]])
+    result = pl_variance.pl_variance_analysis(cur, comp, nominal, materiality=500, variance_pct_threshold=0.1)
+    contact_row = result.matched_detail[result.matched_detail["Contact"] == "Acme Agency"].iloc[0]
+    assert contact_row["Duplicate Name"] == ""
+
+
+def test_pl_notes_detail_without_nominal_comparative_shows_zero_previous_year_per_contact():
+    """No prior-year nominal upload means no per-contact comparative figure
+    is possible - the TOTAL row still shows the real comparative_year
+    figure from pl_comparative, but every contact's own 'Previous Year' is
+    0, so the gap is visible rather than silently guessed at."""
+    cur = _pl([["6000", "Marketing", "Overheads", 25000]])
+    comp = _pl([["6000", "Marketing", "Overheads", 8000]])
+    nominal = _gl([["6000", "Marketing", "2025-03-01", "INV1", "ads", "Acme Agency", 25000, 0]])
+    result = pl_variance.pl_variance_analysis(cur, comp, nominal, materiality=500, variance_pct_threshold=0.1)
+    contact_row = result.matched_detail[result.matched_detail["Contact"] == "Acme Agency"].iloc[0]
+    total_row = result.matched_detail[result.matched_detail["Contact"] == "TOTAL"].iloc[0]
+    assert contact_row["Previous Year"] == 0.0
+    assert total_row["Previous Year"] == 8000.0
+
+
+def test_pl_notes_detail_empty_when_no_nominal_current():
+    cur = _pl([["4000", "Sales", "Turnover", -120000]])
+    comp = _pl([["4000", "Sales", "Turnover", -100000]])
+    result = pl_variance.pl_variance_analysis(cur, comp, None, materiality=500, variance_pct_threshold=0.1)
+    assert result.matched_detail.empty
+    assert result.matched_detail_label == ""
+
+
 def test_annotate_with_history_flags_recurring_vs_new_patterns():
     detail = pd.DataFrame([
         {"account_code": "4000", "account_name": "Sales", "flag": True},

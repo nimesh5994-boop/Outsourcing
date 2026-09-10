@@ -852,7 +852,7 @@ def _run_pl_variance(job: dict, client: dict, materiality: float, variance_pct_t
     for a run nobody asked to record)."""
     data = _load_canonical_data(job)
     result = pl_variance.pl_variance_analysis(
-        data.get("pl_current"), data.get("pl_comparative"), data.get("nominal_current"),
+        data.get("pl_current"), data.get("pl_comparative"), data.get("nominal_current"), data.get("nominal_comparative"),
         materiality, variance_pct_threshold,
     )
     if result.detail is not None and not result.detail.empty:
@@ -1624,7 +1624,7 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
         data.get("tb_current"), data.get("nominal_current"), materiality,
     )]
     pl_variance_result = pl_variance.pl_variance_analysis(
-        data.get("pl_current"), data.get("pl_comparative"), data.get("nominal_current"),
+        data.get("pl_current"), data.get("pl_comparative"), data.get("nominal_current"), data.get("nominal_comparative"),
         materiality, variance_pct_threshold,
     )
     if pl_variance_result.detail is not None and not pl_variance_result.detail.empty:
