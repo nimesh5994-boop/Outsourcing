@@ -24,6 +24,7 @@ it's looked up by (client, report_type, platform), not by id.
 """
 import functools
 import os
+import secrets
 import uuid
 from datetime import datetime
 
@@ -252,6 +253,50 @@ def save_practice(practice: dict) -> None:
 
 def list_practices() -> list[dict]:
     return _list_entities("practice")
+
+
+# ---------- invites (a practice can only be created against one of these) ----------
+
+def create_invite(email: str) -> dict:
+    """The invite's own id IS the token (a URL-safe random string, not the
+    usual _new_id prefix+uuid shape) - so looking one up from a link is
+    just get_invite(token), the same _get_entity("invite", ...) lookup
+    every other entity kind already uses, with no separate lookup table."""
+    token = secrets.token_urlsafe(24)
+    invite = {
+        "id": token,
+        "email": email.strip().lower(),
+        "created_at": datetime.utcnow().isoformat(),
+        "used": False,
+        "used_at": None,
+        "used_by_practice_id": None,
+    }
+    _put_entity("invite", token, None, invite)
+    return invite
+
+
+def get_invite(token: str) -> dict | None:
+    return _get_entity("invite", token)
+
+
+def list_invites() -> list[dict]:
+    return _list_entities("invite")
+
+
+def mark_invite_used(token: str, practice_id: str) -> None:
+    invite = get_invite(token)
+    if not invite:
+        return
+    invite["used"] = True
+    invite["used_at"] = datetime.utcnow().isoformat()
+    invite["used_by_practice_id"] = practice_id
+    _put_entity("invite", token, None, invite)
+
+
+@_with_reconnect
+def revoke_invite(token: str) -> None:
+    with _get_conn().cursor() as cur:
+        cur.execute("DELETE FROM entities WHERE kind = %s AND id = %s", ("invite", token))
 
 
 # ---------- templates (scoped to a practice) ----------

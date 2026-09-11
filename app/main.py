@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import time
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -10,7 +11,7 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mapping, nominal_matrix, parsers, paye_reconciliation, pdf_extraction, pl_variance, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, vat_periods, vat_reconciliation, xero_reports
+from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mailer, mapping, nominal_matrix, parsers, paye_reconciliation, pdf_extraction, pl_variance, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, vat_periods, vat_reconciliation, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
 from app.models import PAYE_RECON_TYPES, PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS, VAT_RECON_TYPES
 
@@ -96,33 +97,94 @@ def home():
 
 
 @app.get("/practices")
-def list_practices(request: Request):
+def list_practices(request: Request, invite: str = ""):
     user = auth.get_current_user(request)
     if user:
         return RedirectResponse(f"/practices/{user['practice_id']}", status_code=303)
     # anonymous: not a directory of every practice (that would leak tenant
     # names to the world) - just the log-in / create-a-practice landing page.
-    return templates.TemplateResponse("practices.html", {"request": request, "current_user": None})
+    # Signup is invite-only (see /admin/invites) - the create-practice form
+    # only renders at all when the link carries a still-unused invite
+    # token, so a random visitor never even sees a way to self-register.
+    invite_record = storage.get_invite(invite) if invite else None
+    if invite_record and invite_record["used"]:
+        invite_record = None
+    return templates.TemplateResponse("practices.html", {
+        "request": request, "current_user": None, "invite_token": invite, "invite": invite_record,
+    })
 
 
 @app.post("/practices")
 def create_practice(
     request: Request,
+    invite_token: str = Form(...),
     practice_name: str = Form(...), admin_name: str = Form(...),
     admin_email: str = Form(...), admin_password: str = Form(...),
 ):
+    invite = storage.get_invite(invite_token)
+    if not invite or invite["used"]:
+        return templates.TemplateResponse("practices.html", {
+            "request": request, "current_user": None, "invite_token": invite_token, "invite": None,
+            "error": "This invitation link is invalid or has already been used - ask for a new one.",
+        }, status_code=400)
+    if invite["email"] != admin_email.strip().lower():
+        return templates.TemplateResponse("practices.html", {
+            "request": request, "current_user": None, "invite_token": invite_token, "invite": invite,
+            "error": "This invitation was issued to a different email address.",
+        }, status_code=400)
     if storage.get_user_by_email(admin_email):
         return templates.TemplateResponse("practices.html", {
-            "request": request, "current_user": None, "error": "That email is already registered - log in instead.",
+            "request": request, "current_user": None, "invite_token": invite_token, "invite": invite,
+            "error": "That email is already registered - log in instead.",
         }, status_code=400)
 
     practice = storage.create_practice(practice_name.strip())
     password_hash = auth.hash_password(admin_password)
     user = storage.create_user(practice["id"], admin_email, password_hash, admin_name.strip(), "partner")
+    storage.mark_invite_used(invite_token, practice["id"])
 
     response = RedirectResponse(f"/practices/{practice['id']}", status_code=303)
     auth.set_session_cookie(response, request, user["id"])
     return response
+
+
+def _require_admin_secret(secret: str) -> None:
+    """Gates the /admin/invites screens - a single shared secret (env var
+    ADMIN_SECRET), not a real user account, since this is an operator-only
+    tool with exactly one operator today. 404s rather than 403s on a
+    missing/wrong secret so the route's existence isn't confirmed to
+    anyone probing it, matching _authorize_practice/_authorize_client's
+    same defensive choice elsewhere in this file. Unset ADMIN_SECRET locks
+    the feature out entirely (safe default) rather than falling open."""
+    expected = os.getenv("ADMIN_SECRET")
+    if not expected or secret != expected:
+        raise HTTPException(status_code=404)
+
+
+@app.get("/admin/invites")
+def admin_list_invites(request: Request, secret: str = "", sent: str = ""):
+    _require_admin_secret(secret)
+    invites = sorted(storage.list_invites(), key=lambda i: i["created_at"], reverse=True)
+    return templates.TemplateResponse("admin_invites.html", {
+        "request": request, "current_user": None, "secret": secret, "invites": invites,
+        "base_url": str(request.base_url).rstrip("/"), "sent": sent,
+    })
+
+
+@app.post("/admin/invites")
+def admin_create_invite(request: Request, secret: str = Form(...), email: str = Form(...)):
+    _require_admin_secret(secret)
+    invite = storage.create_invite(email)
+    invite_link = f"{str(request.base_url).rstrip('/')}/practices?invite={invite['id']}"
+    emailed = mailer.send_invite_email(invite["email"], invite_link)
+    return RedirectResponse(f"/admin/invites?secret={secret}&sent={'1' if emailed else '0'}", status_code=303)
+
+
+@app.post("/admin/invites/{token}/revoke")
+def admin_revoke_invite(token: str, secret: str = Form(...)):
+    _require_admin_secret(secret)
+    storage.revoke_invite(token)
+    return RedirectResponse(f"/admin/invites?secret={secret}", status_code=303)
 
 
 @app.get("/login")

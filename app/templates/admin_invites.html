@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card">
+  <h1>Practice Invitations</h1>
+  <p class="muted">Admin-only screen, gated by the secret in this page's own URL - keep the link private, don't share it outside the ?secret= query string.</p>
+  {% if sent == "1" %}<p class="success-text">Invite created and emailed.</p>{% endif %}
+  {% if sent == "0" %}<p class="error-text">Invite created, but the email couldn't be sent - copy the link below and share it manually.</p>{% endif %}
+</div>
+
+<div class="card">
+  <h2>Send a new invite</h2>
+  <form method="post" action="/admin/invites">
+    <input type="hidden" name="secret" value="{{ secret }}">
+    <label>Email</label>
+    <input type="email" name="email" required placeholder="new-practice-admin@example.com">
+    <div style="margin-top:16px"><button type="submit">Create &amp; email invite</button></div>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Invitations</h2>
+  {% if invites %}
+  <table>
+    <tr><th>Email</th><th>Created</th><th>Status</th><th>Link</th><th></th></tr>
+    {% for i in invites %}
+    <tr>
+      <td>{{ i.email }}</td>
+      <td class="muted">{{ i.created_at[:10] }}</td>
+      <td>
+        {% if i.used %}<span class="badge ok">used</span>{% else %}<span class="badge review">pending</span>{% endif %}
+      </td>
+      <td class="muted">{{ base_url }}/practices?invite={{ i.id }}</td>
+      <td>
+        {% if not i.used %}
+        <form method="post" action="/admin/invites/{{ i.id }}/revoke" onsubmit="return confirm('Revoke this invite? The link will stop working.')">
+          <input type="hidden" name="secret" value="{{ secret }}">
+          <button type="submit" class="secondary">Revoke</button>
+        </form>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p class="muted">No invitations yet.</p>
+  {% endif %}
+</div>
+{% endblock %}

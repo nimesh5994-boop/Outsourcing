@@ -78,11 +78,16 @@ def http_client(monkeypatch):
 def _signup(c: TestClient, practice_name="Acme & Co", admin_name="Alex Partner",
             admin_email="alex@acme.test", admin_password="hunter2hunter") -> str:
     """Creates a practice + its first (partner) user and logs the client in
-    via the session cookie, exactly as a real signup would. Returns the new
-    practice_id."""
+    via the session cookie, exactly as a real signup would. Signup is
+    invite-only, so this issues its own invite directly through storage
+    rather than through the admin-only HTTP route - equivalent to an admin
+    having already emailed one out. Returns the new practice_id."""
+    from app import storage
+    invite = storage.create_invite(admin_email)
     resp = c.post(
         "/practices",
         data={
+            "invite_token": invite["id"],
             "practice_name": practice_name, "admin_name": admin_name,
             "admin_email": admin_email, "admin_password": admin_password,
         },
@@ -308,9 +313,12 @@ def test_cross_practice_access_denied(http_client):
     c = http_client
     practice_a_id = _signup(c, admin_email="a@firm-a.test")
 
+    from app import storage
     from app.main import app as fastapi_app
     other = TestClient(fastapi_app)
+    invite_b = storage.create_invite("b@firm-b.test")
     resp = other.post("/practices", data={
+        "invite_token": invite_b["id"],
         "practice_name": "Firm B", "admin_name": "B Partner",
         "admin_email": "b@firm-b.test", "admin_password": "firm-b-password",
     }, follow_redirects=False)
@@ -2868,9 +2876,12 @@ def test_set_client_template_rejects_foreign_template(http_client):
     resp = c.post(f"/practices/{practice_a_id}/clients", data={"name": "Client A"}, follow_redirects=False)
     client_a_id = resp.headers["location"].rsplit("/", 1)[-1]
 
+    from app import storage
     from app.main import app as fastapi_app
     other = TestClient(fastapi_app)
+    invite_b = storage.create_invite("foreigntemplate-b@firm-b.test")
     resp = other.post("/practices", data={
+        "invite_token": invite_b["id"],
         "practice_name": "Firm B Templates", "admin_name": "B Partner",
         "admin_email": "foreigntemplate-b@firm-b.test", "admin_password": "firm-b-password",
     }, follow_redirects=False)
@@ -2889,3 +2900,168 @@ def test_set_client_template_rejects_foreign_template(http_client):
     resp = c.post(f"/clients/{client_a_id}/template", data={"template_id": foreign_template_id}, follow_redirects=False)
     assert resp.status_code == 404
     assert storage.get_client(client_a_id)["template_id"] is None
+
+
+# ---------- invite-only signup ----------
+
+def test_signup_rejected_without_an_invite_token(http_client):
+    c = http_client
+    resp = c.post("/practices", data={
+        "invite_token": "not-a-real-token",
+        "practice_name": "No Invite Ltd", "admin_name": "Nobody",
+        "admin_email": "noinvite@acme.test", "admin_password": "hunter2hunter",
+    }, follow_redirects=False)
+    assert resp.status_code == 400
+    from app import storage
+    assert storage.get_user_by_email("noinvite@acme.test") is None
+
+
+def test_signup_rejected_when_email_does_not_match_the_invite(http_client):
+    c = http_client
+    from app import storage
+    invite = storage.create_invite("invited@acme.test")
+    resp = c.post("/practices", data={
+        "invite_token": invite["id"],
+        "practice_name": "Wrong Email Ltd", "admin_name": "Someone Else",
+        "admin_email": "someone-else@acme.test", "admin_password": "hunter2hunter",
+    }, follow_redirects=False)
+    assert resp.status_code == 400
+    assert storage.get_user_by_email("someone-else@acme.test") is None
+    assert storage.get_invite(invite["id"])["used"] is False
+
+
+def test_signup_invite_is_single_use(http_client):
+    c = http_client
+    from app import storage
+    invite = storage.create_invite("reused@acme.test")
+    resp = c.post("/practices", data={
+        "invite_token": invite["id"],
+        "practice_name": "First Use Ltd", "admin_name": "First User",
+        "admin_email": "reused@acme.test", "admin_password": "hunter2hunter",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    assert storage.get_invite(invite["id"])["used"] is True
+
+    c.post("/logout")
+    resp = c.post("/practices", data={
+        "invite_token": invite["id"],
+        "practice_name": "Second Use Ltd", "admin_name": "Second User",
+        "admin_email": "reused2@acme.test", "admin_password": "hunter2hunter",
+    }, follow_redirects=False)
+    assert resp.status_code == 400
+    assert storage.get_user_by_email("reused2@acme.test") is None
+
+
+def test_signup_succeeds_with_a_valid_matching_invite(http_client):
+    """Full happy path, independent of the _signup test helper (which
+    exercises the same code but is trusted plumbing for every other test
+    in this file) - confirms /practices actually renders the create-
+    practice form when a valid invite is in the URL, and that submitting
+    it logs the new partner straight in."""
+    c = http_client
+    from app import storage
+    invite = storage.create_invite("realpath@acme.test")
+
+    resp = c.get(f"/practices?invite={invite['id']}")
+    assert resp.status_code == 200
+    assert "Create practice" in resp.text
+
+    resp = c.post("/practices", data={
+        "invite_token": invite["id"],
+        "practice_name": "Real Path Ltd", "admin_name": "Real User",
+        "admin_email": "realpath@acme.test", "admin_password": "hunter2hunter",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+    assert "session" in resp.cookies
+
+
+def test_practices_page_hides_signup_form_without_a_valid_invite(http_client):
+    c = http_client
+    resp = c.get("/practices")
+    assert resp.status_code == 200
+    assert "Create practice" not in resp.text
+    assert "invite-only" in resp.text.lower()
+
+
+# ---------- admin invite management ----------
+
+def test_admin_invites_404s_without_the_correct_secret(http_client, monkeypatch):
+    monkeypatch.setenv("ADMIN_SECRET", "correct-horse-battery-staple")
+    c = http_client
+    assert c.get("/admin/invites").status_code == 404
+    assert c.get("/admin/invites?secret=wrong").status_code == 404
+    assert c.get("/admin/invites?secret=correct-horse-battery-staple").status_code == 200
+
+
+def test_admin_invites_locked_out_entirely_when_admin_secret_unset(http_client, monkeypatch):
+    monkeypatch.delenv("ADMIN_SECRET", raising=False)
+    c = http_client
+    assert c.get("/admin/invites?secret=anything").status_code == 404
+
+
+def test_admin_create_invite_emails_the_link_and_lists_it(http_client, monkeypatch):
+    monkeypatch.setenv("ADMIN_SECRET", "s3cret")
+    sent = {}
+
+    def _fake_send(to_email, invite_link):
+        sent["to_email"] = to_email
+        sent["invite_link"] = invite_link
+        return True
+
+    from app import mailer
+    monkeypatch.setattr(mailer, "send_invite_email", _fake_send)
+
+    c = http_client
+    resp = c.post("/admin/invites", data={"secret": "s3cret", "email": "New.Firm@example.com"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert "sent=1" in resp.headers["location"]
+
+    assert sent["to_email"] == "new.firm@example.com"  # normalised lowercase, same as create_invite
+    assert "/practices?invite=" in sent["invite_link"]
+
+    listing = c.get("/admin/invites?secret=s3cret")
+    assert "new.firm@example.com" in listing.text
+    assert "pending" in listing.text
+
+
+def test_admin_create_invite_reports_when_email_delivery_fails(http_client, monkeypatch):
+    monkeypatch.setenv("ADMIN_SECRET", "s3cret")
+    from app import mailer
+    monkeypatch.setattr(mailer, "send_invite_email", lambda to_email, invite_link: False)
+
+    c = http_client
+    resp = c.post("/admin/invites", data={"secret": "s3cret", "email": "manual@example.com"}, follow_redirects=False)
+    assert "sent=0" in resp.headers["location"]
+
+    banner = c.get(resp.headers["location"])
+    assert "couldn&#39;t be sent" in banner.text or "couldn't be sent" in banner.text
+
+
+def test_admin_revoke_invite_prevents_it_being_used(http_client, monkeypatch):
+    monkeypatch.setenv("ADMIN_SECRET", "s3cret")
+    c = http_client
+    from app import storage
+    invite = storage.create_invite("revoked@acme.test")
+
+    resp = c.post(f"/admin/invites/{invite['id']}/revoke", data={"secret": "s3cret"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert storage.get_invite(invite["id"]) is None
+
+    resp = c.post("/practices", data={
+        "invite_token": invite["id"],
+        "practice_name": "Revoked Ltd", "admin_name": "Someone",
+        "admin_email": "revoked@acme.test", "admin_password": "hunter2hunter",
+    }, follow_redirects=False)
+    assert resp.status_code == 400
+    assert storage.get_user_by_email("revoked@acme.test") is None
+
+
+def test_admin_revoke_invite_requires_correct_secret(http_client, monkeypatch):
+    monkeypatch.setenv("ADMIN_SECRET", "s3cret")
+    c = http_client
+    from app import storage
+    invite = storage.create_invite("keepme@acme.test")
+
+    resp = c.post(f"/admin/invites/{invite['id']}/revoke", data={"secret": "wrong"}, follow_redirects=False)
+    assert resp.status_code == 404
+    assert storage.get_invite(invite["id"]) is not None

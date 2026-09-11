@@ -5,20 +5,36 @@
   <p class="muted">Already have an account? <a href="/login">Log in</a>.</p>
 </div>
 
+{% if invite %}
 <div class="card auth-card">
   <h2>Set up a new practice</h2>
   <p class="muted">This creates your practice and its first admin (Partner) login. Once in, use Manage Users to invite Managers and Preparers, and scope which clients each Preparer can see.</p>
   {% if error %}<p class="error-text">{{ error }}</p>{% endif %}
   <form method="post" action="/practices">
+    <input type="hidden" name="invite_token" value="{{ invite_token }}">
     <label>Practice name</label>
     <input type="text" name="practice_name" required placeholder="e.g. Affinity Associates Limited">
     <label>Your name</label>
     <input type="text" name="admin_name" required>
     <label>Your email</label>
-    <input type="email" name="admin_email" required>
+    <input type="email" name="admin_email" value="{{ invite.email }}" readonly required>
     <label>Password</label>
     <input type="password" name="admin_password" required minlength="8">
     <div style="margin-top:16px"><button type="submit">Create practice</button></div>
   </form>
 </div>
+{% else %}
+<div class="card auth-card">
+  <h2>New practice?</h2>
+  {% if error %}<p class="error-text">{{ error }}</p>{% endif %}
+  <p class="muted">
+    {% if invite_token %}
+    This invitation link is invalid or has already been used.
+    {% else %}
+    Working Paper Automation is invite-only.
+    {% endif %}
+    Contact Affinity Associates for an invitation.
+  </p>
+</div>
+{% endif %}
 {% endblock %}
