@@ -41,7 +41,14 @@ def send_invite_email(to_email: str, invite_link: str) -> bool:
     request = urllib.request.Request(
         RESEND_API_URL,
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            # Resend sits behind Cloudflare, which blocks the default
+            # "Python-urllib/x.y" user agent as a bot signature (seen as
+            # Cloudflare error code 1010) - any normal-looking UA passes.
+            "User-Agent": "outsourcing-working-papers/1.0",
+        },
         method="POST",
     )
     try:
