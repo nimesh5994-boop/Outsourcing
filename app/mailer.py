@@ -47,6 +47,13 @@ def send_invite_email(to_email: str, invite_link: str) -> bool:
     try:
         with urllib.request.urlopen(request, timeout=10) as response:
             return 200 <= response.status < 300
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        logger.error(
+            "Resend rejected invite email to %s: HTTP %s - %s (key_len=%s key_prefix=%r from=%r)",
+            to_email, exc.code, body, len(api_key), api_key[:6], from_address,
+        )
+        return False
     except urllib.error.URLError:
         logger.exception("Failed to send invite email to %s", to_email)
         return False
