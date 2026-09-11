@@ -18,7 +18,9 @@ account, with three pieces of extra context a bare TB-wide variance check
      progressively more.
   3. The actual "P&L Notes" a preparer would build by hand: every
      contact posting to EVERY P&L code (not just flagged ones) with its
-     own current/previous £, a per-code main variance driver (the single
+     own current/previous £ AND the actual GL narrative behind each figure
+     (deduplicated, current/previous year kept separate - see
+     _extract_description), a per-code main variance driver (the single
      contact whose own movement explains most of that code's swing), and
      a duplicate-name flag - a contact who posted to more than one P&L
      code this year, checked across the whole P&L regardless of whether
@@ -107,14 +109,62 @@ def _natural_code_key(code: str) -> tuple:
         return (1, code)
 
 
+def _extract_description(raw: str, contact: str) -> str:
+    """Turns a raw GL narrative into the short, non-redundant text worth
+    showing next to a contact's own P&L note line - preferring whatever
+    comes after the first "-" (most ledger exports prefix a boilerplate
+    reference/contact before the actual narrative, e.g. "INV1023 - office
+    repairs"), and failing that, stripping the contact's own name off the
+    front (e.g. "Acme Ltd: office repairs") since restating the contact
+    that's already the row's own label adds nothing."""
+    description = raw.strip()
+    if not description:
+        return ""
+
+    dash_index = description.find("-")
+    if dash_index != -1:
+        after_dash = description[dash_index + 1:].strip()
+        if after_dash:
+            return after_dash
+
+    contact = contact.strip()
+    if contact and description.lower().startswith(contact.lower()):
+        description = description[len(contact):].lstrip(" :|/").strip()
+
+    return description
+
+
+def _ordered_unique_descriptions(df: pd.DataFrame) -> dict[tuple[str, str], str]:
+    """Groups a prepared nominal-activity frame by (account_code, contact)
+    into one semicolon-joined description per group - first-seen order,
+    duplicates dropped - the shape both the current-year and previous-year
+    description columns need. Returns {} for an empty frame or one with no
+    description column at all (a generic-mapped upload that never mapped
+    one), so a missing description never breaks the rest of the note."""
+    if df.empty or "description" not in df.columns:
+        return {}
+    seen: dict[tuple[str, str], list[str]] = {}
+    for code, contact, raw in zip(df["account_code"], df["contact"], df["description"]):
+        text = _extract_description(_code_text(raw), contact)
+        if not text:
+            continue
+        bucket = seen.setdefault((code, contact), [])
+        if text not in bucket:
+            bucket.append(text)
+    return {key: "; ".join(values) for key, values in seen.items()}
+
+
 def _pl_notes_detail(pl_summary: pd.DataFrame, nominal_current: pd.DataFrame, nominal_comparative: pd.DataFrame | None) -> pd.DataFrame:
     """Builds the supplier/customer-level "P&L Notes" drill-down described
     in this module's own docstring (point 3): every contact posting to
     every P&L code this year (and last year too, when the practice has
     also uploaded prior-year nominal activity - a comparative-year contact
     breakdown isn't available from pl_comparative alone, which only ever
-    carries account-level totals), a per-code TOTAL row carrying that
-    code's own main variance driver, and a universal duplicate-name flag.
+    carries account-level totals), each with its own current/previous-year
+    GL narrative alongside the £ (see _extract_description -
+    deduplicated, blank on the TOTAL row since it has no single narrative
+    of its own), a per-code TOTAL row carrying that code's own main
+    variance driver, and a universal duplicate-name flag.
 
     `pl_summary` is pl_variance_analysis's own already-computed `merged`
     frame (account_code/account_name/current_year/comparative_year/
@@ -138,6 +188,9 @@ def _pl_notes_detail(pl_summary: pd.DataFrame, nominal_current: pd.DataFrame, no
 
     cur = _prepare(nominal_current)
     comp = _prepare(nominal_comparative) if nominal_comparative is not None and not nominal_comparative.empty and "contact" in nominal_comparative.columns else pd.DataFrame(columns=cur.columns)
+
+    current_descriptions = _ordered_unique_descriptions(cur)
+    previous_descriptions = _ordered_unique_descriptions(comp)
 
     pl_codes = {c for c in pl_summary["account_code"].map(_code_text) if c}
 
@@ -175,6 +228,8 @@ def _pl_notes_detail(pl_summary: pd.DataFrame, nominal_current: pd.DataFrame, no
             rows.append({
                 "Account": account_label,
                 "Contact": contact,
+                "Current Period Description": current_descriptions.get((code, contact), ""),
+                "Previous Period Description": previous_descriptions.get((code, contact), ""),
                 "Current Year": round(float(current_by_contact.get(contact, 0.0)), 2),
                 "Previous Year": round(float(previous_by_contact.get(contact, 0.0)), 2),
                 "Variance %": "",  # only meaningful at code level - see the TOTAL row below
@@ -191,6 +246,8 @@ def _pl_notes_detail(pl_summary: pd.DataFrame, nominal_current: pd.DataFrame, no
         rows.append({
             "Account": account_label,
             "Contact": "TOTAL",
+            "Current Period Description": "",
+            "Previous Period Description": "",
             "Current Year": round(float(head["current_year"]), 2),
             "Previous Year": round(float(head["comparative_year"]), 2),
             "Variance %": round(float(head["variance_pct"]) * 100, 1),

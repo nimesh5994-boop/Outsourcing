@@ -188,6 +188,61 @@ def test_pl_notes_detail_without_nominal_comparative_shows_zero_previous_year_pe
     assert total_row["Previous Year"] == 8000.0
 
 
+def test_extract_description_prefers_text_after_first_dash():
+    assert pl_variance._extract_description("INV1023 - office repairs", "Acme Ltd") == "office repairs"
+
+
+def test_extract_description_strips_contact_name_when_no_dash():
+    assert pl_variance._extract_description("Acme Ltd: office repairs", "Acme Ltd") == "office repairs"
+
+
+def test_extract_description_returns_as_is_when_no_dash_and_no_contact_match():
+    assert pl_variance._extract_description("office repairs", "Someone Else Ltd") == "office repairs"
+
+
+def test_extract_description_blank_input_returns_blank():
+    assert pl_variance._extract_description("", "Acme Ltd") == ""
+    assert pl_variance._extract_description("   ", "Acme Ltd") == ""
+
+
+def test_pl_notes_detail_shows_deduplicated_current_and_previous_descriptions():
+    cur = _pl([["6000", "Marketing", "Overheads", 25000]])
+    comp = _pl([["6000", "Marketing", "Overheads", 8000]])
+    nominal_cur = _gl([
+        ["6000", "Marketing", "2025-03-01", "INV1", "INV1 - spring campaign", "Acme Agency", 15000, 0],
+        ["6000", "Marketing", "2025-05-01", "INV3", "INV3 - spring campaign", "Acme Agency", 10000, 0],  # duplicate narrative, not repeated
+    ])
+    nominal_comp = _gl([
+        ["6000", "Marketing", "2024-03-01", "INV0", "INV0 - winter campaign", "Acme Agency", 8000, 0],
+    ])
+    result = pl_variance.pl_variance_analysis(cur, comp, nominal_cur, nominal_comp, materiality=500, variance_pct_threshold=0.1)
+    contact_row = result.matched_detail[result.matched_detail["Contact"] == "Acme Agency"].iloc[0]
+    assert contact_row["Current Period Description"] == "spring campaign"  # deduplicated, not "spring campaign; spring campaign"
+    assert contact_row["Previous Period Description"] == "winter campaign"
+
+
+def test_pl_notes_detail_joins_distinct_descriptions_with_semicolon():
+    cur = _pl([["6000", "Marketing", "Overheads", 25000]])
+    comp = _pl([["6000", "Marketing", "Overheads", 8000]])
+    nominal = _gl([
+        ["6000", "Marketing", "2025-03-01", "INV1", "INV1 - spring campaign", "Acme Agency", 15000, 0],
+        ["6000", "Marketing", "2025-05-01", "INV3", "INV3 - print ads", "Acme Agency", 10000, 0],
+    ])
+    result = pl_variance.pl_variance_analysis(cur, comp, nominal, materiality=500, variance_pct_threshold=0.1)
+    contact_row = result.matched_detail[result.matched_detail["Contact"] == "Acme Agency"].iloc[0]
+    assert contact_row["Current Period Description"] == "spring campaign; print ads"
+
+
+def test_pl_notes_detail_total_row_has_blank_descriptions():
+    cur = _pl([["6000", "Marketing", "Overheads", 25000]])
+    comp = _pl([["6000", "Marketing", "Overheads", 8000]])
+    nominal = _gl([["6000", "Marketing", "2025-03-01", "INV1", "INV1 - spring campaign", "Acme Agency", 25000, 0]])
+    result = pl_variance.pl_variance_analysis(cur, comp, nominal, materiality=500, variance_pct_threshold=0.1)
+    total_row = result.matched_detail[result.matched_detail["Contact"] == "TOTAL"].iloc[0]
+    assert total_row["Current Period Description"] == ""
+    assert total_row["Previous Period Description"] == ""
+
+
 def test_pl_notes_detail_empty_when_no_nominal_current():
     cur = _pl([["4000", "Sales", "Turnover", -120000]])
     comp = _pl([["4000", "Sales", "Turnover", -100000]])
