@@ -511,21 +511,29 @@ def parse_vat_box_transactions(source: DataSource) -> dict[int, pd.DataFrame]:
     return out
 
 
+# Xero's TB carries an Account Type per row (Revenue/Sales/Direct Costs/
+# Overhead/Expense = P&L; Bank/Current Asset/Fixed Asset/Current
+# Liability/Liability/Equity = B/S). "Revenue" is Xero's own standard
+# Account Type label for sales accounts (distinct from the account
+# *name*, which is often "Sales") - a real bug found live: without it
+# here, those accounts silently fell through to the B/S side instead,
+# understating Turnover to zero and throwing off the B/S balance check
+# by the same amount. Exported (not a local variable) so every place
+# that needs the same P&L/B/S split - derive_pl_bs_from_tb below, and
+# tb_tieout.py's opening-balance logic (a P&L account has no carried-
+# forward opening balance the way a balance-sheet one does) - shares
+# one definition instead of risking the two silently drifting apart.
+PL_ACCOUNT_TYPES = {"sales", "revenue", "direct costs", "overhead", "overheads", "expense", "income", "other income"}
+
+
 def derive_pl_bs_from_tb(tb: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Xero's TB carries an Account Type per row (Revenue/Sales/Direct Costs/
-    Overhead/Expense = P&L; Bank/Current Asset/Fixed Asset/Current Liability/
-    Liability/Equity = B/S), so P&L and B/S can be derived directly instead
-    of requiring separate uploads. "Revenue" is Xero's own standard Account
-    Type label for sales accounts (distinct from the account *name*, which
-    is often "Sales") - without it here, those accounts silently fall
-    through to the B/S side instead, understating Turnover to zero and
-    throwing off the B/S balance check by the same amount."""
+    """See PL_ACCOUNT_TYPES above for which Account Types are treated as
+    P&L vs Balance Sheet."""
     if tb is None or tb.empty:
         return pd.DataFrame(), pd.DataFrame()
-    pl_types = {"sales", "revenue", "direct costs", "overhead", "overheads", "expense", "income", "other income"}
     df = tb.copy()
     df["_type_l"] = df["account_type"].str.lower()
-    is_pl = df["_type_l"].isin(pl_types)
+    is_pl = df["_type_l"].isin(PL_ACCOUNT_TYPES)
 
     pl = df[is_pl].copy()
     pl["amount"] = pl["credit"] - pl["debit"]  # income positive, expenses negative

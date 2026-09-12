@@ -12,7 +12,7 @@ from fastapi.responses import RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mailer, mapping, nominal_matrix, parsers, paye_reconciliation, pdf_extraction, pl_variance, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, vat_periods, vat_reconciliation, xero_reports
+from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mailer, mapping, nominal_matrix, parsers, paye_reconciliation, pdf_extraction, pl_variance, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, tb_tieout, vat_periods, vat_reconciliation, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
 from app.models import PAYE_RECON_TYPES, PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS, VAT_RECON_TYPES
 
@@ -1549,13 +1549,22 @@ def _load_canonical_data(job: dict) -> dict:
                 this_current, this_comparative = xero_reports.parse_trial_balance(source)
                 if upload["period"] == "current":
                     data["tb_current"] = this_current
+                    # Kept unconditionally (regardless of whether it also
+                    # becomes data["tb_comparative"] below) so the Trial
+                    # Balance Tie-Out's opening-balance cross-check can
+                    # compare it against a *separately* uploaded comparative
+                    # TB, when both exist - see tb_tieout.build_tieout.
+                    data["tb_current_own_comparative"] = this_comparative
                     if "tb_comparative" not in data and not this_comparative.empty:
                         data["tb_comparative"] = this_comparative
                 elif not this_current.empty:
                     # this file's own "current" column is what IT calls
                     # current (e.g. FY2024, as at its own upload date) -
                     # which is exactly the job's comparative period; its
-                    # own embedded comparative (FY2023) isn't wanted here.
+                    # own embedded comparative (FY2023) isn't wanted here -
+                    # the comparative year is already filed and finalised,
+                    # so tb_tieout.build_tieout only ever ties out the
+                    # current year, never re-verifies the comparative one.
                     data["tb_comparative"] = this_current
             elif report_type == "nominal_activity":
                 key = "nominal_current" if upload["period"] == "current" else "nominal_comparative"
@@ -1812,6 +1821,10 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
 
     yield event(2, "running")
     results = recon.run_all_recons(data, materiality, variance_pct_threshold)
+    results = results + [tb_tieout.build_tieout(
+        data.get("tb_current"), data.get("tb_comparative"), data.get("nominal_current"),
+        data.get("tb_current_own_comparative"),
+    )]
     vat_settings = vat_reconciliation.VatReconSettings(
         accounting_basis=job.get("vat_recon_basis", "accrual"),
         tolerance=job.get("vat_recon_tolerance", 0.0),

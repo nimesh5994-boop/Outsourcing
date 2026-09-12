@@ -1730,6 +1730,7 @@ def _generate_schedules(
     # future new check works out of the box without a config change
     RESULT_SCHEDULE_INFO = {
         "TB self-balance check": ("tb_balance_check", "TB Balance Check"),
+        "Trial balance tie-out (opening + movement = closing)": ("tb_tieout", "TB Tie-Out"),
         "Current vs comparative variance analysis": (None, None),
         "P&L variance review (current vs comparative)": ("pl_variance_review", "PL Variance Review"),
         "Debtors control account reconciliation": ("debtors_recon", "Debtors Recon"),
