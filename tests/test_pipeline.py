@@ -393,6 +393,13 @@ def test_full_workbook_builds_and_saves(tmp_path, canonical_data):
     assert "Index" in reopened.sheetnames
     assert any("TB Lead Schedule" in s for s in reopened.sheetnames)
     assert len(reopened.sheetnames) > 10
+    # Regression check: almost every schedule here is a live formula with
+    # no cached value (openpyxl never computes them) - without this flag
+    # set, some Excel installs (and most non-Excel viewers) show those
+    # cells as blank until a manual recalculation, which reads to a user
+    # as "the download is empty."
+    assert wb.calculation.fullCalcOnLoad is True
+    assert reopened.calculation.fullCalcOnLoad is True
 
 
 def test_full_workbook_falls_back_gracefully_for_generic_mapped_nominal_activity(tmp_path):

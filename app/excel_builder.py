@@ -1787,6 +1787,15 @@ def _generate_schedules(
     if pf_on:
         place("points_forward", lambda: build_points_forward_sheet(wb, client_name, current_label, pf_ref, header_cells=header_cells))
 
+    # Nearly every schedule here is a live formula (SUMPRODUCT/SUM against
+    # the DATA_* sheets), and openpyxl never computes them - it writes the
+    # formula text with no cached result. Without this flag, some Excel
+    # installs (and most non-Excel viewers) display those cells as blank
+    # until a manual recalculation, which reads as "the download is empty."
+    # This tells Excel to fully recalculate on open regardless of any
+    # (missing) cached value.
+    wb.calculation.fullCalcOnLoad = True
+
     return wb
 
 
