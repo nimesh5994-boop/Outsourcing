@@ -188,6 +188,26 @@ def admin_revoke_invite(token: str, secret: str = Form(...)):
     return RedirectResponse(f"/admin/invites?secret={secret}", status_code=303)
 
 
+@app.post("/admin/create-user")
+def admin_create_user(secret: str = Form(...), practice_id: str = Form(...), name: str = Form(...),
+                       email: str = Form(...), password: str = Form(...), role: str = Form(...)):
+    """Ops escape hatch: provisions a practice user with a real password
+    directly, for the case where the person has no real mailbox to receive
+    the normal invite-by-email link (see create_user below). Not linked
+    from any page - reached only by an operator who already has the admin
+    secret, calling it directly."""
+    _require_admin_secret(secret)
+    if not storage.get_practice(practice_id):
+        raise HTTPException(status_code=404, detail="No such practice")
+    if role not in auth.ROLES:
+        raise HTTPException(status_code=400, detail="Invalid role")
+    if storage.get_user_by_email(email):
+        raise HTTPException(status_code=400, detail="That email is already registered.")
+    password_hash = auth.hash_password(password)
+    new_user = storage.create_user(practice_id, email, password_hash, name.strip(), role)
+    return {"ok": True, "user_id": new_user["id"], "practice_id": practice_id, "role": role}
+
+
 @app.get("/login")
 def login_form(request: Request, next: str = "/practices", reset: str = "", activated: str = ""):
     user = auth.get_current_user(request)

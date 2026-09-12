@@ -3016,6 +3016,61 @@ def test_admin_invites_locked_out_entirely_when_admin_secret_unset(http_client, 
     assert c.get("/admin/invites?secret=anything").status_code == 404
 
 
+def test_admin_create_user_provisions_a_working_login_with_no_email_involved(http_client, monkeypatch):
+    """Covers the ops escape hatch for a person with no real mailbox: the
+    account is created active (no pending setup token) and logs in with
+    the exact password given, with no email ever sent."""
+    from app import mailer, storage
+    monkeypatch.setenv("ADMIN_SECRET", "s3cret")
+    sent = []
+    monkeypatch.setattr(mailer, "send_new_user_email", lambda *a: sent.append(a) or True)
+
+    practice_id = _signup(http_client, admin_email="backend-ops@acme.test")
+
+    resp = http_client.post("/admin/create-user", data={
+        "secret": "s3cret", "practice_id": practice_id,
+        "name": "No Mailbox User", "email": "no-mailbox@acme.test",
+        "password": "backend-set-pw", "role": "manager",
+    })
+    assert resp.status_code == 200
+    assert sent == []  # no email ever attempted
+
+    new_user = storage.get_user_by_email("no-mailbox@acme.test")
+    assert new_user["role"] == "manager"
+    assert storage.user_setup_pending(new_user["id"]) is False  # active immediately
+
+    fresh_client = TestClient(http_client.app)
+    login = fresh_client.post(
+        "/login", data={"email": "no-mailbox@acme.test", "password": "backend-set-pw"}, follow_redirects=False,
+    )
+    assert login.status_code == 303
+
+
+def test_admin_create_user_requires_the_correct_secret(http_client, monkeypatch):
+    monkeypatch.setenv("ADMIN_SECRET", "s3cret")
+    practice_id = _signup(http_client, admin_email="backend-ops2@acme.test")
+
+    resp = http_client.post("/admin/create-user", data={
+        "secret": "wrong", "practice_id": practice_id,
+        "name": "Nope", "email": "nope@acme.test", "password": "irrelevant-pw", "role": "manager",
+    })
+    assert resp.status_code == 404
+
+    from app import storage
+    assert storage.get_user_by_email("nope@acme.test") is None
+
+
+def test_admin_create_user_rejects_an_already_registered_email(http_client, monkeypatch):
+    monkeypatch.setenv("ADMIN_SECRET", "s3cret")
+    practice_id = _signup(http_client, admin_email="dup-target@acme.test")
+
+    resp = http_client.post("/admin/create-user", data={
+        "secret": "s3cret", "practice_id": practice_id,
+        "name": "Duplicate", "email": "dup-target@acme.test", "password": "irrelevant-pw", "role": "manager",
+    })
+    assert resp.status_code == 400
+
+
 def test_admin_create_invite_emails_the_link_and_lists_it(http_client, monkeypatch):
     monkeypatch.setenv("ADMIN_SECRET", "s3cret")
     sent = {}
