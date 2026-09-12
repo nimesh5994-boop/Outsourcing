@@ -84,6 +84,21 @@ def test_dormant_account_with_no_postings_still_checked_not_skipped():
     assert result.detail.iloc[0]["Movement (current year)"] == 0.0
 
 
+def test_bank_account_is_na_not_falsely_flagged_for_a_full_years_untracked_movement():
+    # Xero's own "Account Transactions" export never includes bank
+    # accounts - a real year of bank activity with zero nominal rows for
+    # it must read as "can't verify", not "dormant, so a £3k+ real
+    # closing-balance change is an unexplained difference".
+    tb_comparative = _tb([{"account_code": "BANK1", "account_name": "Starling", "account_type": "Bank", "debit": 880, "credit": 0}])
+    tb_current = _tb([{"account_code": "BANK1", "account_name": "Starling", "account_type": "Bank", "debit": 4019, "credit": 0}])
+    nominal_current = _nominal([{"account_code": "999", "debit": 10, "credit": 0}])  # some other account, not this one
+
+    result = build_tieout(tb_current, tb_comparative, nominal_current)
+    row = result.detail.iloc[0]
+    assert row["Flag"] == "n/a"
+    assert result.status == "ok"
+
+
 def test_na_flag_when_no_nominal_activity_uploaded_at_all():
     tb_comparative = _tb([{"account_code": "610", "account_name": "Trade Creditors", "account_type": "Current Liability", "debit": 0, "credit": 500}])
     tb_current = _tb([{"account_code": "610", "account_name": "Trade Creditors", "account_type": "Current Liability", "debit": 0, "credit": 700}])

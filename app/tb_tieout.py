@@ -61,10 +61,22 @@ def _tieout_table(tb_current: pd.DataFrame, tb_opening: pd.DataFrame | None, nom
     rows = []
     for _, r in tb_current.iterrows():
         code = str(r["account_code"])
-        is_pl_account = type_by_code.get(code, "") in PL_ACCOUNT_TYPES
+        account_type = type_by_code.get(code, "")
+        is_pl_account = account_type in PL_ACCOUNT_TYPES
         opening = 0.0 if is_pl_account else float(opening_by_code.get(code, 0.0))
         reported_closing = float(r["balance"])
-        if not has_nominal_upload:
+        if account_type == "bank":
+            # Xero's own "Account Transactions" report structurally never
+            # includes bank accounts (a bank feed needs a separate bank
+            # statement/transactions export - see control_accounts.py's
+            # same exclusion, and recon.py's simpler statement-vs-TB check
+            # instead) - found live: without this, a bank account with a
+            # real £3k+ year of movement but zero rows in the nominal
+            # upload read as "dormant, opening should equal closing",
+            # flagging its entire year of legitimate activity as an
+            # unexplained difference.
+            movement_value, derived_closing, diff, flag_text = None, None, None, "n/a"
+        elif not has_nominal_upload:
             movement_value, derived_closing, diff, flag_text = None, None, None, "n/a"
         elif code not in codes_with_movement_data:
             # No postings at all this year for this code is a legitimate,
