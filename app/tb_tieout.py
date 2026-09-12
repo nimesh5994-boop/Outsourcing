@@ -34,6 +34,19 @@ from app.xero_reports import PL_ACCOUNT_TYPES
 NAME = "Trial balance tie-out (opening + movement = closing)"
 TOLERANCE = 0.01  # a rounding allowance, not a materiality judgement - this identity is exact
 
+# The formula-linked rendering of this check (excel_builder.build_tb_tieout_sheet_formulas)
+# puts a live, blank Adjustment cell in this column of that sheet, one row
+# per current-year TB account, in the same order as DATA_TB_Current - and
+# data_sheets.write_data_sheets bakes a formula reference to it straight
+# into DATA_TB_Current's own balance column, so every other schedule that
+# reads DATA_TB_Current (TB Lead Schedule, Control Accounts, Fixed Asset
+# Register, Corporation Tax, Nominal Matrix, and - via a lookup - the P&L/
+# Balance Sheet statements) picks up whatever a preparer types there
+# automatically. A single shared constant, not hardcoded twice, since the
+# two sides of this reference living in different files is exactly the
+# kind of thing that quietly drifts apart otherwise.
+ADJUSTMENT_COLUMN_LETTER = "F"
+
 
 def _movement_by_code(nominal: pd.DataFrame | None) -> dict[str, float]:
     if nominal is None or nominal.empty:

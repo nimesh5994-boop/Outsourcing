@@ -33,6 +33,8 @@ from app.financial_statements import (
 from app.fixed_assets import STRAIGHT_LINE, AssetRegisterResult, FixedAssetResult, group_fixed_asset_codes
 from app.nominal_matrix import MatrixResult, build_matrix_row_groups
 from app.recon import MATERIALITY_AMOUNT, VARIANCE_PCT_THRESHOLD, ReconResult
+from app.tb_tieout import NAME as TB_TIEOUT_NAME
+from app.xero_reports import PL_ACCOUNT_TYPES
 from app.xlformulas import cell_ref, literal, quote, sum_of_values, sumifs_exact
 
 NAVY = "1F3864"
@@ -82,6 +84,22 @@ def _autosize(ws: Worksheet, df: pd.DataFrame, start_col: int = 1):
 DEFAULT_HEADER_CELLS = {"client_name_cell": "A1", "period_cell": "A2", "schedule_title_cell": "A3"}
 
 
+def _title_end_row(header_cells: dict | None = None) -> int:
+    """The first free row below the CLIENT NAME / PERIOD / SCHEDULE TITLE
+    header block _write_title writes - computed from whichever of the
+    three configured cells sits lowest, same as _write_title itself
+    returns, but callable before that sheet exists. Needed so
+    write_data_sheets can pre-compute exactly where the TB Tie-Out
+    sheet's Adjustment column will land (a fixed row per this job's
+    header_cells convention, decided once up front) and bake a formula
+    reference to it into DATA_TB_Current before that sheet is built."""
+    cells = header_cells or DEFAULT_HEADER_CELLS
+    client_cell = cells.get("client_name_cell") or DEFAULT_HEADER_CELLS["client_name_cell"]
+    period_cell = cells.get("period_cell") or DEFAULT_HEADER_CELLS["period_cell"]
+    title_cell = cells.get("schedule_title_cell") or DEFAULT_HEADER_CELLS["schedule_title_cell"]
+    return max(coordinate_from_string(c)[1] for c in (client_cell, period_cell, title_cell)) + 2
+
+
 def _write_title(
     ws: Worksheet, client_name: str, period_label: str, schedule_title: str, ref: str = "",
     header_cells: dict | None = None,
@@ -90,10 +108,9 @@ def _write_title(
     written into whichever cells a template's config specifies
     (storage.DEFAULT_TEMPLATE_CONFIG's header_cells) - defaults to A1/A2/A3
     (the generic-layout convention) when no template config applies.
-    Returns the first free row below the header block, computed from
-    whichever of the three configured cells sits lowest rather than
-    hardcoded, since a template's own convention might not put them on
-    rows 1-3."""
+    Returns the first free row below the header block - see
+    _title_end_row, which does the same calculation without writing
+    anything, for callers that need to know this before the sheet exists."""
     cells = header_cells or DEFAULT_HEADER_CELLS
     client_cell = cells.get("client_name_cell") or DEFAULT_HEADER_CELLS["client_name_cell"]
     period_cell = cells.get("period_cell") or DEFAULT_HEADER_CELLS["period_cell"]
@@ -106,8 +123,7 @@ def _write_title(
     ws[title_cell] = f"{ref + '  ' if ref else ''}{schedule_title}"
     ws[title_cell].font = SCHEDULE_FONT
 
-    last_row = max(coordinate_from_string(c)[1] for c in (client_cell, period_cell, title_cell))
-    return last_row + 2
+    return _title_end_row(header_cells)
 
 
 def _status_fill(status: str) -> PatternFill:
@@ -328,6 +344,126 @@ def build_statement_sheet(wb: Workbook, client_name: str, period_label: str, ref
     display = df.rename(columns={"account_code": "Account Code", "account_name": "Account Name", "category": "Category", "amount": "Amount"})
     _write_dataframe(ws, display, start_row=row)
     ws.freeze_panes = f"A{row + 1}"
+
+
+TB_TIEOUT_HEADERS = ["Account Code", "Account Name", "Account Type", "Opening (per comparative TB)",
+                     "Movement (current year)", "Adjustment", "Derived Closing",
+                     "Reported Closing (per current TB)", "Diff", "Flag"]
+ADJUSTMENT_FILL = PatternFill("solid", fgColor="FFF9C4")  # a pale yellow "type here" input-cell convention
+
+
+def build_tb_tieout_sheet_formulas(wb: Workbook, client_name: str, current_label: str, ref: str,
+                                    tb_current: pd.DataFrame, result: ReconResult, refs: DataRefs,
+                                    header_cells: dict | None = None) -> Worksheet:
+    """Live-formula rendering of tb_tieout.build_tieout: one row per
+    current-year TB account, same order as DATA_TB_Current (so a fixed
+    row offset - see data_sheets.write_data_sheets - lines the two up
+    without needing a lookup), with a genuinely blank Adjustment cell a
+    preparer can type into. Movement/Derived Closing/Diff/Flag are live
+    formulas that recalculate immediately; Reported Closing recomputes
+    debit-credit directly off DATA_TB_Current rather than through its
+    balance column, so it keeps showing the *original* uploaded figure
+    even once DATA_TB_Current's balance carries this same row's own
+    adjustment - otherwise the two would move together and Diff would
+    never change no matter what's typed.
+
+    Bank-type accounts and (if no Nominal Activity was uploaded at all)
+    every account skip the Movement/Derived Closing/Diff/Flag columns -
+    same "n/a" reasoning as tb_tieout._tieout_table - but still get a
+    working Adjustment cell, since a preparer may still want to correct
+    one and have it flow through, even though this sheet can't
+    independently verify it."""
+    sheet_name = f"{ref} TB Tie-Out"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, current_label, "TRIAL BALANCE TIE-OUT (OPENING + MOVEMENT = CLOSING)", ref, header_cells=header_cells)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {result.status.upper()} - {result.message}")
+    status_cell.font = _status_font(result.status)
+    status_cell.fill = _status_fill(result.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(TB_TIEOUT_HEADERS))
+    ws.row_dimensions[row].height = 45
+    row += 1
+
+    note_cell = ws.cell(row=row, column=1, value=(
+        "Type a figure in the Adjustment column to post a correcting entry: Diff/Flag on this row update "
+        "immediately, and the TB Lead Schedule, P&L, Balance Sheet, Control Accounts, Fixed Asset Register and "
+        "Corporation Tax computation all recalculate off the adjusted balance too, automatically. Every other "
+        "check in this workbook (which runs once, in Python, when the file is built) needs the working paper "
+        "regenerated - after posting the equivalent journal in Xero - to reflect an adjustment made here."
+    ))
+    note_cell.font = Font(italic=True, color="595959")
+    note_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(TB_TIEOUT_HEADERS))
+    ws.row_dimensions[row].height = 30
+    row += 1
+
+    header_row = row
+    for j, h in enumerate(TB_TIEOUT_HEADERS):
+        ws.cell(row=header_row, column=1 + j, value=h)
+    _style_header_row(ws, header_row, len(TB_TIEOUT_HEADERS))
+    data_start_row = header_row + 1
+
+    has_nominal_upload = refs.nominal_current is not None
+
+    for i in range(len(tb_current)):
+        r = data_start_row + i
+        r_tb = refs.tb_current.first_row + i
+        code = str(tb_current.iloc[i]["account_code"])
+        account_type = str(tb_current.iloc[i]["account_type"]).strip()
+        is_pl_account = account_type.lower() in PL_ACCOUNT_TYPES
+        is_bank = account_type.lower() == "bank"
+
+        tb_col = refs.tb_current.columns
+        tb_sheet = refs.tb_current.sheet_name
+        code_ref = cell_ref(tb_sheet, f"{tb_col['account_code']}{r_tb}")
+        name_ref = cell_ref(tb_sheet, f"{tb_col['account_name']}{r_tb}")
+        type_ref = cell_ref(tb_sheet, f"{tb_col['account_type']}{r_tb}")
+        debit_ref = cell_ref(tb_sheet, f"{tb_col['debit']}{r_tb}")
+        credit_ref = cell_ref(tb_sheet, f"{tb_col['credit']}{r_tb}")
+        ws.cell(row=r, column=1, value=f"={code_ref}").border = BORDER
+        ws.cell(row=r, column=2, value=f"={name_ref}").border = BORDER
+        ws.cell(row=r, column=3, value=f"={type_ref}").border = BORDER
+
+        if is_pl_account:
+            opening_formula = "=0"
+        elif refs.tb_comparative is not None:
+            opening_formula = sumifs_exact(refs.tb_comparative.col_range("balance"), (refs.tb_comparative.col_range("account_code"), quote(code)))
+        else:
+            opening_formula = "=0"
+        ws.cell(row=r, column=4, value=opening_formula).number_format = CURRENCY_FMT
+
+        ws.cell(row=r, column=8, value=f"={debit_ref}-{credit_ref}").number_format = CURRENCY_FMT
+
+        adjustment_cell = ws.cell(row=r, column=6)
+        adjustment_cell.fill = ADJUSTMENT_FILL
+        adjustment_cell.border = BORDER
+        adjustment_cell.number_format = CURRENCY_FMT
+
+        if is_bank or not has_nominal_upload:
+            for col in (5, 7, 9, 10):
+                ws.cell(row=r, column=col, value="n/a").border = BORDER
+        else:
+            # debit - credit computed directly (not via a "net" column,
+            # which a generic-mapped upload isn't guaranteed to have -
+            # debit/credit aren't in nominal_activity's own required
+            # fields) - same two-part SUMPRODUCT pattern
+            # build_control_account_sheet_formulas already uses.
+            nominal_code_range = refs.nominal_current.col_range("account_code")
+            debit_sum = sumifs_exact(refs.nominal_current.col_range("debit"), (nominal_code_range, quote(code)))
+            credit_sum = sumifs_exact(refs.nominal_current.col_range("credit"), (nominal_code_range, quote(code)))
+            movement_formula = f"={debit_sum[1:]}-{credit_sum[1:]}"
+            ws.cell(row=r, column=5, value=movement_formula).number_format = CURRENCY_FMT
+            ws.cell(row=r, column=7, value=f"=D{r}+E{r}+F{r}").number_format = CURRENCY_FMT
+            ws.cell(row=r, column=9, value=f"=G{r}-H{r}").number_format = CURRENCY_FMT
+            ws.cell(row=r, column=10, value=f'=IF(ABS(I{r})>0.01,"REVIEW","OK")')
+
+        for col in (1, 2, 3, 4, 7, 8, 9, 10):
+            ws.cell(row=r, column=col).border = BORDER
+
+    _autosize(ws, pd.DataFrame(columns=TB_TIEOUT_HEADERS))
+    ws.freeze_panes = f"A{data_start_row}"
+    return ws
 
 
 _PL_NOTES_DETAIL_COLUMNS = ["Contact", "Current Period Description", "Previous Period Description",
@@ -1782,10 +1918,26 @@ def _generate_schedules(
 
     build_index_sheet(index_ws, client_name, current_label, comparative_label, entries)
 
+    # The TB Tie-Out sheet's Adjustment column doesn't exist yet (it's
+    # built further down, in the results loop below) - but its ref number
+    # is already assigned above (recon_refs), and _title_end_row can work
+    # out exactly which row its data will start on without needing the
+    # sheet itself, so DATA_TB_Current's balance formula can reference it
+    # now, before it's built. See data_sheets.write_data_sheets and
+    # build_tb_tieout_sheet_formulas.
+    tb_tieout_ref = recon_refs.get(TB_TIEOUT_NAME)
+    tb_adjustments_ref = None
+    if tb_tieout_ref is not None:
+        tb_tieout_sheet_name = f"{tb_tieout_ref} {recon_sheet_names[TB_TIEOUT_NAME]}"[:31]
+        # build_tb_tieout_sheet_formulas' own row layout below _write_title's
+        # return row T: status line (T), note line (T+1), header line (T+2),
+        # data starting at T+3 - keep these in sync if that layout changes.
+        tb_adjustments_ref = (tb_tieout_sheet_name, _title_end_row(header_cells) + 3)
+
     # raw-data sheets every formula-linked schedule below references, so the
     # workbook recalculates like a manually-built working paper rather than
     # holding Python-computed literals - see data_sheets.py / xlformulas.py
-    refs = write_data_sheets(wb, data)
+    refs = write_data_sheets(wb, data, tb_adjustments_ref=tb_adjustments_ref)
 
     variance_result = next((r for r in results if r.name == "Current vs comparative variance analysis"), None)
     if tb_on:
@@ -1825,7 +1977,12 @@ def _generate_schedules(
         config_key, _ = RESULT_SCHEDULE_INFO.get(res.name, (res.name, res.name[:31]))
         r = recon_refs[res.name]
         sheet_title = recon_sheet_names[res.name]
-        place(config_key, lambda r=r, sheet_title=sheet_title, res=res: build_recon_sheet(wb, client_name, current_label, r, f"{r} {sheet_title}", res, header_cells=header_cells))
+        if res.name == TB_TIEOUT_NAME and refs.tb_current is not None and data.get("tb_current") is not None:
+            place(config_key, lambda r=r, res=res: build_tb_tieout_sheet_formulas(
+                wb, client_name, current_label, r, data["tb_current"], res, refs, header_cells=header_cells,
+            ))
+        else:
+            place(config_key, lambda r=r, sheet_title=sheet_title, res=res: build_recon_sheet(wb, client_name, current_label, r, f"{r} {sheet_title}", res, header_cells=header_cells))
 
     if ca_on:
         for r in control_account_results:
