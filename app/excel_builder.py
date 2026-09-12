@@ -330,6 +330,75 @@ def build_statement_sheet(wb: Workbook, client_name: str, period_label: str, ref
     ws.freeze_panes = f"A{row + 1}"
 
 
+_PL_NOTES_DETAIL_COLUMNS = ["Contact", "Current Period Description", "Previous Period Description",
+                            "Current Year", "Previous Year", "Duplicate Name"]
+
+
+def _write_pl_notes_sections(ws: Worksheet, df: pd.DataFrame, start_row: int) -> int:
+    """Renders pl_variance._pl_notes_detail's output as a proper set of
+    accounting notes - one titled block per account (current/comparative
+    £, variance %, and the main driver called out directly in the header)
+    with its supplier/customer breakdown underneath - rather than one long
+    flat table repeating the account name on every row. Reads the way a
+    reviewer or client actually reads "Note 12: Repairs and maintenance"
+    in a real set of accounts, rather than a database export."""
+    widths = _column_widths(df[_PL_NOTES_DETAIL_COLUMNS])
+    for i, width in enumerate(widths):
+        ws.column_dimensions[get_column_letter(1 + i)].width = width
+    ncols = len(_PL_NOTES_DETAIL_COLUMNS)
+
+    row = start_row
+    for account, group in df.groupby("Account", sort=False):
+        total_rows = group[group["Contact"] == "TOTAL"]
+        if total_rows.empty:
+            continue
+        total = total_rows.iloc[0]
+        contacts = group[group["Contact"] != "TOTAL"]
+
+        header_parts = [
+            str(account),
+            f"Current year: £{total['Current Year']:,.2f}",
+            f"Previous year: £{total['Previous Year']:,.2f}",
+            f"Variance: {total['Variance %']:.1f}%",
+        ]
+        if total.get("Main Variance Driver"):
+            header_parts.append(f"Main driver: {total['Main Variance Driver']}")
+        header_cell = ws.cell(row=row, column=1, value="   |   ".join(header_parts))
+        header_cell.font = SCHEDULE_FONT
+        header_cell.fill = PatternFill("solid", fgColor=GREY)
+        ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
+        row += 1
+
+        if contacts.empty:
+            note_cell = ws.cell(row=row, column=1, value="No individual supplier/customer detail (single posting, or no contact recorded on the source data).")
+            note_cell.font = Font(italic=True, color="595959")
+            row += 2
+            continue
+
+        for j, col in enumerate(_PL_NOTES_DETAIL_COLUMNS):
+            ws.cell(row=row, column=1 + j, value=col)
+        _style_header_row(ws, row, ncols)
+        row += 1
+
+        for _, r in contacts.iterrows():
+            max_lines = 1
+            for j, col in enumerate(_PL_NOTES_DETAIL_COLUMNS):
+                val = r[col]
+                cell = ws.cell(row=row, column=1 + j, value=val if val not in (None, "") else None)
+                cell.border = BORDER
+                if col in ("Current Year", "Previous Year") and isinstance(val, (int, float)):
+                    cell.number_format = CURRENCY_FMT
+                elif isinstance(val, str) and len(val) > widths[j]:
+                    cell.alignment = Alignment(wrap_text=True, vertical="top")
+                    max_lines = max(max_lines, -(-len(val) // widths[j]))
+            if max_lines > 1:
+                ws.row_dimensions[row].height = min(120, 15 * max_lines)
+            row += 1
+        row += 1  # blank separator row between notes
+
+    return row
+
+
 def build_recon_sheet(wb: Workbook, client_name: str, period_label: str, ref: str, sheet_name: str, result: ReconResult, header_cells: dict | None = None):
     ws = wb.create_sheet(sheet_name[:31])
     row = _write_title(ws, client_name, period_label, result.name, ref, header_cells=header_cells)
@@ -357,7 +426,10 @@ def build_recon_sheet(wb: Workbook, client_name: str, period_label: str, ref: st
     if getattr(result, "matched_detail", None) is not None and not result.matched_detail.empty:
         label_row = next_row + 1
         ws.cell(row=label_row, column=1, value=result.matched_detail_label.upper()).font = SCHEDULE_FONT
-        next_row = _write_dataframe(ws, result.matched_detail, start_row=label_row + 1)
+        if result.matched_detail_label.startswith("P&L Notes"):
+            next_row = _write_pl_notes_sections(ws, result.matched_detail, start_row=label_row + 1)
+        else:
+            next_row = _write_dataframe(ws, result.matched_detail, start_row=label_row + 1)
 
     if getattr(result, "ai_note", ""):
         note_row = next_row + 1
