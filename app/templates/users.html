@@ -6,12 +6,15 @@
   <p class="muted">Partner and Manager see every client in this practice. Preparer sees only the clients checked below.</p>
   {% if practice_users %}
   <table>
-    <tr><th>Name</th><th>Email</th><th>Role</th><th>Client access</th><th></th></tr>
+    <tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Client access</th><th></th></tr>
     {% for u in practice_users %}
     <tr>
       <td>{{ u.name }}</td>
       <td class="muted">{{ u.email }}</td>
       <td><span class="badge {{ 'ok' if u.role == 'partner' else ('review' if u.role == 'manager' else 'na') }}">{{ u.role }}</span></td>
+      <td>
+        {% if pending_by_user.get(u.id) %}<span class="badge pending">invited</span>{% else %}<span class="badge ok">active</span>{% endif %}
+      </td>
       <td>
         {% if u.role == 'preparer' %}
         <form method="post" action="/practices/{{ practice_id }}/users/{{ u.id }}/client-access">
@@ -45,13 +48,12 @@
 
 <div class="card">
   <h2>Add a user</h2>
+  <p class="muted">They'll get an email with a link to set their own password and log in.</p>
   <form method="post" action="/practices/{{ practice_id }}/users">
     <label>Name</label>
     <input type="text" name="name" required>
     <label>Email</label>
     <input type="email" name="email" required>
-    <label>Password</label>
-    <input type="password" name="password" required minlength="8">
     <label>Role</label>
     <select name="role">
       {% for r in roles %}
@@ -59,7 +61,7 @@
       {% endfor %}
     </select>
     <p class="muted">Preparer client access is set from the table above after they're created.</p>
-    <div style="margin-top:16px"><button type="submit">Add user</button></div>
+    <div style="margin-top:16px"><button type="submit">Send invite</button></div>
   </form>
 </div>
 {% endblock %}

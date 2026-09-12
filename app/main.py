@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import secrets
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -188,11 +189,13 @@ def admin_revoke_invite(token: str, secret: str = Form(...)):
 
 
 @app.get("/login")
-def login_form(request: Request, next: str = "/practices", reset: str = ""):
+def login_form(request: Request, next: str = "/practices", reset: str = "", activated: str = ""):
     user = auth.get_current_user(request)
     if user:
         return RedirectResponse(auth.safe_next_path(next), status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "current_user": None, "next": next, "reset": reset})
+    return templates.TemplateResponse("login.html", {
+        "request": request, "current_user": None, "next": next, "reset": reset, "activated": activated,
+    })
 
 
 @app.post("/login")
@@ -215,19 +218,30 @@ def logout():
 
 
 PASSWORD_RESET_MAX_AGE = timedelta(hours=1)
+USER_SETUP_MAX_AGE = timedelta(days=7)
+
+
+def _valid_user_token(getter, token: str, max_age: timedelta) -> dict | None:
+    """None if the token doesn't exist, was already used, or is older than
+    max_age - callers treat all three identically (a generic "invalid or
+    expired" message), so there's no need to distinguish them. Shared by
+    password-reset (1 hour - a security recovery link) and user-setup
+    (7 days - a new hire may not check their invite email right away)."""
+    entity = getter(token)
+    if not entity or entity["used"]:
+        return None
+    created_at = datetime.fromisoformat(entity["created_at"])
+    if datetime.utcnow() - created_at > max_age:
+        return None
+    return entity
 
 
 def _valid_password_reset(token: str) -> dict | None:
-    """None if the token doesn't exist, was already used, or is older than
-    PASSWORD_RESET_MAX_AGE - callers treat all three identically (a generic
-    "invalid or expired" message), so there's no need to distinguish them."""
-    reset = storage.get_password_reset(token)
-    if not reset or reset["used"]:
-        return None
-    created_at = datetime.fromisoformat(reset["created_at"])
-    if datetime.utcnow() - created_at > PASSWORD_RESET_MAX_AGE:
-        return None
-    return reset
+    return _valid_user_token(storage.get_password_reset, token, PASSWORD_RESET_MAX_AGE)
+
+
+def _valid_user_setup(token: str) -> dict | None:
+    return _valid_user_token(storage.get_user_setup, token, USER_SETUP_MAX_AGE)
 
 
 @app.get("/forgot-password")
@@ -271,6 +285,31 @@ def reset_password_submit(request: Request, token: str = Form(...), password: st
     storage.set_user_password(reset["user_id"], auth.hash_password(password))
     storage.mark_password_reset_used(token)
     return RedirectResponse("/login?reset=1", status_code=303)
+
+
+@app.get("/set-password")
+def set_password_form(request: Request, token: str = ""):
+    valid = _valid_user_setup(token) is not None
+    return templates.TemplateResponse("set_password.html", {
+        "request": request, "current_user": None, "token": token, "valid": valid,
+    })
+
+
+@app.post("/set-password")
+def set_password_submit(request: Request, token: str = Form(...), password: str = Form(...)):
+    setup = _valid_user_setup(token)
+    if not setup:
+        return templates.TemplateResponse("set_password.html", {
+            "request": request, "current_user": None, "token": token, "valid": False,
+        }, status_code=400)
+    if len(password) < 8:
+        return templates.TemplateResponse("set_password.html", {
+            "request": request, "current_user": None, "token": token, "valid": True,
+            "error": "Password must be at least 8 characters.",
+        }, status_code=400)
+    storage.set_user_password(setup["user_id"], auth.hash_password(password))
+    storage.mark_user_setup_used(token)
+    return RedirectResponse("/login?activated=1", status_code=303)
 
 
 @app.get("/practices/{practice_id}")
@@ -367,26 +406,33 @@ def list_users(request: Request, practice_id: str, user: dict = Depends(auth.cur
     practice_users = storage.list_users(practice_id)
     clients = storage.list_clients(practice_id)
     access_by_user = {u["id"]: set(storage.list_client_access(u["id"])) for u in practice_users if u["role"] == "preparer"}
+    pending_by_user = {u["id"]: storage.user_setup_pending(u["id"]) for u in practice_users}
     return templates.TemplateResponse("users.html", {
         "request": request, "current_user": user, "practice_id": practice_id,
         "practice_users": practice_users, "clients": clients, "access_by_user": access_by_user,
-        "roles": auth.ROLES,
+        "pending_by_user": pending_by_user, "roles": auth.ROLES,
         "breadcrumbs": [{"label": practice["name"], "url": f"/practices/{practice_id}"}, {"label": "Users"}],
     })
 
 
 @app.post("/practices/{practice_id}/users")
-def create_user(practice_id: str, name: str = Form(...), email: str = Form(...),
-                 password: str = Form(...), role: str = Form(...),
-                 user: dict = Depends(auth.current_user_dep)):
-    _authorize_practice(user, practice_id)
+def create_user(request: Request, practice_id: str, name: str = Form(...), email: str = Form(...),
+                 role: str = Form(...), user: dict = Depends(auth.current_user_dep)):
+    practice = _authorize_practice(user, practice_id)
     auth.require_role(user, "partner")
     if role not in auth.ROLES:
         raise HTTPException(status_code=400, detail="Invalid role")
     if storage.get_user_by_email(email):
         raise auth.Forbidden("That email is already registered.")
-    password_hash = auth.hash_password(password)
-    storage.create_user(practice_id, email, password_hash, name.strip(), role)
+    # New users don't get a password from the partner creating them - they
+    # get a single-use setup link by email instead (see /set-password) and
+    # choose their own. The password_hash they're created with is random
+    # and never shared, so the account simply can't log in until then.
+    placeholder_hash = auth.hash_password(secrets.token_urlsafe(32))
+    new_user = storage.create_user(practice_id, email, placeholder_hash, name.strip(), role)
+    setup = storage.create_user_setup(new_user["id"])
+    setup_link = f"{str(request.base_url).rstrip('/')}/set-password?token={setup['id']}"
+    mailer.send_new_user_email(new_user["email"], practice["name"], role, setup_link)
     return RedirectResponse(f"/practices/{practice_id}/users", status_code=303)
 
 

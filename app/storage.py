@@ -299,21 +299,36 @@ def revoke_invite(token: str) -> None:
         cur.execute("DELETE FROM entities WHERE kind = %s AND id = %s", ("invite", token))
 
 
-# ---------- password resets ----------
+# ---------- password resets / new-user account setup ----------
+# Both are single-use, user-scoped tokens with the same shape (id-is-the-
+# token, same as invites - see create_invite) and differ only in how the
+# caller treats them: a password reset is a short-lived security recovery
+# link, while a user-setup token is the longer-lived "click here to
+# activate your account" link a partner's invite emails to a brand-new
+# user created with no password of their own (see create_user in main.py).
+
+def _create_user_token(kind: str, user_id: str) -> dict:
+    token = secrets.token_urlsafe(24)
+    entity = {
+        "id": token, "user_id": user_id,
+        "created_at": datetime.utcnow().isoformat(),
+        "used": False, "used_at": None,
+    }
+    _put_entity(kind, token, user_id, entity)
+    return entity
+
+
+def _mark_user_token_used(kind: str, token: str) -> None:
+    entity = _get_entity(kind, token)
+    if not entity:
+        return
+    entity["used"] = True
+    entity["used_at"] = datetime.utcnow().isoformat()
+    _put_entity(kind, token, entity["user_id"], entity)
+
 
 def create_password_reset(user_id: str) -> dict:
-    """Same id-is-the-token shape as invites (see create_invite) - the
-    token doubles as the lookup key so there's no separate table."""
-    token = secrets.token_urlsafe(24)
-    reset = {
-        "id": token,
-        "user_id": user_id,
-        "created_at": datetime.utcnow().isoformat(),
-        "used": False,
-        "used_at": None,
-    }
-    _put_entity("password_reset", token, user_id, reset)
-    return reset
+    return _create_user_token("password_reset", user_id)
 
 
 def get_password_reset(token: str) -> dict | None:
@@ -321,12 +336,26 @@ def get_password_reset(token: str) -> dict | None:
 
 
 def mark_password_reset_used(token: str) -> None:
-    reset = get_password_reset(token)
-    if not reset:
-        return
-    reset["used"] = True
-    reset["used_at"] = datetime.utcnow().isoformat()
-    _put_entity("password_reset", token, reset["user_id"], reset)
+    _mark_user_token_used("password_reset", token)
+
+
+def create_user_setup(user_id: str) -> dict:
+    return _create_user_token("user_setup", user_id)
+
+
+def get_user_setup(token: str) -> dict | None:
+    return _get_entity("user_setup", token)
+
+
+def mark_user_setup_used(token: str) -> None:
+    _mark_user_token_used("user_setup", token)
+
+
+def user_setup_pending(user_id: str) -> bool:
+    """True if this user was created via the invite flow and hasn't yet
+    clicked their setup link to choose a password. Used to show a
+    "pending" badge in the users list (see main.py's list_users)."""
+    return any(not setup["used"] for setup in _list_entities("user_setup", parent_id=user_id))
 
 
 # ---------- templates (scoped to a practice) ----------

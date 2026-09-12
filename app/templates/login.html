@@ -3,6 +3,7 @@
 <div class="card auth-card">
   <h1>Log in</h1>
   {% if reset == "1" %}<p class="success-text">Password updated - log in with your new password.</p>{% endif %}
+  {% if activated == "1" %}<p class="success-text">Account activated - log in with your new password.</p>{% endif %}
   {% if error %}<p class="error-text">{{ error }}</p>{% endif %}
   <form method="post" action="/login">
     <input type="hidden" name="next" value="{{ next }}">

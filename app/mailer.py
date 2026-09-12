@@ -70,6 +70,18 @@ def send_invite_email(to_email: str, invite_link: str) -> bool:
     )
 
 
+def send_new_user_email(to_email: str, practice_name: str, role: str, setup_link: str) -> bool:
+    return _send(
+        to_email,
+        f"You've been added to {practice_name} on Working Paper Automation",
+        (
+            f"<p>You've been added to <strong>{practice_name}</strong> on Working Paper Automation as a {role}.</p>"
+            f'<p><a href="{setup_link}">Click here to set your password and log in</a></p>'
+            "<p>This link is single-use and expires in 7 days.</p>"
+        ),
+    )
+
+
 def send_password_reset_email(to_email: str, reset_link: str) -> bool:
     return _send(
         to_email,

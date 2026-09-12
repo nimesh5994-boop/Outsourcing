@@ -97,6 +97,18 @@ def _signup(c: TestClient, practice_name="Acme & Co", admin_name="Alex Partner",
     return resp.headers["location"].rsplit("/", 1)[-1]
 
 
+def _activate_user(c: TestClient, email: str, password: str) -> None:
+    """Completes the invite-based user setup a partner's "Add a user" kicks
+    off (see create_user in main.py): looks up the pending setup token
+    directly through storage - equivalent to the new user clicking the
+    emailed link - and submits the password they're choosing."""
+    from app import storage
+    new_user = storage.get_user_by_email(email)
+    setups = storage._list_entities("user_setup", parent_id=new_user["id"])
+    resp = c.post("/set-password", data={"token": setups[0]["id"], "password": password}, follow_redirects=False)
+    assert resp.status_code == 303
+
+
 def _make_template_bytes() -> bytes:
     import io
 
@@ -257,9 +269,10 @@ def test_preparer_scoped_to_granted_clients_only(http_client):
     client_b_id = resp.headers["location"].rsplit("/", 1)[-1]
 
     resp = c.post(f"/practices/{practice_id}/users", data={
-        "name": "Prep One", "email": "prep@acme.test", "password": "prepper-pass", "role": "preparer",
+        "name": "Prep One", "email": "prep@acme.test", "role": "preparer",
     }, follow_redirects=False)
     assert resp.status_code == 303
+    _activate_user(c, "prep@acme.test", "prepper-pass")
 
     from app import storage
     prep_user = storage.get_user_by_email("prep@acme.test")
@@ -295,8 +308,9 @@ def test_manager_sees_all_clients_but_cannot_manage_users(http_client):
     c.post(f"/practices/{practice_id}/clients", data={"name": "Only Client"}, follow_redirects=False)
 
     c.post(f"/practices/{practice_id}/users", data={
-        "name": "Mgr One", "email": "mgr@acme.test", "password": "manager-pass", "role": "manager",
+        "name": "Mgr One", "email": "mgr@acme.test", "role": "manager",
     }, follow_redirects=False)
+    _activate_user(c, "mgr@acme.test", "manager-pass")
 
     c.post("/logout")
     c.post("/login", data={"email": "mgr@acme.test", "password": "manager-pass"}, follow_redirects=False)
@@ -2709,9 +2723,10 @@ def test_delete_job_denied_for_preparer(http_client):
     job_id = resp.headers["location"].rsplit("/", 1)[-1]
 
     resp = c.post(f"/practices/{practice_id}/users", data={
-        "name": "Prep Two", "email": "prep2@acme.test", "password": "prepper-pass", "role": "preparer",
+        "name": "Prep Two", "email": "prep2@acme.test", "role": "preparer",
     }, follow_redirects=False)
     assert resp.status_code == 303
+    _activate_user(c, "prep2@acme.test", "prepper-pass")
     from app import storage
     prep_user = storage.get_user_by_email("prep2@acme.test")
     c.post(f"/practices/{practice_id}/users/{prep_user['id']}/client-access", data={"client_ids": [client_id]}, follow_redirects=False)
@@ -2769,9 +2784,10 @@ def test_delete_client_denied_for_preparer(http_client):
     client_id = resp.headers["location"].rsplit("/", 1)[-1]
 
     resp = c.post(f"/practices/{practice_id}/users", data={
-        "name": "Prep Three", "email": "prep3@acme.test", "password": "prepper-pass", "role": "preparer",
+        "name": "Prep Three", "email": "prep3@acme.test", "role": "preparer",
     }, follow_redirects=False)
     assert resp.status_code == 303
+    _activate_user(c, "prep3@acme.test", "prepper-pass")
     from app import storage
     prep_user = storage.get_user_by_email("prep3@acme.test")
     c.post(f"/practices/{practice_id}/users/{prep_user['id']}/client-access", data={"client_ids": [client_id]}, follow_redirects=False)
@@ -2823,9 +2839,10 @@ def test_delete_practice_denied_for_manager(http_client):
     practice_id = _signup(c, admin_email="deletepractice-rbac@acme.test")
 
     resp = c.post(f"/practices/{practice_id}/users", data={
-        "name": "Manager One", "email": "manager1@acme.test", "password": "manager-pass", "role": "manager",
+        "name": "Manager One", "email": "manager1@acme.test", "role": "manager",
     }, follow_redirects=False)
     assert resp.status_code == 303
+    _activate_user(c, "manager1@acme.test", "manager-pass")
 
     c.post("/logout")
     c.post("/login", data={"email": "manager1@acme.test", "password": "manager-pass"}, follow_redirects=False)
@@ -3169,5 +3186,104 @@ def test_reset_password_rejects_an_unknown_token(http_client):
 
     resp = http_client.post(
         "/reset-password", data={"token": "not-a-real-token", "password": "irrelevant-pw"}, follow_redirects=False,
+    )
+    assert resp.status_code == 400
+
+
+def test_adding_a_user_emails_a_setup_link_instead_of_taking_a_password(http_client, monkeypatch):
+    from app import storage
+    practice_id = _signup(http_client, admin_email="inviter@acme.test")
+
+    sent = {}
+
+    def _fake_send(to_email, practice_name, role, setup_link):
+        sent["to_email"] = to_email
+        sent["practice_name"] = practice_name
+        sent["role"] = role
+        sent["setup_link"] = setup_link
+        return True
+
+    from app import mailer
+    monkeypatch.setattr(mailer, "send_new_user_email", _fake_send)
+
+    resp = http_client.post(f"/practices/{practice_id}/users", data={
+        "name": "New Hire", "email": "new.hire@acme.test", "role": "manager",
+    }, follow_redirects=False)
+    assert resp.status_code == 303
+
+    assert sent["to_email"] == "new.hire@acme.test"
+    assert sent["practice_name"] == "Acme & Co"
+    assert sent["role"] == "manager"
+    assert "/set-password?token=" in sent["setup_link"]
+
+    new_user = storage.get_user_by_email("new.hire@acme.test")
+    assert storage.user_setup_pending(new_user["id"]) is True
+
+    # nobody, including the partner who created the account, ever knows the
+    # random placeholder password - logging in with the account's own name
+    # or email as a "guessed" password must fail
+    assert http_client.post(
+        "/login", data={"email": "new.hire@acme.test", "password": "New Hire"}, follow_redirects=False,
+    ).status_code == 400
+
+    listing = http_client.get(f"/practices/{practice_id}/users")
+    assert "invited" in listing.text
+
+
+def test_set_password_activates_the_account_and_clears_the_pending_badge(http_client):
+    from app import storage
+    practice_id = _signup(http_client, admin_email="inviter2@acme.test")
+    http_client.post(f"/practices/{practice_id}/users", data={
+        "name": "Activate Me", "email": "activate.me@acme.test", "role": "preparer",
+    }, follow_redirects=False)
+    new_user = storage.get_user_by_email("activate.me@acme.test")
+    setup = storage._list_entities("user_setup", parent_id=new_user["id"])[0]
+
+    form_page = http_client.get(f"/set-password?token={setup['id']}")
+    assert form_page.status_code == 200
+    assert "Set up your password" in form_page.text
+
+    resp = http_client.post(
+        "/set-password", data={"token": setup["id"], "password": "chosen-by-them"}, follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login?activated=1"
+
+    assert storage.user_setup_pending(new_user["id"]) is False
+
+    fresh_client = TestClient(http_client.app)
+    login = fresh_client.post(
+        "/login", data={"email": "activate.me@acme.test", "password": "chosen-by-them"}, follow_redirects=False,
+    )
+    assert login.status_code == 303
+
+
+def test_set_password_token_is_single_use(http_client):
+    from app import storage
+    practice_id = _signup(http_client, admin_email="inviter3@acme.test")
+    http_client.post(f"/practices/{practice_id}/users", data={
+        "name": "Once Only", "email": "once.only@acme.test", "role": "preparer",
+    }, follow_redirects=False)
+    new_user = storage.get_user_by_email("once.only@acme.test")
+    setup = storage._list_entities("user_setup", parent_id=new_user["id"])[0]
+
+    first = http_client.post(
+        "/set-password", data={"token": setup["id"], "password": "first-pw"}, follow_redirects=False,
+    )
+    assert first.status_code == 303
+
+    second = http_client.post(
+        "/set-password", data={"token": setup["id"], "password": "second-pw"}, follow_redirects=False,
+    )
+    assert second.status_code == 400
+    assert "invalid or has expired" in second.text
+
+
+def test_set_password_rejects_an_unknown_token(http_client):
+    resp = http_client.get("/set-password?token=not-a-real-token")
+    assert "invalid or has expired" in resp.text
+
+    resp = http_client.post(
+        "/set-password", data={"token": "not-a-real-token", "password": "irrelevant-pw"}, follow_redirects=False,
     )
     assert resp.status_code == 400
