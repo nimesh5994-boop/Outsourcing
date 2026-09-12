@@ -2,7 +2,7 @@ import io
 import json
 import os
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -188,11 +188,11 @@ def admin_revoke_invite(token: str, secret: str = Form(...)):
 
 
 @app.get("/login")
-def login_form(request: Request, next: str = "/practices"):
+def login_form(request: Request, next: str = "/practices", reset: str = ""):
     user = auth.get_current_user(request)
     if user:
         return RedirectResponse(auth.safe_next_path(next), status_code=303)
-    return templates.TemplateResponse("login.html", {"request": request, "current_user": None, "next": next})
+    return templates.TemplateResponse("login.html", {"request": request, "current_user": None, "next": next, "reset": reset})
 
 
 @app.post("/login")
@@ -212,6 +212,65 @@ def logout():
     response = RedirectResponse("/login", status_code=303)
     response.delete_cookie(auth.SESSION_COOKIE)
     return response
+
+
+PASSWORD_RESET_MAX_AGE = timedelta(hours=1)
+
+
+def _valid_password_reset(token: str) -> dict | None:
+    """None if the token doesn't exist, was already used, or is older than
+    PASSWORD_RESET_MAX_AGE - callers treat all three identically (a generic
+    "invalid or expired" message), so there's no need to distinguish them."""
+    reset = storage.get_password_reset(token)
+    if not reset or reset["used"]:
+        return None
+    created_at = datetime.fromisoformat(reset["created_at"])
+    if datetime.utcnow() - created_at > PASSWORD_RESET_MAX_AGE:
+        return None
+    return reset
+
+
+@app.get("/forgot-password")
+def forgot_password_form(request: Request, sent: str = ""):
+    return templates.TemplateResponse("forgot_password.html", {"request": request, "current_user": None, "sent": sent})
+
+
+@app.post("/forgot-password")
+def forgot_password_submit(request: Request, email: str = Form(...)):
+    # Always redirects to the same "check your email" state whether or not
+    # the address matches an account - confirming/denying a match here would
+    # let this form be used to enumerate registered emails.
+    user = storage.get_user_by_email(email)
+    if user:
+        reset = storage.create_password_reset(user["id"])
+        reset_link = f"{str(request.base_url).rstrip('/')}/reset-password?token={reset['id']}"
+        mailer.send_password_reset_email(user["email"], reset_link)
+    return RedirectResponse("/forgot-password?sent=1", status_code=303)
+
+
+@app.get("/reset-password")
+def reset_password_form(request: Request, token: str = ""):
+    valid = _valid_password_reset(token) is not None
+    return templates.TemplateResponse("reset_password.html", {
+        "request": request, "current_user": None, "token": token, "valid": valid,
+    })
+
+
+@app.post("/reset-password")
+def reset_password_submit(request: Request, token: str = Form(...), password: str = Form(...)):
+    reset = _valid_password_reset(token)
+    if not reset:
+        return templates.TemplateResponse("reset_password.html", {
+            "request": request, "current_user": None, "token": token, "valid": False,
+        }, status_code=400)
+    if len(password) < 8:
+        return templates.TemplateResponse("reset_password.html", {
+            "request": request, "current_user": None, "token": token, "valid": True,
+            "error": "Password must be at least 8 characters.",
+        }, status_code=400)
+    storage.set_user_password(reset["user_id"], auth.hash_password(password))
+    storage.mark_password_reset_used(token)
+    return RedirectResponse("/login?reset=1", status_code=303)
 
 
 @app.get("/practices/{practice_id}")

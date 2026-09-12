@@ -299,6 +299,36 @@ def revoke_invite(token: str) -> None:
         cur.execute("DELETE FROM entities WHERE kind = %s AND id = %s", ("invite", token))
 
 
+# ---------- password resets ----------
+
+def create_password_reset(user_id: str) -> dict:
+    """Same id-is-the-token shape as invites (see create_invite) - the
+    token doubles as the lookup key so there's no separate table."""
+    token = secrets.token_urlsafe(24)
+    reset = {
+        "id": token,
+        "user_id": user_id,
+        "created_at": datetime.utcnow().isoformat(),
+        "used": False,
+        "used_at": None,
+    }
+    _put_entity("password_reset", token, user_id, reset)
+    return reset
+
+
+def get_password_reset(token: str) -> dict | None:
+    return _get_entity("password_reset", token)
+
+
+def mark_password_reset_used(token: str) -> None:
+    reset = get_password_reset(token)
+    if not reset:
+        return
+    reset["used"] = True
+    reset["used_at"] = datetime.utcnow().isoformat()
+    _put_entity("password_reset", token, reset["user_id"], reset)
+
+
 # ---------- templates (scoped to a practice) ----------
 
 def _normalise_template_file(content: bytes) -> tuple[bytes, dict]:
@@ -561,6 +591,12 @@ def get_user_by_email(email: str) -> dict | None:
         cur.execute(f"SELECT {_USER_COLUMNS} FROM users WHERE lower(email) = lower(%s)", (email.strip(),))
         row = cur.fetchone()
         return _user_row_to_dict(row) if row else None
+
+
+@_with_reconnect
+def set_user_password(user_id: str, password_hash: str) -> None:
+    with _get_conn().cursor() as cur:
+        cur.execute("UPDATE users SET password_hash = %s WHERE id = %s", (password_hash, user_id))
 
 
 @_with_reconnect

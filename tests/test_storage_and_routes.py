@@ -3065,3 +3065,109 @@ def test_admin_revoke_invite_requires_correct_secret(http_client, monkeypatch):
     resp = c.post(f"/admin/invites/{invite['id']}/revoke", data={"secret": "wrong"}, follow_redirects=False)
     assert resp.status_code == 404
     assert storage.get_invite(invite["id"]) is not None
+
+
+def test_forgot_password_emails_a_reset_link_for_a_known_account(http_client, monkeypatch):
+    _signup(http_client, admin_email="reset-me@acme.test", admin_password="original-pw")
+
+    sent = {}
+
+    def _fake_send(to_email, reset_link):
+        sent["to_email"] = to_email
+        sent["reset_link"] = reset_link
+        return True
+
+    from app import mailer
+    monkeypatch.setattr(mailer, "send_password_reset_email", _fake_send)
+
+    resp = http_client.post("/forgot-password", data={"email": "Reset-Me@acme.test"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert "sent=1" in resp.headers["location"]
+
+    assert sent["to_email"] == "reset-me@acme.test"
+    assert "/reset-password?token=" in sent["reset_link"]
+
+
+def test_forgot_password_gives_the_same_response_for_an_unknown_email(http_client, monkeypatch):
+    """No enumeration signal: an email that isn't registered gets the exact
+    same redirect as one that is, and nothing gets sent."""
+    from app import mailer
+    calls = []
+    monkeypatch.setattr(mailer, "send_password_reset_email", lambda *a: calls.append(a) or True)
+
+    resp = http_client.post("/forgot-password", data={"email": "nobody@nowhere.test"}, follow_redirects=False)
+    assert resp.status_code == 303
+    assert "sent=1" in resp.headers["location"]
+    assert calls == []
+
+
+def test_reset_password_token_lets_the_user_log_in_with_the_new_password(http_client):
+    from app import storage
+    _signup(http_client, admin_email="changer@acme.test", admin_password="original-pw")
+    user = storage.get_user_by_email("changer@acme.test")
+    reset = storage.create_password_reset(user["id"])
+
+    form_page = http_client.get(f"/reset-password?token={reset['id']}")
+    assert form_page.status_code == 200
+    assert "New password" in form_page.text
+
+    resp = http_client.post(
+        "/reset-password", data={"token": reset["id"], "password": "brand-new-pw"}, follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert resp.headers["location"] == "/login?reset=1"
+
+    fresh_client = TestClient(http_client.app)
+    login = fresh_client.post(
+        "/login", data={"email": "changer@acme.test", "password": "brand-new-pw", "next": "/practices"},
+        follow_redirects=False,
+    )
+    assert login.status_code == 303
+    old_login = fresh_client.post(
+        "/login", data={"email": "changer@acme.test", "password": "original-pw", "next": "/practices"},
+        follow_redirects=False,
+    )
+    assert old_login.status_code == 400
+
+
+def test_reset_password_token_is_single_use(http_client):
+    from app import storage
+    _signup(http_client, admin_email="onceonly@acme.test", admin_password="original-pw")
+    user = storage.get_user_by_email("onceonly@acme.test")
+    reset = storage.create_password_reset(user["id"])
+
+    first = http_client.post(
+        "/reset-password", data={"token": reset["id"], "password": "first-new-pw"}, follow_redirects=False,
+    )
+    assert first.status_code == 303
+
+    second = http_client.post(
+        "/reset-password", data={"token": reset["id"], "password": "second-new-pw"}, follow_redirects=False,
+    )
+    assert second.status_code == 400
+    assert "invalid or has expired" in second.text
+
+
+def test_reset_password_rejects_an_expired_token(http_client):
+    from app import storage
+    _signup(http_client, admin_email="expired@acme.test", admin_password="original-pw")
+    user = storage.get_user_by_email("expired@acme.test")
+    reset = storage.create_password_reset(user["id"])
+    reset["created_at"] = "2000-01-01T00:00:00"
+    storage._put_entity("password_reset", reset["id"], user["id"], reset)
+
+    resp = http_client.post(
+        "/reset-password", data={"token": reset["id"], "password": "irrelevant-pw"}, follow_redirects=False,
+    )
+    assert resp.status_code == 400
+    assert "invalid or has expired" in resp.text
+
+
+def test_reset_password_rejects_an_unknown_token(http_client):
+    resp = http_client.get("/reset-password?token=not-a-real-token")
+    assert "invalid or has expired" in resp.text
+
+    resp = http_client.post(
+        "/reset-password", data={"token": "not-a-real-token", "password": "irrelevant-pw"}, follow_redirects=False,
+    )
+    assert resp.status_code == 400

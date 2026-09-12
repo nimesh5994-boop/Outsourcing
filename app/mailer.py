@@ -1,13 +1,14 @@
-"""Minimal Resend-based email sending - the app only ever sends one kind
-of email (a practice invite link), so this is deliberately thin: a single
-function, plain urllib rather than pulling in a new HTTP-client dependency
-for one outbound call.
+"""Minimal Resend-based email sending - the app only ever sends two kinds
+of transactional email (a practice invite link, a password reset link),
+so this is deliberately thin: plain urllib rather than pulling in a new
+HTTP-client dependency for two outbound calls.
 
 Degrades silently when RESEND_API_KEY/RESEND_FROM_ADDRESS aren't
 configured - logs a warning and returns False rather than raising, since
-the admin invite screen always shows the raw invite link too (see
-main.py's /admin/invites route), so a missing/failed email is an
-inconvenience for the admin, not a broken feature."""
+callers always show a fallback (the admin invite screen shows the raw
+invite link; forgot-password shows a generic "check your email" message
+either way), so a missing/failed email is an inconvenience, not a broken
+feature."""
 from __future__ import annotations
 
 import json
@@ -21,23 +22,14 @@ logger = logging.getLogger(__name__)
 RESEND_API_URL = "https://api.resend.com/emails"
 
 
-def send_invite_email(to_email: str, invite_link: str) -> bool:
+def _send(to_email: str, subject: str, html: str) -> bool:
     api_key = os.getenv("RESEND_API_KEY")
     from_address = os.getenv("RESEND_FROM_ADDRESS")
     if not api_key or not from_address:
-        logger.warning("RESEND_API_KEY/RESEND_FROM_ADDRESS not configured - not emailing invite to %s", to_email)
+        logger.warning("RESEND_API_KEY/RESEND_FROM_ADDRESS not configured - not emailing %s", to_email)
         return False
 
-    payload = {
-        "from": from_address,
-        "to": [to_email],
-        "subject": "You're invited to Working Paper Automation",
-        "html": (
-            "<p>You've been invited to set up a practice on Working Paper Automation.</p>"
-            f'<p><a href="{invite_link}">Click here to create your practice</a></p>'
-            f"<p>This link is single-use and tied to {to_email}.</p>"
-        ),
-    }
+    payload = {"from": from_address, "to": [to_email], "subject": subject, "html": html}
     request = urllib.request.Request(
         RESEND_API_URL,
         data=json.dumps(payload).encode("utf-8"),
@@ -57,10 +49,35 @@ def send_invite_email(to_email: str, invite_link: str) -> bool:
     except urllib.error.HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         logger.error(
-            "Resend rejected invite email to %s: HTTP %s - %s (key_len=%s key_prefix=%r from=%r)",
+            "Resend rejected email to %s: HTTP %s - %s (key_len=%s key_prefix=%r from=%r)",
             to_email, exc.code, body, len(api_key), api_key[:6], from_address,
         )
         return False
     except urllib.error.URLError:
-        logger.exception("Failed to send invite email to %s", to_email)
+        logger.exception("Failed to send email to %s", to_email)
         return False
+
+
+def send_invite_email(to_email: str, invite_link: str) -> bool:
+    return _send(
+        to_email,
+        "You're invited to Working Paper Automation",
+        (
+            "<p>You've been invited to set up a practice on Working Paper Automation.</p>"
+            f'<p><a href="{invite_link}">Click here to create your practice</a></p>'
+            f"<p>This link is single-use and tied to {to_email}.</p>"
+        ),
+    )
+
+
+def send_password_reset_email(to_email: str, reset_link: str) -> bool:
+    return _send(
+        to_email,
+        "Reset your Working Paper Automation password",
+        (
+            "<p>Someone requested a password reset for this account.</p>"
+            f'<p><a href="{reset_link}">Click here to choose a new password</a></p>'
+            "<p>This link is single-use and expires in 1 hour. If you didn't request this, "
+            "you can ignore this email.</p>"
+        ),
+    )
