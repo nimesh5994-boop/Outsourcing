@@ -105,7 +105,7 @@ def disambiguate_pl_vs_bs(df: pd.DataFrame, category_column: str | None) -> str:
         return "profit_and_loss"
     values = " ".join(str(v).lower() for v in df[category_column].dropna().unique())
     bs_hits = sum(kw in values for kw in ("asset", "liabilit", "equity", "capital", "reserve"))
-    pl_hits = sum(kw in values for kw in ("turnover", "sales", "cost of sales", "overhead", "expense", "income"))
+    pl_hits = sum(kw in values for kw in ("turnover", "sales", "revenue", "cost of sales", "overhead", "expense", "income"))
     return "balance_sheet" if bs_hits > pl_hits else "profit_and_loss"
 
 

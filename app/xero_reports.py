@@ -512,13 +512,17 @@ def parse_vat_box_transactions(source: DataSource) -> dict[int, pd.DataFrame]:
 
 
 def derive_pl_bs_from_tb(tb: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Xero's TB carries an Account Type per row (Sales/Direct Costs/Overhead/
-    Expense = P&L; Bank/Current Asset/Fixed Asset/Current Liability/
+    """Xero's TB carries an Account Type per row (Revenue/Sales/Direct Costs/
+    Overhead/Expense = P&L; Bank/Current Asset/Fixed Asset/Current Liability/
     Liability/Equity = B/S), so P&L and B/S can be derived directly instead
-    of requiring separate uploads."""
+    of requiring separate uploads. "Revenue" is Xero's own standard Account
+    Type label for sales accounts (distinct from the account *name*, which
+    is often "Sales") - without it here, those accounts silently fall
+    through to the B/S side instead, understating Turnover to zero and
+    throwing off the B/S balance check by the same amount."""
     if tb is None or tb.empty:
         return pd.DataFrame(), pd.DataFrame()
-    pl_types = {"sales", "direct costs", "overhead", "overheads", "expense", "income", "other income"}
+    pl_types = {"sales", "revenue", "direct costs", "overhead", "overheads", "expense", "income", "other income"}
     df = tb.copy()
     df["_type_l"] = df["account_type"].str.lower()
     is_pl = df["_type_l"].isin(pl_types)

@@ -18,7 +18,7 @@ import pandas as pd
 
 MATERIALITY_AMOUNT = 500.0
 
-_PL_TURNOVER = {"sales", "income", "other income", "turnover"}
+_PL_TURNOVER = {"sales", "revenue", "income", "other income", "turnover"}
 _PL_DIRECT_COSTS = {"direct costs", "direct cost", "cost of sales"}
 _BS_FIXED_ASSETS = {"fixed asset"}
 _BS_CURRENT_ASSETS = {"current asset", "bank"}
