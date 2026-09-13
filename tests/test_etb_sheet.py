@@ -2,9 +2,10 @@
 - the consolidated Extended Trial Balance built *in addition to* the TB
 Tie-Out sheet, per the user's explicit "keep what is there but build ETB
 sheet too" instruction. Covers what makes it different from TB Tie-Out:
-a Comparative Closing reference column, and its own independent
-Adjustment column that sums with TB Tie-Out's rather than needing to
-agree with it.
+a Comparative Closing reference column, and an Adjustment column that is
+a live formula off the Journals sheet (see data_sheets.JournalsRef) -
+the same figure TB Tie-Out shows for that account, not a separate number
+of its own.
 """
 from pathlib import Path
 
@@ -59,11 +60,18 @@ def _dtc_row_for(wb, account_code: str) -> int:
     raise AssertionError(f"account code {account_code} not found on DATA_TB_Current")
 
 
-def test_etb_sheet_exists_alongside_tb_tieout_with_its_own_blank_adjustment_column(tmp_path, canonical_data):
+def _journals_first_row(wb) -> int:
+    ws = wb[next(s for s in wb.sheetnames if s.endswith("Journals"))]
+    header_row = next(r for r in range(1, 10) if ws.cell(row=r, column=1).value == "No.")
+    return header_row + 1
+
+
+def test_etb_sheet_exists_alongside_tb_tieout_with_an_adjustment_formula_not_a_blank_cell(tmp_path, canonical_data):
     out = tmp_path / "wp.xlsx"
     wb = _build_and_save(canonical_data, out)
     assert any("TB Tie-Out" in s for s in wb.sheetnames)  # kept, per the user's instruction
     assert any(s.endswith("ETB") for s in wb.sheetnames)  # added
+    assert any(s.endswith("Journals") for s in wb.sheetnames)  # the actual input, replacing a flat cell
 
     ws = next(wb[s] for s in wb.sheetnames if s.endswith("ETB"))
     header_row = next(r for r in range(1, 12) if ws.cell(row=r, column=1).value == "Account Code")
@@ -74,8 +82,10 @@ def test_etb_sheet_exists_alongside_tb_tieout_with_its_own_blank_adjustment_colu
         "Movement (current year)", "Adjustment", "Derived Closing",
         "Reported Closing (per current TB)", "Diff", "Flag", "Notes",
     ]
-    assert ws.cell(row=header_row + 1, column=7).value is None  # Adjustment (G) genuinely blank
-    assert ws.cell(row=header_row + 1, column=12).value is None  # Notes (L) genuinely blank
+    adjustment_formula = ws.cell(row=header_row + 1, column=7).value
+    assert adjustment_formula is not None and adjustment_formula.startswith("=SUMPRODUCT")
+    assert "Journals" in adjustment_formula
+    assert ws.cell(row=header_row + 1, column=12).value is None  # Notes stays genuinely blank
 
 
 def test_comparative_closing_is_not_zeroed_for_a_pl_account_but_opening_is(tmp_path, canonical_data):
@@ -104,18 +114,25 @@ def test_comparative_closing_is_not_zeroed_for_a_pl_account_but_opening_is(tmp_p
     assert comparative_closing_value == pytest.approx(expected)
 
 
-def test_etb_adjustment_is_independent_of_tb_tieout_and_both_sum_into_data_tb_current(tmp_path, canonical_data):
+def test_one_journal_moves_tb_tieout_and_etb_identically_and_data_tb_current_exactly_once(tmp_path, canonical_data):
+    # TB Tie-Out and the ETB sheet both show the *same* Adjustment figure -
+    # a formula off the one Journals sheet, not two independent numbers -
+    # so posting a single journal should move both sheets' Adjustment
+    # column identically, and DATA_TB_Current's balance by exactly that
+    # amount (not double-counted between the two views of it).
     out = tmp_path / "wp.xlsx"
     wb = _build_and_save(canonical_data, out)
 
     tieout_sheet_name = next(s for s in wb.sheetnames if "TB Tie-Out" in s)
     etb_sheet_name = next(s for s in wb.sheetnames if s.endswith("ETB"))
+    journals_sheet_name = next(s for s in wb.sheetnames if s.endswith("Journals"))
     tieout_ws, etb_ws = wb[tieout_sheet_name], wb[etb_sheet_name]
 
     tieout_header_row = next(r for r in range(1, 10) if tieout_ws.cell(row=r, column=6).value == "Adjustment")
     tieout_data_start = tieout_header_row + 1
     etb_header_row = next(r for r in range(1, 12) if etb_ws.cell(row=r, column=1).value == "Account Code")
     etb_data_start = etb_header_row + 1
+    journals_first_row = _journals_first_row(wb)
 
     pl_code = str(canonical_data["pl_current"].iloc[0]["account_code"])
     dtc_row = _dtc_row_for(wb, pl_code)
@@ -125,14 +142,17 @@ def test_etb_adjustment_is_independent_of_tb_tieout_and_both_sum_into_data_tb_cu
     sol_before = _evaluate(out)
     before_dtc = _cell(sol_before, "wp.xlsx", "DATA_TB_Current", f"F{dtc_row}")
 
-    TIEOUT_ADJUSTMENT, ETB_ADJUSTMENT = 250.0, 60.0
-    tieout_ws.cell(row=tieout_row, column=6, value=TIEOUT_ADJUSTMENT)
-    etb_ws.cell(row=etb_row, column=7, value=ETB_ADJUSTMENT)
+    JOURNAL_AMOUNT = 250.0
+    wb[journals_sheet_name].cell(row=journals_first_row, column=1, value="JNL 1")
+    wb[journals_sheet_name].cell(row=journals_first_row, column=3, value=pl_code)
+    wb[journals_sheet_name].cell(row=journals_first_row, column=4, value=JOURNAL_AMOUNT)
     wb.save(out)
 
     sol_after = _evaluate(out)
     after_dtc = _cell(sol_after, "wp.xlsx", "DATA_TB_Current", f"F{dtc_row}")
+    tieout_adjustment = _cell(sol_after, "wp.xlsx", tieout_sheet_name, f"F{tieout_row}")
+    etb_adjustment = _cell(sol_after, "wp.xlsx", etb_sheet_name, f"G{etb_row}")
 
-    # Both adjustments land on the same account, from two different sheets,
-    # and simply add - neither is required to agree with (or know about) the other.
-    assert after_dtc == pytest.approx(before_dtc + TIEOUT_ADJUSTMENT + ETB_ADJUSTMENT)
+    assert tieout_adjustment == pytest.approx(JOURNAL_AMOUNT)
+    assert etb_adjustment == pytest.approx(JOURNAL_AMOUNT)
+    assert after_dtc == pytest.approx(before_dtc + JOURNAL_AMOUNT)  # posted once, not double-counted

@@ -1,14 +1,15 @@
-"""End-to-end verification of the ETB Adjustment column (Phase 2 of the
-Extended Trial Balance work) - see excel_builder.build_tb_tieout_sheet_formulas
-and data_sheets.write_data_sheets' tb_adjustments_ref handling.
+"""End-to-end verification of the Journals sheet (see excel_builder.
+build_journals_sheet_formulas and data_sheets.JournalsRef) - the single
+place a preparer posts a narrated adjusting journal, replacing what used
+to be a flat, unnamed Adjustment cell typed directly onto the TB Tie-Out
+sheet.
 
 Builds a real workbook through the actual pipeline (recon.run_all_recons +
-tb_tieout.build_tieout, same as main.py's generation step), types a value
-into the TB Tie-Out sheet's Adjustment column, and uses the `formulas`
-library to *evaluate* the result - not just eyeball the formula strings -
-confirming the adjustment reaches DATA_TB_Current's balance and, through
-it, the P&L and Balance Sheet statements, with no changes needed in any
-of those sheets' own formulas.
+tb_tieout.build_tieout, same as main.py's generation step), types a
+journal row into the Journals sheet, and uses the `formulas` library to
+*evaluate* the result - not just eyeball the formula strings - confirming
+the journal reaches DATA_TB_Current's balance and, through it, the P&L
+statement, with no changes needed in any of those sheets' own formulas.
 """
 from pathlib import Path
 
@@ -56,49 +57,68 @@ def _build_and_save(canonical_data, out_path):
     return wb
 
 
-def test_tb_tieout_sheet_exists_with_a_blank_adjustment_column(tmp_path, canonical_data):
-    out = tmp_path / "wp.xlsx"
-    wb = _build_and_save(canonical_data, out)
-    assert any("TB Tie-Out" in s for s in wb.sheetnames)
-    ws = next(wb[s] for s in wb.sheetnames if "TB Tie-Out" in s)
-    header_row = next(r for r in range(1, 10) if ws.cell(row=r, column=6).value == "Adjustment")
-    assert ws.cell(row=header_row + 1, column=6).value is None  # genuinely blank, not a formula
+def _journals_sheet(wb):
+    name = next(s for s in wb.sheetnames if s.endswith("Journals"))
+    ws = wb[name]
+    header_row = next(r for r in range(1, 10) if ws.cell(row=r, column=1).value == "No.")
+    return name, ws, header_row + 1  # sheet name, worksheet, first typeable row
 
 
-def test_adjustment_flows_through_to_data_tb_current_and_the_pl_statement(tmp_path, canonical_data):
+def test_journals_sheet_exists_and_is_genuinely_blank(tmp_path, canonical_data):
     out = tmp_path / "wp.xlsx"
     wb = _build_and_save(canonical_data, out)
-    tieout_sheet_name = next(s for s in wb.sheetnames if "TB Tie-Out" in s)
+    name, ws, first_row = _journals_sheet(wb)
+    assert [ws.cell(row=first_row - 1, column=c).value for c in range(1, 6)] == ["No.", "Narration", "Account Code", "Debit", "Credit"]
+    assert ws.cell(row=first_row, column=1).value is None  # genuinely blank, not a formula
+    assert ws.cell(row=first_row, column=4).value is None
+
+
+def test_posting_a_journal_flows_through_to_data_tb_current_and_the_pl_statement(tmp_path, canonical_data):
+    out = tmp_path / "wp.xlsx"
+    wb = _build_and_save(canonical_data, out)
+    _, ws, first_row = _journals_sheet(wb)
     pl_sheet_name = next(s for s in wb.sheetnames if s.endswith("Profit and Loss"))
-    ws = wb[tieout_sheet_name]
-    header_row = next(r for r in range(1, 10) if ws.cell(row=r, column=6).value == "Adjustment")
-    tieout_data_start = header_row + 1
 
-    # Pick the first P&L-type account (opening always 0, so the maths is simplest to hand-check).
-    # TB Tie-Out row i (0-indexed from tieout_data_start) is the same account as
-    # DATA_TB_Current row i (0-indexed from its own first data row, 2) - both are
-    # built from the exact same tb_current dataframe, in the same order.
     pl_code = str(canonical_data["pl_current"].iloc[0]["account_code"])
     dtc_row = _dtc_row_for(wb, pl_code)
-    tieout_row = tieout_data_start + (dtc_row - 2)
-    assert ws.cell(row=tieout_row, column=6).value is None  # confirms this row's Adjustment is blank, as expected
 
     sol_before = _evaluate(out)
     before_dtc = _cell(sol_before, "wp.xlsx", "DATA_TB_Current", f"F{dtc_row}")
     before_net_profit = _cell(sol_before, "wp.xlsx", pl_sheet_name, "B12")
 
-    ADJUSTMENT = 250.0
-    ws.cell(row=tieout_row, column=6, value=ADJUSTMENT)
+    JOURNAL_AMOUNT = 250.0
+    ws.cell(row=first_row, column=1, value="JNL 1")
+    ws.cell(row=first_row, column=2, value="Test correcting entry")
+    ws.cell(row=first_row, column=3, value=pl_code)
+    ws.cell(row=first_row, column=4, value=JOURNAL_AMOUNT)  # Debit
     wb.save(out)
 
     sol_after = _evaluate(out)
     after_dtc = _cell(sol_after, "wp.xlsx", "DATA_TB_Current", f"F{dtc_row}")
     after_net_profit = _cell(sol_after, "wp.xlsx", pl_sheet_name, "B12")
 
-    assert after_dtc == pytest.approx(before_dtc + ADJUSTMENT)
+    assert after_dtc == pytest.approx(before_dtc + JOURNAL_AMOUNT)
     # DATA_PL negates DATA_TB_Current's balance (see data_sheets._write_derived_amount_sheet),
-    # so a +250 balance adjustment should move Net Profit by -250.
-    assert after_net_profit == pytest.approx(before_net_profit - ADJUSTMENT)
+    # so a +250 debit journal should move Net Profit by -250.
+    assert after_net_profit == pytest.approx(before_net_profit - JOURNAL_AMOUNT)
+
+
+def test_journals_balance_check_flags_an_unbalanced_register(tmp_path, canonical_data):
+    out = tmp_path / "wp.xlsx"
+    wb = _build_and_save(canonical_data, out)
+    name, ws, first_row = _journals_sheet(wb)
+
+    pl_code = str(canonical_data["pl_current"].iloc[0]["account_code"])
+    ws.cell(row=first_row, column=1, value="JNL 1")
+    ws.cell(row=first_row, column=3, value=pl_code)
+    ws.cell(row=first_row, column=4, value=100.0)  # a lone debit, no matching credit anywhere
+    wb.save(out)
+
+    sol = _evaluate(out)
+    # the balance-check cell sits two rows below the last typeable row
+    check_row = first_row + 200 + 1  # JOURNALS_DATA_ROWS = 200
+    flag = _cell(sol, "wp.xlsx", name, f"D{check_row}")
+    assert flag == "OUT OF BALANCE - CHECK ENTRIES"
 
 
 def _dtc_row_for(wb, account_code: str) -> int:

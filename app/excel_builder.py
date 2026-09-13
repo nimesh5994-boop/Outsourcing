@@ -17,7 +17,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from app.control_accounts import ControlAccountResult
 from app.corporation_tax import CTComputation
-from app.data_sheets import ETB_ADJUSTMENT_COLUMN_LETTER, DataRefs, with_row_ids, write_data_sheets
+from app.data_sheets import DataRefs, with_row_ids, write_data_sheets
 from app.financial_statements import (
     _BS_CURRENT_ASSETS,
     _BS_CURRENT_LIABILITIES,
@@ -349,7 +349,7 @@ def build_statement_sheet(wb: Workbook, client_name: str, period_label: str, ref
 TB_TIEOUT_HEADERS = ["Account Code", "Account Name", "Account Type", "Opening (per comparative TB)",
                      "Movement (current year)", "Adjustment", "Derived Closing",
                      "Reported Closing (per current TB)", "Diff", "Flag"]
-ADJUSTMENT_FILL = PatternFill("solid", fgColor="FFF9C4")  # a pale yellow "type here" input-cell convention
+INPUT_FILL = PatternFill("solid", fgColor="FFF9C4")  # a pale yellow "type here" input-cell convention
 
 
 def build_tb_tieout_sheet_formulas(wb: Workbook, client_name: str, current_label: str, ref: str,
@@ -358,21 +358,23 @@ def build_tb_tieout_sheet_formulas(wb: Workbook, client_name: str, current_label
     """Live-formula rendering of tb_tieout.build_tieout: one row per
     current-year TB account, same order as DATA_TB_Current (so a fixed
     row offset - see data_sheets.write_data_sheets - lines the two up
-    without needing a lookup), with a genuinely blank Adjustment cell a
-    preparer can type into. Movement/Derived Closing/Diff/Flag are live
-    formulas that recalculate immediately; Reported Closing recomputes
-    debit-credit directly off DATA_TB_Current rather than through its
-    balance column, so it keeps showing the *original* uploaded figure
-    even once DATA_TB_Current's balance carries this same row's own
-    adjustment - otherwise the two would move together and Diff would
-    never change no matter what's typed.
+    without needing a lookup). Adjustment is a formula - that account
+    code's net Debit-Credit across the Journals sheet (see
+    data_sheets.JournalsRef) - not something typed here directly; posting
+    a correcting entry means adding a row to Journals. Movement/Derived
+    Closing/Diff/Flag are live formulas that recalculate immediately;
+    Reported Closing recomputes debit-credit directly off DATA_TB_Current
+    rather than through its balance column, so it keeps showing the
+    *original* uploaded figure even once DATA_TB_Current's balance carries
+    this same row's own adjustment - otherwise the two would move together
+    and Diff would never change no matter what's posted.
 
     Bank-type accounts and (if no Nominal Activity was uploaded at all)
     every account skip the Movement/Derived Closing/Diff/Flag columns -
-    same "n/a" reasoning as tb_tieout._tieout_table - but still get a
-    working Adjustment cell, since a preparer may still want to correct
-    one and have it flow through, even though this sheet can't
-    independently verify it."""
+    same "n/a" reasoning as tb_tieout._tieout_table - but still show
+    whatever's been posted to Journals for that code, since a preparer may
+    still want to correct one and have it flow through, even though this
+    sheet can't independently verify it."""
     sheet_name = f"{ref} TB Tie-Out"[:31]
     ws = wb.create_sheet(sheet_name)
     row = _write_title(ws, client_name, current_label, "TRIAL BALANCE TIE-OUT (OPENING + MOVEMENT = CLOSING)", ref, header_cells=header_cells)
@@ -386,11 +388,12 @@ def build_tb_tieout_sheet_formulas(wb: Workbook, client_name: str, current_label
     row += 1
 
     note_cell = ws.cell(row=row, column=1, value=(
-        "Type a figure in the Adjustment column to post a correcting entry: Diff/Flag on this row update "
-        "immediately, and the TB Lead Schedule, P&L, Balance Sheet, Control Accounts, Fixed Asset Register and "
-        "Corporation Tax computation all recalculate off the adjusted balance too, automatically. Every other "
-        "check in this workbook (which runs once, in Python, when the file is built) needs the working paper "
-        "regenerated - after posting the equivalent journal in Xero - to reflect an adjustment made here."
+        "Adjustment is calculated automatically from the Journals sheet - post a narrated adjusting journal there, "
+        "by account code, to move it. Diff/Flag on this row update immediately, and the TB Lead Schedule, P&L, "
+        "Balance Sheet, Control Accounts, Fixed Asset Register and Corporation Tax computation all recalculate off "
+        "the adjusted balance too, automatically. Every other check in this workbook (which runs once, in Python, "
+        "when the file is built) needs the working paper regenerated - after posting the equivalent journal in "
+        "Xero - to reflect an adjustment made here."
     ))
     note_cell.font = Font(italic=True, color="595959")
     note_cell.alignment = Alignment(wrap_text=True)
@@ -435,10 +438,8 @@ def build_tb_tieout_sheet_formulas(wb: Workbook, client_name: str, current_label
 
         ws.cell(row=r, column=8, value=f"={debit_ref}-{credit_ref}").number_format = CURRENCY_FMT
 
-        adjustment_cell = ws.cell(row=r, column=6)
-        adjustment_cell.fill = ADJUSTMENT_FILL
-        adjustment_cell.border = BORDER
-        adjustment_cell.number_format = CURRENCY_FMT
+        adjustment_formula = refs.journals.net_effect_formula(code) if refs.journals is not None else "=0"
+        ws.cell(row=r, column=6, value=adjustment_formula).number_format = CURRENCY_FMT
 
         if is_bank or not has_nominal_upload:
             for col in (5, 7, 9, 10):
@@ -458,7 +459,7 @@ def build_tb_tieout_sheet_formulas(wb: Workbook, client_name: str, current_label
             ws.cell(row=r, column=9, value=f"=G{r}-H{r}").number_format = CURRENCY_FMT
             ws.cell(row=r, column=10, value=f'=IF(ABS(I{r})>0.01,"REVIEW","OK")')
 
-        for col in (1, 2, 3, 4, 7, 8, 9, 10):
+        for col in (1, 2, 3, 4, 6, 7, 8, 9, 10):
             ws.cell(row=r, column=col).border = BORDER
 
     _autosize(ws, pd.DataFrame(columns=TB_TIEOUT_HEADERS))
@@ -485,17 +486,16 @@ def build_etb_sheet_formulas(wb: Workbook, client_name: str, current_label: str,
     a preparer's own commentary (e.g. the reason for a flagged P&L
     variance).
 
-    Deliberately has its own, independent Adjustment column rather than
-    mirroring TB Tie-Out's - data_sheets.write_data_sheets sums both into
-    DATA_TB_Current's balance, so a preparer can post a correcting entry
-    from whichever sheet they're actually working on (or from both, for
-    two separate entries against the same account) without the two ever
-    needing to agree.
+    Adjustment is the same formula TB Tie-Out shows for this code - that
+    account's net Debit-Credit across the Journals sheet - not a separate
+    number of its own: one place to post a correcting entry (Journals),
+    read wherever it's useful, rather than two cells that could disagree.
 
     Bank-type accounts and (if no Nominal Activity was uploaded at all)
     every account skip the Movement/Derived Closing/Diff/Flag columns -
-    same "n/a" reasoning as tb_tieout._tieout_table - but still get a
-    working Adjustment cell and Comparative Closing/Opening figures."""
+    same "n/a" reasoning as tb_tieout._tieout_table - but still show
+    whatever's been posted to Journals for that code, plus the
+    Comparative Closing/Opening figures."""
     sheet_name = f"{ref} ETB"[:31]
     ws = wb.create_sheet(sheet_name)
     row = _write_title(ws, client_name, current_label, "EXTENDED TRIAL BALANCE", ref, header_cells=header_cells)
@@ -512,11 +512,11 @@ def build_etb_sheet_formulas(wb: Workbook, client_name: str, current_label: str,
         f"Comparative Closing is the account's balance per the comparative Trial Balance ({comparative_label}) - "
         "shown for reference only, since that year is already filed and finalised and isn't re-verified here. "
         "Opening is 0 for a P&L account (an income statement account doesn't carry a balance forward) and "
-        "otherwise the same figure as Comparative Closing. Type a figure in this sheet's own Adjustment column to "
-        "post a correcting entry: it adds into this account's balance the same way TB Tie-Out's Adjustment column "
-        "does (independently - the two aren't required to agree, and both flow through to the TB Lead Schedule, "
-        "P&L, Balance Sheet, Control Accounts, Fixed Asset Register and Corporation Tax computation automatically). "
-        "Notes is for your own commentary - e.g. the reason code for a flagged P&L variance."
+        "otherwise the same figure as Comparative Closing. Adjustment is calculated automatically from the "
+        "Journals sheet, the same as on the TB Tie-Out sheet - post a narrated adjusting journal there, by account "
+        "code, and it flows through here and to the TB Lead Schedule, P&L, Balance Sheet, Control Accounts, Fixed "
+        "Asset Register and Corporation Tax computation automatically. Notes is for your own commentary - e.g. the "
+        "reason code for a flagged P&L variance."
     ))
     note_cell.font = Font(italic=True, color="595959")
     note_cell.alignment = Alignment(wrap_text=True)
@@ -562,10 +562,8 @@ def build_etb_sheet_formulas(wb: Workbook, client_name: str, current_label: str,
 
         ws.cell(row=r, column=9, value=f"={debit_ref}-{credit_ref}").number_format = CURRENCY_FMT
 
-        adjustment_cell = ws.cell(row=r, column=7)
-        adjustment_cell.fill = ADJUSTMENT_FILL
-        adjustment_cell.border = BORDER
-        adjustment_cell.number_format = CURRENCY_FMT
+        adjustment_formula = refs.journals.net_effect_formula(code) if refs.journals is not None else "=0"
+        ws.cell(row=r, column=7, value=adjustment_formula).number_format = CURRENCY_FMT
 
         if is_bank or not has_nominal_upload:
             for col in (6, 8, 10, 11):
@@ -583,12 +581,86 @@ def build_etb_sheet_formulas(wb: Workbook, client_name: str, current_label: str,
         notes_cell = ws.cell(row=r, column=12)
         notes_cell.alignment = Alignment(wrap_text=True)
 
-        for col in (1, 2, 3, 4, 5, 8, 9, 10, 11, 12):
+        for col in (1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12):
             ws.cell(row=r, column=col).border = BORDER
 
     _autosize(ws, pd.DataFrame(columns=ETB_HEADERS))
     ws.column_dimensions["L"].width = 40  # Notes needs more room than autosize gives an empty column
     ws.freeze_panes = f"A{data_start_row}"
+    return ws
+
+
+JOURNALS_HEADERS = ["No.", "Narration", "Account Code", "Debit", "Credit"]
+JOURNALS_DATA_ROWS = 200  # generous headroom for typed entries - unused rows just don't match any SUMPRODUCT lookup
+
+
+def build_journals_sheet_formulas(wb: Workbook, client_name: str, current_label: str, ref: str,
+                                   first_row: int, last_row: int,
+                                   header_cells: dict | None = None) -> Worksheet:
+    """A blank, preparer-typed adjusting-journal register - the single
+    place a correcting entry is actually posted, replacing what used to be
+    a flat unnamed Adjustment cell per account with nowhere to record why.
+    One row per account a journal touches (share the same No. across a
+    multi-line entry's rows); TB Tie-Out, the ETB sheet and
+    DATA_TB_Current's own balance column (see data_sheets.JournalsRef) all
+    sum this sheet's Debit/Credit for a given Account Code, so there is
+    exactly one place to type an adjustment and everything else reads it.
+
+    first_row/last_row must match what the caller already told
+    data_sheets.write_data_sheets (its journals_ref) before this sheet was
+    built, so every formula elsewhere that reads this range lines up with
+    where the data actually starts - see excel_builder._generate_schedules."""
+    sheet_name = f"{ref} Journals"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, current_label, "JOURNALS", ref, header_cells=header_cells)
+
+    note_cell = ws.cell(row=row, column=1, value=(
+        "Type each adjusting journal here, one row per account it touches - e.g. two rows sharing the same No. for "
+        "a simple debit/credit pair, or several rows for a multi-line entry. Debit and Credit, by Account Code, "
+        "feed straight into that account's balance everywhere in this workbook (TB Tie-Out, the ETB sheet, TB Lead "
+        "Schedule, P&L, Balance Sheet, Control Accounts, Fixed Asset Register, Corporation Tax computation) - the "
+        "equivalent journal still needs posting in Xero afterwards, and the working paper regenerated, for every "
+        "other check (which runs once, in Python, when the file is built) to reflect it."
+    ))
+    note_cell.font = Font(italic=True, color="595959")
+    note_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(JOURNALS_HEADERS))
+    ws.row_dimensions[row].height = 45
+    row += 1
+
+    header_row = row
+    for j, h in enumerate(JOURNALS_HEADERS):
+        ws.cell(row=header_row, column=1 + j, value=h)
+    _style_header_row(ws, header_row, len(JOURNALS_HEADERS))
+
+    assert header_row + 1 == first_row, "Journals sheet layout drifted from what write_data_sheets was told"
+
+    for r in range(first_row, last_row + 1):
+        for col in range(1, len(JOURNALS_HEADERS) + 1):
+            cell = ws.cell(row=r, column=col)
+            cell.fill = INPUT_FILL
+            cell.border = BORDER
+            if col in (4, 5):
+                cell.number_format = CURRENCY_FMT
+
+    total_row = last_row + 1
+    ws.cell(row=total_row, column=2, value="Total").font = Font(bold=True)
+    total_debit_cell = ws.cell(row=total_row, column=4, value=f"=SUM(D{first_row}:D{last_row})")
+    total_debit_cell.number_format = CURRENCY_FMT
+    total_debit_cell.font = Font(bold=True)
+    total_credit_cell = ws.cell(row=total_row, column=5, value=f"=SUM(E{first_row}:E{last_row})")
+    total_credit_cell.number_format = CURRENCY_FMT
+    total_credit_cell.font = Font(bold=True)
+
+    check_row = total_row + 1
+    ws.cell(row=check_row, column=2, value="Every journal should balance:").font = Font(italic=True, color="595959")
+    ws.cell(row=check_row, column=4, value=(
+        f'=IF(ABS(D{total_row}-E{total_row})>0.01,"OUT OF BALANCE - CHECK ENTRIES","BALANCED")'
+    ))
+
+    _autosize(ws, pd.DataFrame(columns=JOURNALS_HEADERS))
+    ws.column_dimensions["B"].width = 45
+    ws.freeze_panes = f"A{first_row}"
     return ws
 
 
@@ -1961,6 +2033,11 @@ def _generate_schedules(
     if etb_on:
         entries.append({"ref": etb_ref, "title": "Extended Trial Balance (ETB)", "status": tieout_result.status, "message": tieout_result.message})
 
+    journals_on = enabled("journals") and data.get("tb_current") is not None and not data["tb_current"].empty
+    journals_ref_number = ref.next() if journals_on else None
+    if journals_on:
+        entries.append({"ref": journals_ref_number, "title": "Journals", "status": "n/a", "message": "Post narrated adjusting journals here, by account code - see the sheet's own note"})
+
     pl_statement = build_pl_statement(data.get("pl_current"))
     bs_statement = build_bs_statement(data.get("bs_current"), pl_statement.net_profit, materiality)
 
@@ -2050,33 +2127,27 @@ def _generate_schedules(
 
     build_index_sheet(index_ws, client_name, current_label, comparative_label, entries)
 
-    # The TB Tie-Out sheet's Adjustment column doesn't exist yet (it's
-    # built further down, in the results loop below) - but its ref number
-    # is already assigned above (recon_refs), and _title_end_row can work
+    # The Journals sheet doesn't exist yet (it's built further down) - but
+    # its ref number is already assigned above, and _title_end_row can work
     # out exactly which row its data will start on without needing the
-    # sheet itself, so DATA_TB_Current's balance formula can reference it
-    # now, before it's built. See data_sheets.write_data_sheets and
-    # build_tb_tieout_sheet_formulas.
-    tb_tieout_ref = recon_refs.get(TB_TIEOUT_NAME)
-    tb_adjustments_ref = None
-    if tb_tieout_ref is not None:
-        tb_tieout_sheet_name = f"{tb_tieout_ref} {recon_sheet_names[TB_TIEOUT_NAME]}"[:31]
-        # build_tb_tieout_sheet_formulas' own row layout below _write_title's
-        # return row T: status line (T), note line (T+1), header line (T+2),
-        # data starting at T+3 - keep these in sync if that layout changes.
-        tb_adjustments_ref = (tb_tieout_sheet_name, _title_end_row(header_cells) + 3)
-
-    etb_adjustments_ref = None
-    if etb_on:
-        etb_sheet_name = f"{etb_ref} ETB"[:31]
-        # build_etb_sheet_formulas has the same status/note/header layout
-        # as build_tb_tieout_sheet_formulas above - data starts at T+3.
-        etb_adjustments_ref = (etb_sheet_name, _title_end_row(header_cells) + 3)
+    # sheet itself, so DATA_TB_Current's balance formula (and TB Tie-Out's/
+    # the ETB sheet's own Adjustment column) can reference its range now,
+    # before it's built. See data_sheets.write_data_sheets and
+    # build_journals_sheet_formulas.
+    journals_ref = None
+    if journals_on:
+        journals_sheet_name = f"{journals_ref_number} Journals"[:31]
+        # build_journals_sheet_formulas' own layout below _write_title's
+        # return row T: note line (T), header line (T+1), data starting at
+        # T+2 - keep these in sync if that layout changes.
+        journals_first_row = _title_end_row(header_cells) + 2
+        journals_last_row = journals_first_row + JOURNALS_DATA_ROWS - 1
+        journals_ref = (journals_sheet_name, journals_first_row, journals_last_row)
 
     # raw-data sheets every formula-linked schedule below references, so the
     # workbook recalculates like a manually-built working paper rather than
     # holding Python-computed literals - see data_sheets.py / xlformulas.py
-    refs = write_data_sheets(wb, data, tb_adjustments_ref=tb_adjustments_ref, etb_adjustments_ref=etb_adjustments_ref)
+    refs = write_data_sheets(wb, data, journals_ref=journals_ref)
 
     variance_result = next((r for r in results if r.name == "Current vs comparative variance analysis"), None)
     if tb_on:
@@ -2087,6 +2158,9 @@ def _generate_schedules(
 
     if etb_on and refs.tb_current is not None:
         place("etb", lambda: build_etb_sheet_formulas(wb, client_name, current_label, comparative_label, etb_ref, data["tb_current"], tieout_result, refs, header_cells=header_cells))
+
+    if journals_on:
+        place("journals", lambda: build_journals_sheet_formulas(wb, client_name, current_label, journals_ref_number, journals_first_row, journals_last_row, header_cells=header_cells))
 
     pl_sheet_name, pl_net_profit_cell = (None, None)
     if pl_on:

@@ -17,19 +17,47 @@ from openpyxl.styles import Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.worksheet import Worksheet
 
-from app.tb_tieout import ADJUSTMENT_COLUMN_LETTER
-from app.xlformulas import cell_ref, range_ref, sumifs_exact, quote
+from app.xlformulas import range_ref, sumifs_exact, quote
 
 HEADER_FILL = PatternFill("solid", fgColor="D9E2F3")
 HEADER_FONT = Font(bold=True)
 
-# The ETB sheet (excel_builder.build_etb_sheet_formulas) has its own,
-# independent Adjustment column - deliberately separate from the TB
-# Tie-Out sheet's (tb_tieout.ADJUSTMENT_COLUMN_LETTER), rather than one
-# mirroring the other, so a preparer can post a correcting entry from
-# either sheet (or both - they add together, they're never required to
-# agree) depending on which working paper they're actually looking at.
-ETB_ADJUSTMENT_COLUMN_LETTER = "G"
+# Fixed column layout of the Journals sheet (excel_builder.build_journals_sheet_formulas)
+# - a preparer types a narrated adjusting journal there, one row per account
+# it touches (No. / Narration / Account Code / Debit / Credit), and every
+# account's DATA_TB_Current balance below sums its own code's net effect
+# straight off this one sheet - the single place an adjustment is entered,
+# read by whichever schedule needs it (TB Tie-Out and the ETB sheet both
+# show the same derived figure, they don't each hold their own separate
+# number).
+JOURNALS_CODE_COLUMN_LETTER = "C"
+JOURNALS_DEBIT_COLUMN_LETTER = "D"
+JOURNALS_CREDIT_COLUMN_LETTER = "E"
+
+
+@dataclass
+class JournalsRef:
+    sheet_name: str
+    first_row: int
+    last_row: int
+
+    def code_range(self) -> str:
+        return range_ref(self.sheet_name, JOURNALS_CODE_COLUMN_LETTER, self.first_row, self.last_row)
+
+    def debit_range(self) -> str:
+        return range_ref(self.sheet_name, JOURNALS_DEBIT_COLUMN_LETTER, self.first_row, self.last_row)
+
+    def credit_range(self) -> str:
+        return range_ref(self.sheet_name, JOURNALS_CREDIT_COLUMN_LETTER, self.first_row, self.last_row)
+
+    def net_effect_formula(self, code: str) -> str:
+        """This account code's net Debit-Credit across every journal row posted
+        against it - the same formula DATA_TB_Current's balance column uses,
+        so a sheet showing it as its own "Adjustment" figure (TB Tie-Out, ETB)
+        is guaranteed to agree with what actually moved the balance."""
+        debit_sum = sumifs_exact(self.debit_range(), (self.code_range(), quote(code)))
+        credit_sum = sumifs_exact(self.credit_range(), (self.code_range(), quote(code)))
+        return f"={debit_sum[1:]}-{credit_sum[1:]}"
 
 
 @dataclass
@@ -57,6 +85,7 @@ class DataRefs:
     pl_current: SheetRefs | None = None
     bs_current: SheetRefs | None = None
     fixed_asset_register: SheetRefs | None = None
+    journals: JournalsRef | None = None
 
 
 def _cell_value(val):
@@ -71,16 +100,13 @@ def _cell_value(val):
     return val
 
 
-def _write_sheet(wb: Workbook, sheet_name: str, df: pd.DataFrame, balance_adjustment_cells: list | None = None) -> SheetRefs:
-    """balance_adjustment_cells, when given, is a list of functions
-    (0-indexed row position -> a cell reference string) - the "balance"
-    column is then written as a live formula (raw debit-credit, plus every
-    one of those cells added on) instead of a literal, so each live-linked
-    Adjustment column that feeds this sheet (TB Tie-Out's, the ETB
-    sheet's) can add its own correcting entry independently - a preparer
-    can use either, or both, for the same account, and they simply sum
-    rather than needing to agree. debit/credit stay untouched literals
-    either way."""
+def _write_sheet(wb: Workbook, sheet_name: str, df: pd.DataFrame, journals_ref: JournalsRef | None = None) -> SheetRefs:
+    """journals_ref, when given, points at the Journals sheet's data range
+    (see JournalsRef) - the "balance" column is then written as a live
+    formula (raw debit-credit, plus that account code's own net journal
+    effect) instead of a literal, so a narrated adjusting journal posted
+    there flows straight into every schedule that reads this sheet's
+    balance. debit/credit stay untouched literals either way."""
     ws: Worksheet = wb.create_sheet(sheet_name)
     columns = list(df.columns)
     col_letters = {col: get_column_letter(i + 1) for i, col in enumerate(columns)}
@@ -91,12 +117,12 @@ def _write_sheet(wb: Workbook, sheet_name: str, df: pd.DataFrame, balance_adjust
         cell.fill = HEADER_FILL
 
     r = 2
-    for row_i, (_, row) in enumerate(df.iterrows()):
+    for _, row in df.iterrows():
         for i, col in enumerate(columns):
-            if col == "balance" and balance_adjustment_cells:
+            if col == "balance" and journals_ref is not None:
                 debit_col, credit_col = col_letters["debit"], col_letters["credit"]
-                adjustment_terms = "".join(f"+{fn(row_i)}" for fn in balance_adjustment_cells)
-                ws.cell(row=r, column=i + 1, value=f"={debit_col}{r}-{credit_col}{r}{adjustment_terms}")
+                journal_effect = journals_ref.net_effect_formula(str(row["account_code"]))
+                ws.cell(row=r, column=i + 1, value=f"={debit_col}{r}-{credit_col}{r}+{journal_effect[1:]}")
             else:
                 ws.cell(row=r, column=i + 1, value=_cell_value(row[col]))
         r += 1
@@ -159,36 +185,28 @@ def with_row_ids(nominal_activity: pd.DataFrame) -> pd.DataFrame:
 
 def write_data_sheets(
     wb: Workbook, data: dict,
-    tb_adjustments_ref: tuple[str, int] | None = None,
-    etb_adjustments_ref: tuple[str, int] | None = None,
+    journals_ref: tuple[str, int, int] | None = None,
 ) -> DataRefs:
-    """tb_adjustments_ref/etb_adjustments_ref, when given, are each a
-    (sheet_name, first_data_row) pair for that sheet's own Adjustment
-    column (see tb_tieout.py's ADJUSTMENT_COLUMN_LETTER and this module's
-    ETB_ADJUSTMENT_COLUMN_LETTER) - computed by the caller *before* that
-    sheet is actually built (excel_builder._title_end_row lets it know the
-    row without needing the sheet to exist yet), so DATA_TB_Current's own
-    balance column can carry a live formula back to both of them at once:
-    every downstream schedule that reads DATA_TB_Current's balance
-    (directly, or via the P&L/B/S lookup below) sees the sum of whatever a
-    preparer types into either one, with no changes needed in any of those
-    schedules themselves. debit/credit stay untouched raw uploaded figures
-    either way - only balance carries the adjustment(s) - so the TB
+    """journals_ref, when given, is (sheet_name, first_data_row, last_data_row)
+    for the Journals sheet's typed-entry range (see JournalsRef) - computed
+    by the caller *before* that sheet is actually built (excel_builder's
+    _title_end_row lets it know the row without needing the sheet to exist
+    yet), so DATA_TB_Current's own balance column can carry a live formula
+    back to it: every downstream schedule that reads DATA_TB_Current's
+    balance (directly, or via the P&L/B/S lookup below) sees whatever
+    narrated journal a preparer posts there, with no changes needed in any
+    of those schedules themselves. debit/credit stay untouched raw uploaded
+    figures either way - only balance carries the adjustment - so the TB
     self-balance check and each sheet's own "Reported Closing" column
     (which recomputes debit-credit directly, deliberately not through
     balance) keep showing the original, unadjusted upload for comparison."""
     refs = DataRefs()
+    if journals_ref is not None:
+        refs.journals = JournalsRef(*journals_ref)
 
     if data.get("tb_current") is not None and not data["tb_current"].empty:
         df = data["tb_current"][["account_code", "account_name", "account_type", "debit", "credit", "balance"]]
-        adjustment_cell_fns = []
-        if tb_adjustments_ref is not None:
-            adj_sheet, adj_first_row = tb_adjustments_ref
-            adjustment_cell_fns.append(lambda i, s=adj_sheet, r=adj_first_row: cell_ref(s, f"{ADJUSTMENT_COLUMN_LETTER}{r + i}"))
-        if etb_adjustments_ref is not None:
-            etb_sheet, etb_first_row = etb_adjustments_ref
-            adjustment_cell_fns.append(lambda i, s=etb_sheet, r=etb_first_row: cell_ref(s, f"{ETB_ADJUSTMENT_COLUMN_LETTER}{r + i}"))
-        refs.tb_current = _write_sheet(wb, "DATA_TB_Current", df, balance_adjustment_cells=adjustment_cell_fns or None)
+        refs.tb_current = _write_sheet(wb, "DATA_TB_Current", df, journals_ref=refs.journals)
 
     if data.get("tb_comparative") is not None and not data["tb_comparative"].empty:
         df = data["tb_comparative"][["account_code", "account_name", "account_type", "debit", "credit", "balance"]]
