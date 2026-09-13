@@ -40,6 +40,7 @@ DEFAULT_TEMPLATE_CONFIG = {
     "schedules": {
         "index": {"enabled": True, "insert_after_sheet": None},  # None = ahead of the template's own sheets
         "tb_lead_schedule": {"enabled": True, "insert_after_sheet": None},
+        "etb": {"enabled": True, "insert_after_sheet": None},
         "tb_balance_check": {"enabled": True, "insert_after_sheet": None},
         "profit_and_loss": {"enabled": True, "insert_after_sheet": None},
         "balance_sheet": {"enabled": True, "insert_after_sheet": None},

@@ -17,7 +17,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 
 from app.control_accounts import ControlAccountResult
 from app.corporation_tax import CTComputation
-from app.data_sheets import DataRefs, with_row_ids, write_data_sheets
+from app.data_sheets import ETB_ADJUSTMENT_COLUMN_LETTER, DataRefs, with_row_ids, write_data_sheets
 from app.financial_statements import (
     _BS_CURRENT_ASSETS,
     _BS_CURRENT_LIABILITIES,
@@ -462,6 +462,132 @@ def build_tb_tieout_sheet_formulas(wb: Workbook, client_name: str, current_label
             ws.cell(row=r, column=col).border = BORDER
 
     _autosize(ws, pd.DataFrame(columns=TB_TIEOUT_HEADERS))
+    ws.freeze_panes = f"A{data_start_row}"
+    return ws
+
+
+ETB_HEADERS = ["Account Code", "Account Name", "Account Type",
+               "Comparative Closing (per comparative TB)", "Opening (per comparative TB)",
+               "Movement (current year)", "Adjustment", "Derived Closing",
+               "Reported Closing (per current TB)", "Diff", "Flag", "Notes"]
+
+
+def build_etb_sheet_formulas(wb: Workbook, client_name: str, current_label: str, comparative_label: str, ref: str,
+                              tb_current: pd.DataFrame, tieout_result: ReconResult, refs: DataRefs,
+                              header_cells: dict | None = None) -> Worksheet:
+    """A single consolidated Extended Trial Balance, in addition to (not
+    instead of) the TB Tie-Out sheet: one row per current-year account,
+    same order as DATA_TB_Current, with the comparative year's closing
+    balance shown for reference (it's already filed and finalised, so -
+    same as everywhere else in this workbook - it isn't re-verified, just
+    displayed), then the same opening/movement/adjustment/derived-closing
+    identity TB Tie-Out already checks, plus a free-text Notes column for
+    a preparer's own commentary (e.g. the reason for a flagged P&L
+    variance).
+
+    Deliberately has its own, independent Adjustment column rather than
+    mirroring TB Tie-Out's - data_sheets.write_data_sheets sums both into
+    DATA_TB_Current's balance, so a preparer can post a correcting entry
+    from whichever sheet they're actually working on (or from both, for
+    two separate entries against the same account) without the two ever
+    needing to agree.
+
+    Bank-type accounts and (if no Nominal Activity was uploaded at all)
+    every account skip the Movement/Derived Closing/Diff/Flag columns -
+    same "n/a" reasoning as tb_tieout._tieout_table - but still get a
+    working Adjustment cell and Comparative Closing/Opening figures."""
+    sheet_name = f"{ref} ETB"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, current_label, "EXTENDED TRIAL BALANCE", ref, header_cells=header_cells)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {tieout_result.status.upper()} - {tieout_result.message}")
+    status_cell.font = _status_font(tieout_result.status)
+    status_cell.fill = _status_fill(tieout_result.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(ETB_HEADERS))
+    ws.row_dimensions[row].height = 45
+    row += 1
+
+    note_cell = ws.cell(row=row, column=1, value=(
+        f"Comparative Closing is the account's balance per the comparative Trial Balance ({comparative_label}) - "
+        "shown for reference only, since that year is already filed and finalised and isn't re-verified here. "
+        "Opening is 0 for a P&L account (an income statement account doesn't carry a balance forward) and "
+        "otherwise the same figure as Comparative Closing. Type a figure in this sheet's own Adjustment column to "
+        "post a correcting entry: it adds into this account's balance the same way TB Tie-Out's Adjustment column "
+        "does (independently - the two aren't required to agree, and both flow through to the TB Lead Schedule, "
+        "P&L, Balance Sheet, Control Accounts, Fixed Asset Register and Corporation Tax computation automatically). "
+        "Notes is for your own commentary - e.g. the reason code for a flagged P&L variance."
+    ))
+    note_cell.font = Font(italic=True, color="595959")
+    note_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(ETB_HEADERS))
+    ws.row_dimensions[row].height = 45
+    row += 1
+
+    header_row = row
+    for j, h in enumerate(ETB_HEADERS):
+        ws.cell(row=header_row, column=1 + j, value=h)
+    _style_header_row(ws, header_row, len(ETB_HEADERS))
+    data_start_row = header_row + 1
+
+    has_nominal_upload = refs.nominal_current is not None
+
+    for i in range(len(tb_current)):
+        r = data_start_row + i
+        r_tb = refs.tb_current.first_row + i
+        code = str(tb_current.iloc[i]["account_code"])
+        account_type = str(tb_current.iloc[i]["account_type"]).strip()
+        is_pl_account = account_type.lower() in PL_ACCOUNT_TYPES
+        is_bank = account_type.lower() == "bank"
+
+        tb_col = refs.tb_current.columns
+        tb_sheet = refs.tb_current.sheet_name
+        code_ref = cell_ref(tb_sheet, f"{tb_col['account_code']}{r_tb}")
+        name_ref = cell_ref(tb_sheet, f"{tb_col['account_name']}{r_tb}")
+        type_ref = cell_ref(tb_sheet, f"{tb_col['account_type']}{r_tb}")
+        debit_ref = cell_ref(tb_sheet, f"{tb_col['debit']}{r_tb}")
+        credit_ref = cell_ref(tb_sheet, f"{tb_col['credit']}{r_tb}")
+        ws.cell(row=r, column=1, value=f"={code_ref}").border = BORDER
+        ws.cell(row=r, column=2, value=f"={name_ref}").border = BORDER
+        ws.cell(row=r, column=3, value=f"={type_ref}").border = BORDER
+
+        if refs.tb_comparative is not None:
+            comparative_closing_formula = sumifs_exact(refs.tb_comparative.col_range("balance"), (refs.tb_comparative.col_range("account_code"), quote(code)))
+        else:
+            comparative_closing_formula = "=0"
+        ws.cell(row=r, column=4, value=comparative_closing_formula).number_format = CURRENCY_FMT
+
+        opening_formula = "=0" if is_pl_account else f"=D{r}"
+        ws.cell(row=r, column=5, value=opening_formula).number_format = CURRENCY_FMT
+
+        ws.cell(row=r, column=9, value=f"={debit_ref}-{credit_ref}").number_format = CURRENCY_FMT
+
+        adjustment_cell = ws.cell(row=r, column=7)
+        adjustment_cell.fill = ADJUSTMENT_FILL
+        adjustment_cell.border = BORDER
+        adjustment_cell.number_format = CURRENCY_FMT
+
+        if is_bank or not has_nominal_upload:
+            for col in (6, 8, 10, 11):
+                ws.cell(row=r, column=col, value="n/a").border = BORDER
+        else:
+            nominal_code_range = refs.nominal_current.col_range("account_code")
+            debit_sum = sumifs_exact(refs.nominal_current.col_range("debit"), (nominal_code_range, quote(code)))
+            credit_sum = sumifs_exact(refs.nominal_current.col_range("credit"), (nominal_code_range, quote(code)))
+            movement_formula = f"={debit_sum[1:]}-{credit_sum[1:]}"
+            ws.cell(row=r, column=6, value=movement_formula).number_format = CURRENCY_FMT
+            ws.cell(row=r, column=8, value=f"=E{r}+F{r}+G{r}").number_format = CURRENCY_FMT
+            ws.cell(row=r, column=10, value=f"=H{r}-I{r}").number_format = CURRENCY_FMT
+            ws.cell(row=r, column=11, value=f'=IF(ABS(J{r})>0.01,"REVIEW","OK")')
+
+        notes_cell = ws.cell(row=r, column=12)
+        notes_cell.alignment = Alignment(wrap_text=True)
+
+        for col in (1, 2, 3, 4, 5, 8, 9, 10, 11, 12):
+            ws.cell(row=r, column=col).border = BORDER
+
+    _autosize(ws, pd.DataFrame(columns=ETB_HEADERS))
+    ws.column_dimensions["L"].width = 40  # Notes needs more room than autosize gives an empty column
     ws.freeze_panes = f"A{data_start_row}"
     return ws
 
@@ -1829,6 +1955,12 @@ def _generate_schedules(
     if tb_on:
         entries.append({"ref": tb_ref, "title": "TB Lead Schedule", "status": "ok" if data.get("tb_current") is not None and not data["tb_current"].empty else "n/a", "message": "Current vs comparative, variance flagged"})
 
+    tieout_result = next((r for r in results if r.name == TB_TIEOUT_NAME), None)
+    etb_on = enabled("etb") and tieout_result is not None and tieout_result.status != "n/a"
+    etb_ref = ref.next() if etb_on else None
+    if etb_on:
+        entries.append({"ref": etb_ref, "title": "Extended Trial Balance (ETB)", "status": tieout_result.status, "message": tieout_result.message})
+
     pl_statement = build_pl_statement(data.get("pl_current"))
     bs_statement = build_bs_statement(data.get("bs_current"), pl_statement.net_profit, materiality)
 
@@ -1934,10 +2066,17 @@ def _generate_schedules(
         # data starting at T+3 - keep these in sync if that layout changes.
         tb_adjustments_ref = (tb_tieout_sheet_name, _title_end_row(header_cells) + 3)
 
+    etb_adjustments_ref = None
+    if etb_on:
+        etb_sheet_name = f"{etb_ref} ETB"[:31]
+        # build_etb_sheet_formulas has the same status/note/header layout
+        # as build_tb_tieout_sheet_formulas above - data starts at T+3.
+        etb_adjustments_ref = (etb_sheet_name, _title_end_row(header_cells) + 3)
+
     # raw-data sheets every formula-linked schedule below references, so the
     # workbook recalculates like a manually-built working paper rather than
     # holding Python-computed literals - see data_sheets.py / xlformulas.py
-    refs = write_data_sheets(wb, data, tb_adjustments_ref=tb_adjustments_ref)
+    refs = write_data_sheets(wb, data, tb_adjustments_ref=tb_adjustments_ref, etb_adjustments_ref=etb_adjustments_ref)
 
     variance_result = next((r for r in results if r.name == "Current vs comparative variance analysis"), None)
     if tb_on:
@@ -1945,6 +2084,9 @@ def _generate_schedules(
             place("tb_lead_schedule", lambda: build_tb_lead_schedule_formulas(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame(), refs, header_cells=header_cells, materiality=materiality, variance_pct_threshold=variance_pct_threshold))
         else:
             place("tb_lead_schedule", lambda: build_tb_lead_schedule(wb, client_name, current_label, tb_ref, variance_result.detail if variance_result else pd.DataFrame(), header_cells=header_cells))
+
+    if etb_on and refs.tb_current is not None:
+        place("etb", lambda: build_etb_sheet_formulas(wb, client_name, current_label, comparative_label, etb_ref, data["tb_current"], tieout_result, refs, header_cells=header_cells))
 
     pl_sheet_name, pl_net_profit_cell = (None, None)
     if pl_on:

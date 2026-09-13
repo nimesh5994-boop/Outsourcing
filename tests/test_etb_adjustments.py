@@ -69,6 +69,7 @@ def test_adjustment_flows_through_to_data_tb_current_and_the_pl_statement(tmp_pa
     out = tmp_path / "wp.xlsx"
     wb = _build_and_save(canonical_data, out)
     tieout_sheet_name = next(s for s in wb.sheetnames if "TB Tie-Out" in s)
+    pl_sheet_name = next(s for s in wb.sheetnames if s.endswith("Profit and Loss"))
     ws = wb[tieout_sheet_name]
     header_row = next(r for r in range(1, 10) if ws.cell(row=r, column=6).value == "Adjustment")
     tieout_data_start = header_row + 1
@@ -84,7 +85,7 @@ def test_adjustment_flows_through_to_data_tb_current_and_the_pl_statement(tmp_pa
 
     sol_before = _evaluate(out)
     before_dtc = _cell(sol_before, "wp.xlsx", "DATA_TB_Current", f"F{dtc_row}")
-    before_net_profit = _cell(sol_before, "wp.xlsx", "2 Profit and Loss", "B12")
+    before_net_profit = _cell(sol_before, "wp.xlsx", pl_sheet_name, "B12")
 
     ADJUSTMENT = 250.0
     ws.cell(row=tieout_row, column=6, value=ADJUSTMENT)
@@ -92,7 +93,7 @@ def test_adjustment_flows_through_to_data_tb_current_and_the_pl_statement(tmp_pa
 
     sol_after = _evaluate(out)
     after_dtc = _cell(sol_after, "wp.xlsx", "DATA_TB_Current", f"F{dtc_row}")
-    after_net_profit = _cell(sol_after, "wp.xlsx", "2 Profit and Loss", "B12")
+    after_net_profit = _cell(sol_after, "wp.xlsx", pl_sheet_name, "B12")
 
     assert after_dtc == pytest.approx(before_dtc + ADJUSTMENT)
     # DATA_PL negates DATA_TB_Current's balance (see data_sheets._write_derived_amount_sheet),
