@@ -121,6 +121,36 @@ def test_loan_facility_detects_bbl_and_hp_with_reminders():
     assert set(result.detail["Facility type"]) == {"Bounce Back Loan", "Hire Purchase"}
     bbl_row = result.detail[result.detail["Facility type"] == "Bounce Back Loan"].iloc[0]
     assert "12 months" in bbl_row["Reminder"]
+    # no nominal activity supplied - can't say whether it ties, but the
+    # rollforward block still shows b/fwd and c/fwd per the TB
+    assert bbl_row["Rollforward ties to TB?"] == "No nominal activity detail supplied"
+    assert "No nominal activity detail available" in result.extra_detail["Reference"].values
+
+
+def test_loan_facility_rollforward_ties_when_bfwd_plus_movement_matches_tb():
+    tb_current = pd.DataFrame([_tb_row("2250", "BANK LOAN", "Non-current Liability", 0, 18000)])
+    tb_comparative = pd.DataFrame([_tb_row("2250", "BANK LOAN", "Non-current Liability", 0, 20000)])
+    nominal = pd.DataFrame([_nom_row("2025-06-01", "2250", "BANK LOAN", debit=2000)])  # a repayment
+    result = cc.loan_facility_review(tb_current, tb_comparative, nominal)
+
+    row = result.detail.iloc[0]
+    assert row["Rollforward ties to TB?"] == "Yes"
+    assert "every one ties" in result.message
+    assert not result.extra_detail.empty
+    assert "BANK LOAN (2250)" in result.extra_detail["Item"].iloc[0]
+
+
+def test_loan_facility_rollforward_flags_when_it_does_not_tie():
+    tb_current = pd.DataFrame([_tb_row("2250", "BANK LOAN", "Non-current Liability", 0, 18000)])
+    tb_comparative = pd.DataFrame([_tb_row("2250", "BANK LOAN", "Non-current Liability", 0, 20000)])
+    # a repayment of 500 posted, but the TB moved by 2000 - a 1500 gap
+    nominal = pd.DataFrame([_nom_row("2025-06-01", "2250", "BANK LOAN", debit=500)])
+    result = cc.loan_facility_review(tb_current, tb_comparative, nominal)
+
+    row = result.detail.iloc[0]
+    assert row["Rollforward ties to TB?"] == "No - see rollforward below"
+    assert "don't tie" in result.message
+    assert not result.extra_detail.empty
 
 
 def test_loan_facility_does_not_false_positive_on_unrelated_accounts():

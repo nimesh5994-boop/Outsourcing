@@ -17,6 +17,7 @@ import re
 
 import pandas as pd
 
+from app import control_accounts
 from app.recon import ReconResult
 
 DLA_MONTHLY_WITHDRAWAL_THRESHOLD = 10_000.0
@@ -203,43 +204,72 @@ def petty_cash_running_balance_review(tb_comparative: pd.DataFrame, nominal_acti
     return ReconResult(name, status, msg, pd.DataFrame(rows))
 
 
-def loan_facility_review(tb_current: pd.DataFrame, tb_comparative: pd.DataFrame) -> ReconResult:
+def loan_facility_review(
+    tb_current: pd.DataFrame, tb_comparative: pd.DataFrame, nominal_activity: pd.DataFrame | None = None,
+) -> ReconResult:
     """Presence detection for Bounce Back Loan / Hire Purchase / Bank Loan
-    -style accounts - not a computed check (there's no repayment schedule
-    or agreement in the data this system has), but a reminder of the
-    specific checklist points that apply whenever one of these is found:
-    confirm the agreement/statement, confirm interest is calculated
-    correctly (BBL: no interest in the first 12 months), and split the
-    closing balance between amounts due within/after one year."""
+    -style accounts, plus - wherever nominal activity is available for the
+    account - the same balance b/fwd + movement = balance c/fwd rollforward
+    control_accounts.py already builds for debtors/creditors/DLA (reused
+    here rather than reimplemented), so this check both reminds the
+    preparer of the compliance points AND shows whether the account
+    actually ties to the trial balance, in one place: confirm the
+    agreement/statement, confirm interest is calculated correctly (BBL: no
+    interest in the first 12 months), split the closing balance between
+    amounts due within/after one year - and see the rollforward beneath
+    for whether the b/fwd + this year's drawdowns/repayments actually
+    reach the closing balance the trial balance itself reports."""
     name = "Loan facility review (BBL / Hire Purchase / Bank Loan)"
     if tb_current is None or tb_current.empty:
         return ReconResult(name, "n/a", "No trial balance uploaded.")
 
     rows = []
+    rollforward_blocks = []
+    ties_count = 0
     for label, pattern in _LOAN_PATTERNS.items():
         found = _find_accounts(tb_current, pattern)
         if found.empty:
             continue
         for _, r in found.iterrows():
-            comp_balance = _balance(tb_comparative, [r["account_code"]]) if tb_comparative is not None else 0.0
+            code, account_name = str(r["account_code"]), r["account_name"]
+            comp_balance = _balance(tb_comparative, [code]) if tb_comparative is not None else 0.0
             reminders = {
                 "Bounce Back Loan": "Confirm no interest is charged in the first 12 months, and that repayment/interest afterwards is per the BBL calculator.",
                 "Hire Purchase": "Confirm the agreement was received (interest rate, term, deposit, purchase fee), and split the closing balance between due within one year and due after one year.",
                 "Bank Loan": "Confirm the statement was received for the year, and split the closing balance between due within one year and due after one year.",
                 "CBILS/Bounce Back-style Government-backed Loan": "Confirm the facility terms (interest holiday period, repayment start date) and split the closing balance between due within one year and due after one year.",
             }[label]
+
+            rollforward = control_accounts.build_rollforward(code, account_name, tb_current, tb_comparative, nominal_activity)
+            if rollforward.status == "ok":
+                ties_status = "Yes"
+                ties_count += 1
+            elif rollforward.status == "n/a":
+                ties_status = "No nominal activity detail supplied"
+            else:
+                ties_status = "No - see rollforward below"
+            if not rollforward.schedule.empty:
+                label_row = pd.DataFrame([{"Item": f"--- {account_name} ({code}) ---", "Reference": "", "Debit £": "", "Credit £": ""}])
+                rollforward_blocks.append(pd.concat([label_row, rollforward.schedule], ignore_index=True))
+
             rows.append({
-                "Facility type": label, "Nominal code": r["account_code"], "Account name": r["account_name"],
+                "Facility type": label, "Nominal code": code, "Account name": account_name,
                 "Current year balance": round(float(r["balance"]), 2), "Comparative year balance": round(comp_balance, 2),
-                "Reminder": reminders,
+                "Rollforward ties to TB?": ties_status, "Reminder": reminders,
             })
 
     detail = pd.DataFrame(rows)
     if detail.empty:
         return ReconResult(name, "n/a", "No Bounce Back Loan, Hire Purchase, or Bank Loan account found in the trial balance.")
     status = "review"
-    msg = f"{len(detail)} loan/finance facility account(s) found - see the reminder against each for the specific checklist points to confirm before sign-off."
-    return ReconResult(name, status, msg, detail)
+    not_tying = len(detail) - ties_count
+    tie_note = "every one ties to the trial balance" if not_tying == 0 else f"{not_tying} of them don't tie to the trial balance - see the rollforward"
+    msg = f"{len(detail)} loan/finance facility account(s) found ({tie_note}) - see the reminder against each for the specific checklist points to confirm before sign-off."
+    result = ReconResult(name, status, msg, detail)
+    if rollforward_blocks:
+        result.extra_detail = pd.concat(rollforward_blocks, ignore_index=True)
+        result.extra_detail_label = "Balance b/fwd + movement = balance c/fwd for each facility with nominal activity detail (see the account label at the start of each block)"
+    return result
 
 
 def run_all_compliance_checks(
@@ -249,5 +279,5 @@ def run_all_compliance_checks(
         directors_loan_account_review(tb_current, tb_comparative, nominal_activity),
         dividend_reserves_review(tb_current, tb_comparative, nominal_activity, current_year_profit),
         petty_cash_running_balance_review(tb_comparative, nominal_activity),
-        loan_facility_review(tb_current, tb_comparative),
+        loan_facility_review(tb_current, tb_comparative, nominal_activity),
     ]

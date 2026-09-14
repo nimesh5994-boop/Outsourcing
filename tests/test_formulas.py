@@ -436,6 +436,42 @@ def test_corporation_tax_formulas_match_python_ground_truth(tmp_path, accounting
     assert _cell(sol, out.name, sheet_name, f"B{rows['variance']}") == pytest.approx(ct.variance, abs=0.01)
 
 
+def test_corporation_tax_sheet_appends_a_tax_control_account_rollforward(tmp_path):
+    # the balance-sheet Corporation Tax Payable account, distinguished from
+    # any P&L "Corporation Tax" charge line by account_type - see
+    # corporation_tax.find_tax_provision_account
+    tb_current = pd.DataFrame([
+        {"account_code": "9500", "account_name": "Corporation Tax Payable", "account_type": "Current Liability", "debit": 0.0, "credit": 12000.0, "balance": -12000.0},
+        {"account_code": "9000", "account_name": "Corporation Tax Charge", "account_type": "Expense", "debit": 12000.0, "credit": 0.0, "balance": 12000.0},
+    ])
+    tb_comparative = pd.DataFrame([
+        {"account_code": "9500", "account_name": "Corporation Tax Payable", "account_type": "Current Liability", "debit": 0.0, "credit": 9000.0, "balance": -9000.0},
+    ])
+    nominal_current = pd.DataFrame([
+        # last year's provision paid off, this year's charge accrued - nets to the 12000 the TB reports
+        {"date": pd.Timestamp("2025-07-01"), "account_code": "9500", "account_name": "Corporation Tax Payable",
+         "reference": "", "description": "Payment of prior year CT", "contact": "HMRC", "debit": 9000.0, "credit": 0.0},
+        {"date": pd.Timestamp("2025-11-30"), "account_code": "9500", "account_name": "Corporation Tax Payable",
+         "reference": "", "description": "Current year CT accrual", "contact": "", "debit": 0.0, "credit": 12000.0},
+    ])
+
+    ct = ct_mod.compute(accounting_profit=60_000, booked_tax_charge=12_000)
+    wb = Workbook()
+    sheet_name = build_corporation_tax_sheet_formulas(
+        wb, "Brightwell Landscaping Supplies Limited", "Year ended 31 December 2025", "1", ct,
+        tb_current=tb_current, tb_comparative=tb_comparative, nominal_current=nominal_current,
+    )
+    ws = wb[sheet_name]
+
+    label_row = next(r for r in range(1, 40) if str(ws.cell(row=r, column=1).value).startswith("TAX CONTROL ACCOUNT"))
+    assert "Corporation Tax Payable" in ws.cell(row=label_row, column=1).value
+    status_cell = ws.cell(row=label_row + 1, column=1).value
+    assert status_cell.startswith("Status: OK")  # b/fwd 9000 + (12000 - 9000 net movement) = c/fwd 12000, ties
+    header_row = label_row + 3
+    assert ws.cell(row=header_row, column=1).value == "Item"
+    assert ws.cell(row=header_row + 1, column=1).value == "BALANCE B/FWD"
+
+
 def test_nominal_matrix_formulas_match_python_ground_truth(tmp_path, canonical_data):
     tb_current, nominal_current = canonical_data["tb_current"], canonical_data["nominal_current"]
     result = nm.build_matrix("8010", "TRADE CREDITORS", nominal_current)

@@ -139,6 +139,12 @@ def _opening_balance_disagreements(tb_current_own_comparative: pd.DataFrame | No
             "Per current TB's own comparative column": round(embedded_value, 2),
             "Per separately-uploaded comparative TB": round(uploaded_value, 2),
             "Diff": diff,
+            # Genuinely blank - not computed - so a preparer's explanation
+            # (restated comparative, wrong file, a genuine post-close
+            # adjustment) is recorded once and carries forward with the
+            # workbook, rather than needing re-investigating from scratch
+            # every year this same exception shows up.
+            "Comment": "",
         })
     return pd.DataFrame(rows)
 

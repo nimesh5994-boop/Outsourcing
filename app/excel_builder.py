@@ -15,8 +15,8 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.worksheet.worksheet import Worksheet
 
-from app.control_accounts import ControlAccountResult
-from app.corporation_tax import CTComputation
+from app.control_accounts import ControlAccountResult, build_rollforward as build_control_account_rollforward
+from app.corporation_tax import CTComputation, find_tax_provision_account
 from app.data_sheets import DataRefs, with_row_ids, write_data_sheets
 from app.financial_statements import (
     _BS_CURRENT_ASSETS,
@@ -461,6 +461,17 @@ def build_tb_tieout_sheet_formulas(wb: Workbook, client_name: str, current_label
 
         for col in (1, 2, 3, 4, 6, 7, 8, 9, 10):
             ws.cell(row=r, column=col).border = BORDER
+
+    data_end_row = data_start_row + len(tb_current) - 1
+
+    if result.matched_detail is not None and not result.matched_detail.empty:
+        label_row = data_end_row + 2
+        ws.cell(row=label_row, column=1, value=result.matched_detail_label.upper()).font = SCHEDULE_FONT
+        table_start = label_row + 1
+        next_row = _write_dataframe(ws, result.matched_detail, start_row=table_start)
+        comment_col = list(result.matched_detail.columns).index("Comment") + 1
+        for r in range(table_start + 1, next_row - 1):
+            ws.cell(row=r, column=comment_col).fill = INPUT_FILL
 
     _autosize(ws, pd.DataFrame(columns=TB_TIEOUT_HEADERS))
     ws.freeze_panes = f"A{data_start_row}"
@@ -1689,6 +1700,7 @@ PERCENT_FMT = "0.00%"
 def build_corporation_tax_sheet_formulas(
     wb: Workbook, client_name: str, current_label: str, ref: str, ct: CTComputation,
     pl_sheet_name: str | None = None, pl_net_profit_cell: str | None = None, header_cells: dict | None = None,
+    tb_current: pd.DataFrame | None = None, tb_comparative: pd.DataFrame | None = None, nominal_current: pd.DataFrame | None = None,
 ) -> str:
     """Same proforma as build_corporation_tax_sheet, but every computed line
     (taxable profit, the scaled thresholds, the rate band, marginal relief,
@@ -1887,6 +1899,28 @@ def build_corporation_tax_sheet_formulas(
     ws.column_dimensions["A"].width = 55
     ws.column_dimensions["B"].width = 20
     ws.column_dimensions["F"].hidden = True
+
+    # Tax control account tie-out: the computation above checks the
+    # *charge* against whatever's booked; this checks the balance-sheet
+    # *provision* account itself actually reconciles (b/fwd + this year's
+    # charge posted - payments made = c/fwd per the TB) - the same
+    # control-account rollforward every other balance-sheet account gets
+    # (control_accounts.py), reused rather than reimplemented here.
+    provision_account = find_tax_provision_account(tb_current)
+    if provision_account is not None:
+        code, account_name = provision_account
+        rollforward = build_control_account_rollforward(code, account_name, tb_current, tb_comparative, nominal_current)
+        cta_row = r + 3
+        ws.cell(row=cta_row, column=1, value=f"TAX CONTROL ACCOUNT ({account_name}, {code})").font = SCHEDULE_FONT
+        status_row = cta_row + 1
+        cta_status_cell = ws.cell(row=status_row, column=1, value=f"Status: {rollforward.status.upper()} - {rollforward.message}")
+        cta_status_cell.font = _status_font(rollforward.status)
+        cta_status_cell.fill = _status_fill(rollforward.status)
+        cta_status_cell.alignment = Alignment(wrap_text=True)
+        ws.merge_cells(start_row=status_row, start_column=1, end_row=status_row, end_column=4)
+        if not rollforward.schedule.empty:
+            _write_dataframe(ws, rollforward.schedule, start_row=status_row + 2)
+
     return sheet_name
 
 
@@ -2169,7 +2203,10 @@ def _generate_schedules(
         place("balance_sheet", lambda: build_bs_statement_sheet_formulas(wb, client_name, current_label, bs_ref, bs_statement, refs, pl_sheet_name, pl_net_profit_cell, header_cells=header_cells))
 
     if ct_ref is not None:
-        place("corporation_tax", lambda: build_corporation_tax_sheet_formulas(wb, client_name, current_label, ct_ref, ct_computation, pl_sheet_name, pl_net_profit_cell, header_cells=header_cells))
+        place("corporation_tax", lambda: build_corporation_tax_sheet_formulas(
+            wb, client_name, current_label, ct_ref, ct_computation, pl_sheet_name, pl_net_profit_cell, header_cells=header_cells,
+            tb_current=data.get("tb_current"), tb_comparative=data.get("tb_comparative"), nominal_current=data.get("nominal_current"),
+        ))
 
     if fa_ref is not None:
         grouped_codes = group_fixed_asset_codes(data.get("tb_current"))

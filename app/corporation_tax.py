@@ -19,7 +19,10 @@ by days/365) per the standard rules.
 """
 from dataclasses import dataclass, field
 
+import pandas as pd
+
 from app.tax_rates import CT_RATES, CTRates
+from app.xero_reports import PL_ACCOUNT_TYPES
 
 MATERIALITY_AMOUNT = 500.0
 
@@ -119,3 +122,23 @@ def compute(
         message=message,
         rates_used=rates,
     )
+
+
+def find_tax_provision_account(tb_current: pd.DataFrame | None) -> tuple[str, str] | None:
+    """The balance-sheet Corporation Tax provision/payable account (not the
+    P&L tax charge line - excluded by requiring a non-P&L account_type),
+    so a control-account-style rollforward (see control_accounts.py) can
+    check whether the provision itself - b/fwd + this year's charge
+    posted - payments made = c/fwd - actually ties to the trial balance,
+    the same tie-out every other balance-sheet control account already
+    gets. Takes the first match if more than one account name contains
+    "corporation tax" on the balance sheet side - a genuine edge case
+    (most charts of accounts have exactly one), not handled further."""
+    if tb_current is None or tb_current.empty:
+        return None
+    is_bs_account = ~tb_current["account_type"].astype(str).str.lower().isin(PL_ACCOUNT_TYPES)
+    matches = tb_current[tb_current["account_name"].astype(str).str.lower().str.contains("corporation tax", na=False) & is_bs_account]
+    if matches.empty:
+        return None
+    row = matches.iloc[0]
+    return str(row["account_code"]), row["account_name"]
