@@ -162,6 +162,8 @@ def _write_dataframe(ws: Worksheet, df: pd.DataFrame, start_row: int, start_col:
                 val = val.date() if not pd.isna(val) else ""
             cell = ws.cell(row=r, column=start_col + j, value=val)
             cell.border = BORDER
+            if col == "Comment":
+                cell.fill = INPUT_FILL  # the "type here" convention used everywhere a preparer explains an exception
             if isinstance(val, (int, float)) and not isinstance(val, bool):
                 cell.number_format = CURRENCY_FMT
             elif isinstance(val, str) and len(val) > widths[j]:
@@ -301,7 +303,9 @@ def build_tb_lead_schedule_formulas(
         flag_cell = ws.cell(row=r, column=7, value=f"=AND(ABS(E{r})>={materiality!r},ABS(F{r})>={variance_pct_threshold!r})")
         flag_cell.border = BORDER
 
-        ws.cell(row=r, column=8, value="").border = BORDER
+        review_cell = ws.cell(row=r, column=8, value="")
+        review_cell.border = BORDER
+        review_cell.fill = INPUT_FILL
         r += 1
 
     widths = [14, 40, 14, 16, 14, 12, 10, 40]

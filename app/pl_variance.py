@@ -323,11 +323,19 @@ def annotate_with_history(detail: pd.DataFrame, history: dict) -> pd.DataFrame:
     whether this year's swing (or lack of one) has been seen before -
     purely descriptive, for the reviewer to weigh, not an automatic
     accept/reject. A brand-new client with no prior jobs generated yet
-    simply gets "No prior-year history yet" on every row."""
+    simply gets "No prior-year history yet" on every row.
+
+    Also adds a genuinely blank "Comment" column, every account (not just
+    flagged ones) - the same purpose as tb_lead_schedule's own blank
+    column, but this table is specifically the P&L slice with the driver/
+    history context already attached, so the preparer's explanation for a
+    flagged swing lives right next to that context rather than on a
+    separate, plainer sheet."""
     if detail is None or detail.empty or not history:
         if detail is not None and not detail.empty:
             detail = detail.copy()
             detail["historical_pattern"] = "No prior-year history yet"
+            detail["Comment"] = ""
         return detail
 
     def _pattern(row) -> str:
@@ -344,6 +352,13 @@ def annotate_with_history(detail: pd.DataFrame, history: dict) -> pd.DataFrame:
 
     detail = detail.copy()
     detail["historical_pattern"] = detail.apply(_pattern, axis=1)
+    # Genuinely blank - not computed - so the preparer's own explanation
+    # for a flagged movement (reclassification, genuine business change, a
+    # coding slip since corrected) is recorded once on this job's own
+    # workbook, the same "Comment" convention used everywhere else in this
+    # workbook a preparer explains an exception (TB Tie-Out's opening
+    # balance disagreements, the Loan/Stock reviews).
+    detail["Comment"] = ""
     return detail
 
 

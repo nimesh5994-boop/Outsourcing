@@ -269,12 +269,14 @@ def test_annotate_with_history_flags_recurring_vs_new_patterns():
     assert "Recurring" in patterns["Sales"]
     assert "New this year" in patterns["Marketing"]
     assert "Not flagged this year" in patterns["Rent"]
+    assert (annotated["Comment"] == "").all()  # genuinely blank, for the preparer to type into
 
 
 def test_annotate_with_history_no_prior_years_at_all():
     detail = pd.DataFrame([{"account_code": "4000", "account_name": "Sales", "flag": True}])
     annotated = pl_variance.annotate_with_history(detail, {})
     assert annotated.iloc[0]["historical_pattern"] == "No prior-year history yet"
+    assert annotated.iloc[0]["Comment"] == ""
 
 
 def test_snapshot_into_history_records_every_account_not_just_flagged():
