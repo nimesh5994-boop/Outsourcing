@@ -2124,6 +2124,7 @@ def _generate_schedules(
         "Dividend vs distributable reserves review": ("dividend_reserves_review", "Dividend Review"),
         "Petty cash running balance review": ("petty_cash_review", "Petty Cash Review"),
         "Loan facility review (BBL / Hire Purchase / Bank Loan)": ("loan_facility_review", "Loan Facility Review"),
+        "Stock/inventory review": ("stock_review", "Stock Review"),
     }
     recon_refs = {}
     recon_sheet_names = {}

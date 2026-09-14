@@ -170,19 +170,56 @@ def test_loan_facility_n_a_when_none_found():
     assert result.status == "n/a"
 
 
-def test_run_all_compliance_checks_returns_four_results_with_no_data():
+# ---------- Stock/inventory review ----------
+
+def test_stock_review_detects_inventory_type_account_with_movement_and_reminder():
+    tb_current = pd.DataFrame([_tb_row("1300", "FINISHED GOODS STOCK", "Inventory", 15000, 0)])
+    tb_comparative = pd.DataFrame([_tb_row("1300", "FINISHED GOODS STOCK", "Inventory", 12000, 0)])
+    result = cc.stock_review(tb_current, tb_comparative)
+
+    assert result.status == "review"
+    row = result.detail.iloc[0]
+    assert row["Current year closing"] == 15000.0
+    assert row["Comparative year closing"] == 12000.0
+    assert row["Movement"] == 3000.0
+    assert "physical stock count" in row["Reminder"]
+    # no nominal activity for stock is the normal case, not a red flag
+    assert row["Rollforward ties to TB?"] == "No nominal activity detail (normal for stock)"
+
+
+def test_stock_review_detects_by_name_even_when_account_type_is_not_inventory():
+    # not every chart of accounts uses Xero's "Inventory" type correctly
+    tb_current = pd.DataFrame([_tb_row("1310", "WORK IN PROGRESS", "Current Asset", 4000, 0)])
+    result = cc.stock_review(tb_current, None)
+    assert result.status == "review"
+    assert result.detail.iloc[0]["Account name"] == "WORK IN PROGRESS"
+
+
+def test_stock_review_n_a_when_none_found():
+    tb_current = pd.DataFrame([_tb_row("8010", "TRADE CREDITORS", "Current Liability", 0, 5000)])
+    result = cc.stock_review(tb_current, None)
+    assert result.status == "n/a"
+
+
+def test_run_all_compliance_checks_returns_five_results_with_no_data():
     results = cc.run_all_compliance_checks(pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), None)
-    assert len(results) == 4
+    assert len(results) == 5
     assert all(r.status == "n/a" for r in results)
 
 
 def test_compliance_checks_run_cleanly_against_real_shaped_sample_data(canonical_data):
-    # Brightwell (the fictional sample client) doesn't have any of these
-    # account types, so every check should gracefully report n/a rather
-    # than erroring or false-positiving
+    # Brightwell (the fictional sample client) doesn't have DLA/dividend/
+    # petty cash/loan accounts, so those four should gracefully report n/a
+    # rather than erroring or false-positiving. It does carry a genuine
+    # stock account, so that one is expected to come back "review" - by
+    # design, stock can never reach "ok" on its own (see stock_review),
+    # since a physical count is outside any data this system ingests.
     results = cc.run_all_compliance_checks(
         canonical_data["tb_current"], canonical_data["tb_comparative"], canonical_data["nominal_current"],
         current_year_profit=float(canonical_data["pl_current"]["amount"].sum()),
     )
-    assert len(results) == 4
-    assert all(r.status in ("ok", "n/a") for r in results)
+    assert len(results) == 5
+    other_checks = [r for r in results if r.name != "Stock/inventory review"]
+    assert all(r.status in ("ok", "n/a") for r in other_checks)
+    stock_result = next(r for r in results if r.name == "Stock/inventory review")
+    assert stock_result.status == "review"

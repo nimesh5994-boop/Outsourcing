@@ -1,6 +1,6 @@
 """Data-driven compliance checks, distilled from a real manual-job review
-checklist covering DLA/S455, dividends, petty cash, and loans (Bounce Back
-Loan / Hire Purchase). Everything here is the automatable subset: a check
+checklist covering DLA/S455, dividends, petty cash, loans (Bounce Back
+Loan / Hire Purchase), and stock/inventory. Everything here is the automatable subset: a check
 that can be answered from data this system already ingests (TB, nominal
 activity). The rest of that checklist - "agreement received?", "CT
 liability checked against HMRC login?", and similar items that need a
@@ -32,6 +32,7 @@ _LOAN_PATTERNS = {
     "Bank Loan": re.compile(r"\bbank\s*loan\b", re.IGNORECASE),
     "CBILS/Bounce Back-style Government-backed Loan": re.compile(r"\bcbils\b|\bbbls\b", re.IGNORECASE),
 }
+_STOCK_PATTERN = re.compile(r"\bstock\b|\binventory\b|\bwork[\s-]in[\s-]progress\b|\bwip\b", re.IGNORECASE)
 
 
 def _find_accounts(tb: pd.DataFrame, pattern: re.Pattern) -> pd.DataFrame:
@@ -272,6 +273,62 @@ def loan_facility_review(
     return result
 
 
+def stock_review(
+    tb_current: pd.DataFrame, tb_comparative: pd.DataFrame, nominal_activity: pd.DataFrame | None = None,
+) -> ReconResult:
+    """Presence detection for Stock/Inventory/WIP accounts (Xero's own
+    "Inventory" account type, or a name match as a fallback for a TB that
+    doesn't use that type) - deliberately not a GL tie-out the way a
+    control account is: stock isn't normally moved transaction-by-
+    transaction through the nominal ledger the way debtors/creditors are,
+    so "no nominal activity detail" here isn't a red flag, it's the
+    typical case. The real check for stock is whether the figure has
+    actually been counted/valued, which needs a physical count this
+    system has no way to see - so this is a reminder plus the year-on-year
+    movement for context, with the same control-account rollforward
+    attached (control_accounts.build_rollforward) wherever nominal detail
+    does happen to exist, as corroborating evidence rather than the
+    primary check."""
+    name = "Stock/inventory review"
+    if tb_current is None or tb_current.empty:
+        return ReconResult(name, "n/a", "No trial balance uploaded.")
+
+    is_inventory_type = tb_current["account_type"].astype(str).str.lower() == "inventory"
+    name_match = tb_current["account_name"].astype(str).str.contains(_STOCK_PATTERN, regex=True, na=False)
+    found = tb_current[is_inventory_type | name_match]
+    if found.empty:
+        return ReconResult(name, "n/a", "No Stock/Inventory/WIP account found in the trial balance.")
+
+    rows = []
+    rollforward_blocks = []
+    for _, r in found.iterrows():
+        code, account_name = str(r["account_code"]), r["account_name"]
+        current_balance = float(r["balance"])
+        comp_balance = _balance(tb_comparative, [code]) if tb_comparative is not None else 0.0
+
+        rollforward = control_accounts.build_rollforward(code, account_name, tb_current, tb_comparative, nominal_activity)
+        ties_status = {"ok": "Yes", "n/a": "No nominal activity detail (normal for stock)", "review": "No - see rollforward below"}[rollforward.status]
+        if not rollforward.schedule.empty:
+            label_row = pd.DataFrame([{"Item": f"--- {account_name} ({code}) ---", "Reference": "", "Debit £": "", "Credit £": ""}])
+            rollforward_blocks.append(pd.concat([label_row, rollforward.schedule], ignore_index=True))
+
+        rows.append({
+            "Nominal code": code, "Account name": account_name,
+            "Current year closing": round(current_balance, 2), "Comparative year closing": round(comp_balance, 2),
+            "Movement": round(current_balance - comp_balance, 2), "Rollforward ties to TB?": ties_status,
+            "Reminder": "Confirm this agrees to a physical stock count/valuation schedule at the year end - this system can't independently verify a stock figure from the ledger.",
+        })
+
+    detail = pd.DataFrame(rows)
+    status = "review"
+    msg = f"{len(detail)} stock/inventory account(s) found - confirm each against a physical count/valuation schedule before sign-off."
+    result = ReconResult(name, status, msg, detail)
+    if rollforward_blocks:
+        result.extra_detail = pd.concat(rollforward_blocks, ignore_index=True)
+        result.extra_detail_label = "Balance b/fwd + movement = balance c/fwd, where nominal activity detail happens to be available (informational - see the account label at the start of each block)"
+    return result
+
+
 def run_all_compliance_checks(
     tb_current: pd.DataFrame, tb_comparative: pd.DataFrame, nominal_activity: pd.DataFrame, current_year_profit: float | None = None,
 ) -> list[ReconResult]:
@@ -280,4 +337,5 @@ def run_all_compliance_checks(
         dividend_reserves_review(tb_current, tb_comparative, nominal_activity, current_year_profit),
         petty_cash_running_balance_review(tb_comparative, nominal_activity),
         loan_facility_review(tb_current, tb_comparative, nominal_activity),
+        stock_review(tb_current, tb_comparative, nominal_activity),
     ]

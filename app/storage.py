@@ -63,6 +63,7 @@ DEFAULT_TEMPLATE_CONFIG = {
         "dividend_reserves_review": {"enabled": True, "insert_after_sheet": None},
         "petty_cash_review": {"enabled": True, "insert_after_sheet": None},
         "loan_facility_review": {"enabled": True, "insert_after_sheet": None},
+        "stock_review": {"enabled": True, "insert_after_sheet": None},
         "compliance_checklist": {"enabled": True, "insert_after_sheet": None},
         "points_forward": {"enabled": True, "insert_after_sheet": None},
     },
