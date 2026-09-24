@@ -35,6 +35,7 @@ from app.excel_builder import (  # noqa: E402
     build_matrix_sheet_formulas,
     build_non_current_liabilities_sheet_formulas,
     build_pl_statement_sheet_formulas,
+    build_prepayments_accruals_sheet_formulas,
     build_tb_lead_schedule_formulas,
 )
 from app.parsers import FileDataSource  # noqa: E402
@@ -603,6 +604,44 @@ def test_non_current_liabilities_covers_any_such_account_not_just_recognised_loa
     assert ws.cell(row=data_start + 1, column=2).value == "Deferred Consideration Payable"
     assert _cell(sol, out.name, sheet_name, f"C{data_start + 1}") == pytest.approx(-5000.0)
     assert ws.cell(row=data_start + 1, column=7).value == ""  # no recognised name - no reminder, but still listed
+
+
+def test_prepayments_accruals_sheet_lists_each_line_with_its_own_draft_adjustment_comparative(tmp_path):
+    tb_current = pd.DataFrame([
+        {"account_code": "620", "account_name": "Prepaid Insurance", "account_type": "Prepayment", "debit": 1200.0, "credit": 0.0, "balance": 1200.0},
+        {"account_code": "820", "account_name": "Accrued Expenses", "account_type": "Current Liability", "debit": 0.0, "credit": 850.0, "balance": -850.0},
+        {"account_code": "830", "account_name": "Accrued Corporation Tax", "account_type": "Current Liability", "debit": 0.0, "credit": 5000.0, "balance": -5000.0},
+    ])
+    tb_comparative = pd.DataFrame([
+        {"account_code": "620", "account_name": "Prepaid Insurance", "account_type": "Prepayment", "debit": 900.0, "credit": 0.0, "balance": 900.0},
+    ])
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, {"tb_current": tb_current, "tb_comparative": tb_comparative})
+    sheet_name = "1 Prepayments"
+    build_prepayments_accruals_sheet_formulas(wb, "Test Client", "Year ended 31 December 2025", "1", tb_current, refs)
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / "prepayments.xlsx"
+    wb.save(out)
+    sol = _evaluate(out)
+
+    errors = [k for k, v in sol.items() if f"[{out.name}]{sheet_name.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value))]
+    assert not errors, f"formula errors: {errors}"
+
+    ws = wb[sheet_name]
+    header_row = next(r for r in range(1, 10) if ws.cell(row=r, column=1).value == "Type")
+    data_start = header_row + 1
+
+    # Accrued Corporation Tax deliberately excluded - already has its own dedicated CT schedule
+    names = [ws.cell(row=data_start + i, column=3).value for i in range(2)]
+    assert names == ["Prepaid Insurance", "Accrued Expenses"]
+    assert ws.cell(row=data_start, column=1).value == "Prepayment"
+    assert ws.cell(row=data_start + 1, column=1).value == "Accrual"
+
+    assert _cell(sol, out.name, sheet_name, f"D{data_start}") == pytest.approx(1200.0)  # Draft
+    assert _cell(sol, out.name, sheet_name, f"G{data_start}") == pytest.approx(900.0)  # Comparative
+    assert _cell(sol, out.name, sheet_name, f"D{data_start + 1}") == pytest.approx(-850.0)
 
 
 def test_nominal_matrix_formulas_match_python_ground_truth(tmp_path, canonical_data):

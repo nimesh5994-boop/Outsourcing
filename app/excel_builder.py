@@ -15,6 +15,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.worksheet.worksheet import Worksheet
 
+from app.accruals_prepayments import _find_accounts as _find_prepayment_accrual_accounts
 from app.compliance_checks import LOAN_REMINDERS, _DLA_PATTERN, _LOAN_PATTERNS, _find_accounts
 from app.control_accounts import ControlAccountResult, build_rollforward as build_control_account_rollforward
 from app.corporation_tax import CTComputation, find_tax_provision_account
@@ -1278,6 +1279,71 @@ def build_non_current_liabilities_sheet_formulas(
 
     _autosize(ws, pd.DataFrame(columns=NON_CURRENT_LIABILITY_HEADERS))
     ws.column_dimensions["G"].width = 50
+    ws.freeze_panes = f"A{data_start_row}"
+    return ws
+
+
+PREPAYMENTS_ACCRUALS_HEADERS = ["Type", "Account Code", "Account Name", "Draft (per Xero PTB)", "Adjustment",
+                                "Total (per WP)", "Comparative"]
+
+
+def build_prepayments_accruals_sheet_formulas(
+    wb: Workbook, client_name: str, current_label: str, ref: str,
+    tb_current: pd.DataFrame, refs: DataRefs, header_cells: dict | None = None,
+) -> Worksheet:
+    """Prepayments and accrued income, one row per line item - not a
+    single aggregate total, the same individual-account listing every
+    other balance-sheet note schedule in this workbook now uses (see
+    build_bank_lead_schedule_formulas). Reuses accruals_prepayments.
+    _find_accounts for detection (Xero's own "Prepayment" account type,
+    plus Current Liability accounts whose name reads as an accrual) -
+    the same two categories accruals_prepayments.build_schedule already
+    identifies, not a second copy of that logic. Same Draft + Adjustment
+    = Total build-up as every other schedule here - the account's raw
+    current-TB balance, plus that code's own net effect on the Journals
+    sheet, replacing the movement-vs-TB tie-out the plain version of this
+    check still runs independently (recon result "Accruals & Prepayments
+    schedule" - unchanged, still available for its own review status)."""
+    sheet_name = f"{ref} Prepayments"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, current_label, "PREPAYMENTS AND ACCRUED INCOME", ref, header_cells=header_cells)
+    row += 1
+
+    header_row = row
+    for j, h in enumerate(PREPAYMENTS_ACCRUALS_HEADERS):
+        ws.cell(row=header_row, column=1 + j, value=h)
+    _style_header_row(ws, header_row, len(PREPAYMENTS_ACCRUALS_HEADERS))
+    data_start_row = header_row + 1
+
+    accounts = _find_prepayment_accrual_accounts(tb_current)
+    tb_code_range = refs.tb_current.col_range("account_code")
+
+    for i, (code, name, kind) in enumerate(accounts):
+        r = data_start_row + i
+        ws.cell(row=r, column=1, value=kind).border = BORDER
+        ws.cell(row=r, column=2, value=code).border = BORDER
+        ws.cell(row=r, column=3, value=name).border = BORDER
+
+        debit_sum = sumifs_exact(refs.tb_current.col_range("debit"), (tb_code_range, quote(code)))
+        credit_sum = sumifs_exact(refs.tb_current.col_range("credit"), (tb_code_range, quote(code)))
+        draft_formula = f"={debit_sum[1:]}-{credit_sum[1:]}"
+        ws.cell(row=r, column=4, value=draft_formula).number_format = CURRENCY_FMT
+
+        adjustment_formula = refs.journals.net_effect_formula(code) if refs.journals is not None else "=0"
+        ws.cell(row=r, column=5, value=adjustment_formula).number_format = CURRENCY_FMT
+
+        ws.cell(row=r, column=6, value=f"=D{r}+E{r}").number_format = CURRENCY_FMT
+
+        if refs.tb_comparative is not None:
+            comparative_formula = sumifs_exact(refs.tb_comparative.col_range("balance"), (refs.tb_comparative.col_range("account_code"), quote(code)))
+        else:
+            comparative_formula = "=0"
+        ws.cell(row=r, column=7, value=comparative_formula).number_format = CURRENCY_FMT
+
+        for col in range(1, len(PREPAYMENTS_ACCRUALS_HEADERS) + 1):
+            ws.cell(row=r, column=col).border = BORDER
+
+    _autosize(ws, pd.DataFrame(columns=PREPAYMENTS_ACCRUALS_HEADERS))
     ws.freeze_panes = f"A{data_start_row}"
     return ws
 
@@ -2553,6 +2619,12 @@ def _generate_schedules(
             candidates = data["tb_current"][data["tb_current"]["account_type"].astype(str).str.lower() == "bank"]
             bank_accounts = candidates if not candidates.empty else None
 
+        prepayments_accruals_on = (
+            res.name == "Accruals & Prepayments schedule"
+            and refs.tb_current is not None and data.get("tb_current") is not None
+            and _find_prepayment_accrual_accounts(data["tb_current"])
+        )
+
         if res.name == TB_TIEOUT_NAME and refs.tb_current is not None and data.get("tb_current") is not None:
             place(config_key, lambda r=r, res=res: build_tb_tieout_sheet_formulas(
                 wb, client_name, current_label, r, data["tb_current"], res, refs, header_cells=header_cells,
@@ -2560,6 +2632,10 @@ def _generate_schedules(
         elif bank_accounts is not None:
             place(config_key, lambda r=r, res=res, bank_accounts=bank_accounts: build_bank_lead_schedule_formulas(
                 wb, client_name, current_label, r, bank_accounts, res, refs, header_cells=header_cells,
+            ))
+        elif prepayments_accruals_on:
+            place(config_key, lambda r=r: build_prepayments_accruals_sheet_formulas(
+                wb, client_name, current_label, r, data["tb_current"], refs, header_cells=header_cells,
             ))
         else:
             place(config_key, lambda r=r, sheet_title=sheet_title, res=res: build_recon_sheet(wb, client_name, current_label, r, f"{r} {sheet_title}", res, header_cells=header_cells))
