@@ -15,7 +15,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.worksheet.worksheet import Worksheet
 
-from app.compliance_checks import _DLA_PATTERN, _find_accounts
+from app.compliance_checks import LOAN_REMINDERS, _DLA_PATTERN, _LOAN_PATTERNS, _find_accounts
 from app.control_accounts import ControlAccountResult, build_rollforward as build_control_account_rollforward
 from app.corporation_tax import CTComputation, find_tax_provision_account
 from app.data_sheets import DataRefs, with_row_ids, write_data_sheets
@@ -1206,6 +1206,82 @@ def build_dla_activity_sheet_formulas(
     return ws
 
 
+NON_CURRENT_LIABILITY_HEADERS = ["Account Code", "Account Name", "Draft (per Xero PTB)", "Adjustment",
+                                  "Total (per WP)", "Comparative", "Reminder"]
+
+
+def build_non_current_liabilities_sheet_formulas(
+    wb: Workbook, client_name: str, current_label: str, ref: str,
+    accounts: pd.DataFrame, refs: DataRefs, header_cells: dict | None = None,
+) -> Worksheet:
+    """Creditors: amounts falling due after more than one year - every
+    account the current TB itself types Non-current Liability, whatever
+    a client's own chart of accounts happens to call it, not just the
+    ones matching a recognised name (Bounce Back Loan / Hire Purchase /
+    Bank Loan / CBILS - compliance_checks.loan_facility_review's own
+    presence-detection check still runs separately and flags those by
+    name, but a genuinely different-named long-term creditor - a
+    directors' loan classified long-term, a deferred consideration
+    balance, anything else - previously got no schedule here at all).
+    Same Draft + Adjustment = Total build-up as every other balance-sheet
+    note schedule in this workbook (see build_bank_lead_schedule_formulas);
+    a matched account still gets its compliance reminder shown alongside,
+    reusing compliance_checks.LOAN_REMINDERS' own wording rather than a
+    second copy of it drifting out of sync."""
+    sheet_name = f"{ref} Creditors gt 1yr"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, current_label, "CREDITORS: AMOUNTS FALLING DUE AFTER MORE THAN ONE YEAR", ref, header_cells=header_cells)
+    row += 1
+
+    header_row = row
+    for j, h in enumerate(NON_CURRENT_LIABILITY_HEADERS):
+        ws.cell(row=header_row, column=1 + j, value=h)
+    _style_header_row(ws, header_row, len(NON_CURRENT_LIABILITY_HEADERS))
+    data_start_row = header_row + 1
+
+    tb_code_range = refs.tb_current.col_range("account_code")
+
+    for i in range(len(accounts)):
+        r = data_start_row + i
+        code = str(accounts.iloc[i]["account_code"])
+        name = str(accounts.iloc[i]["account_name"])
+
+        ws.cell(row=r, column=1, value=code).border = BORDER
+        ws.cell(row=r, column=2, value=name).border = BORDER
+
+        debit_sum = sumifs_exact(refs.tb_current.col_range("debit"), (tb_code_range, quote(code)))
+        credit_sum = sumifs_exact(refs.tb_current.col_range("credit"), (tb_code_range, quote(code)))
+        draft_formula = f"={debit_sum[1:]}-{credit_sum[1:]}"
+        ws.cell(row=r, column=3, value=draft_formula).number_format = CURRENCY_FMT
+
+        adjustment_formula = refs.journals.net_effect_formula(code) if refs.journals is not None else "=0"
+        ws.cell(row=r, column=4, value=adjustment_formula).number_format = CURRENCY_FMT
+
+        ws.cell(row=r, column=5, value=f"=C{r}+D{r}").number_format = CURRENCY_FMT
+
+        if refs.tb_comparative is not None:
+            comparative_formula = sumifs_exact(refs.tb_comparative.col_range("balance"), (refs.tb_comparative.col_range("account_code"), quote(code)))
+        else:
+            comparative_formula = "=0"
+        ws.cell(row=r, column=6, value=comparative_formula).number_format = CURRENCY_FMT
+
+        reminder = ""
+        for label, pattern in _LOAN_PATTERNS.items():
+            if pattern.search(name):
+                reminder = LOAN_REMINDERS[label]
+                break
+        reminder_cell = ws.cell(row=r, column=7, value=reminder)
+        reminder_cell.alignment = Alignment(wrap_text=True)
+
+        for col in range(1, len(NON_CURRENT_LIABILITY_HEADERS) + 1):
+            ws.cell(row=r, column=col).border = BORDER
+
+    _autosize(ws, pd.DataFrame(columns=NON_CURRENT_LIABILITY_HEADERS))
+    ws.column_dimensions["G"].width = 50
+    ws.freeze_panes = f"A{data_start_row}"
+    return ws
+
+
 def build_pl_statement_sheet_formulas(wb: Workbook, client_name: str, period_label: str, ref: str, pl_result: StatementResult, refs: DataRefs, header_cells: dict | None = None) -> tuple[str, str | None]:
     """Same summary lines as build_statement_sheet's P&L, but every summary
     figure is a live SUMPRODUCT-by-category formula against DATA_PL, and the
@@ -2383,6 +2459,14 @@ def _generate_schedules(
             dla_refs[code] = ref.next()
             entries.append({"ref": dla_refs[code], "title": f"{dla_row['account_name']} activity", "status": "n/a", "message": "Every posting for the year, in date order, with a running balance"})
 
+    ncl_accounts = pd.DataFrame()
+    if data.get("tb_current") is not None and not data["tb_current"].empty:
+        ncl_accounts = data["tb_current"][data["tb_current"]["account_type"].astype(str).str.lower() == "non-current liability"]
+    ncl_on = enabled("non_current_liabilities") and not ncl_accounts.empty and refs.tb_current is not None
+    ncl_ref = ref.next() if ncl_on else None
+    if ncl_on:
+        entries.append({"ref": ncl_ref, "title": "Creditors: amounts falling due after more than one year", "status": "n/a", "message": f"{len(ncl_accounts)} non-current liability account(s)"})
+
     cl_on = enabled("compliance_checklist")
     cl_ref = ref.next() if cl_on else None
     if cl_on:
@@ -2514,6 +2598,11 @@ def _generate_schedules(
                 wb, client_name, current_label, dla_refs[code], code, name,
                 data.get("tb_comparative"), data.get("nominal_current"), refs, header_cells=header_cells,
             ))
+
+    if ncl_on:
+        place("non_current_liabilities", lambda: build_non_current_liabilities_sheet_formulas(
+            wb, client_name, current_label, ncl_ref, ncl_accounts, refs, header_cells=header_cells,
+        ))
 
     if cl_on:
         place("compliance_checklist", lambda: build_compliance_checklist_sheet(wb, client_name, current_label, cl_ref, header_cells=header_cells))

@@ -33,6 +33,7 @@ from app.excel_builder import (  # noqa: E402
     build_dla_activity_sheet_formulas,
     build_fixed_asset_category_sheet_formulas,
     build_matrix_sheet_formulas,
+    build_non_current_liabilities_sheet_formulas,
     build_pl_statement_sheet_formulas,
     build_tb_lead_schedule_formulas,
 )
@@ -563,6 +564,45 @@ def test_dla_activity_running_balance_formulas_match_python_ground_truth(tmp_pat
     diff_row = closing_row + 2
     assert ws.cell(row=diff_row, column=4).value == "Diff (should be nil)"
     assert _cell(sol, out.name, sheet_name, f"G{diff_row}") == pytest.approx(2500.0 - 3500.0)  # ledger vs TB - a genuine 1000 gap in this fixture
+
+
+def test_non_current_liabilities_covers_any_such_account_not_just_recognised_loan_names(tmp_path):
+    tb_current = pd.DataFrame([
+        # a recognised name - should get the Bank Loan reminder
+        {"account_code": "900", "account_name": "Bank Loan", "account_type": "Non-current Liability", "debit": 0.0, "credit": 18000.0, "balance": -18000.0},
+        # NOT a recognised loan name - loan_facility_review would miss this entirely,
+        # but it's still typed Non-current Liability so this generic schedule must catch it
+        {"account_code": "901", "account_name": "Deferred Consideration Payable", "account_type": "Non-current Liability", "debit": 0.0, "credit": 5000.0, "balance": -5000.0},
+    ])
+    tb_comparative = pd.DataFrame([
+        {"account_code": "900", "account_name": "Bank Loan", "account_type": "Non-current Liability", "debit": 0.0, "credit": 20000.0, "balance": -20000.0},
+    ])
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, {"tb_current": tb_current, "tb_comparative": tb_comparative})
+    sheet_name = "1 Creditors gt 1yr"
+    build_non_current_liabilities_sheet_formulas(wb, "Test Client", "Year ended 31 December 2025", "1", tb_current, refs)
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / "ncl.xlsx"
+    wb.save(out)
+    sol = _evaluate(out)
+
+    errors = [k for k, v in sol.items() if f"[{out.name}]{sheet_name.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value))]
+    assert not errors, f"formula errors: {errors}"
+
+    ws = wb[sheet_name]
+    header_row = next(r for r in range(1, 10) if ws.cell(row=r, column=1).value == "Account Code")
+    data_start = header_row + 1
+
+    assert _cell(sol, out.name, sheet_name, f"C{data_start}") == pytest.approx(-18000.0)  # Draft
+    assert _cell(sol, out.name, sheet_name, f"F{data_start}") == pytest.approx(-20000.0)  # Comparative
+    assert "interest holiday" not in ws.cell(row=data_start, column=7).value.lower()
+    assert "statement" in ws.cell(row=data_start, column=7).value.lower()  # the Bank Loan reminder text
+
+    assert ws.cell(row=data_start + 1, column=2).value == "Deferred Consideration Payable"
+    assert _cell(sol, out.name, sheet_name, f"C{data_start + 1}") == pytest.approx(-5000.0)
+    assert ws.cell(row=data_start + 1, column=7).value == ""  # no recognised name - no reminder, but still listed
 
 
 def test_nominal_matrix_formulas_match_python_ground_truth(tmp_path, canonical_data):

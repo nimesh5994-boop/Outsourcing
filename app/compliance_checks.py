@@ -34,6 +34,17 @@ _LOAN_PATTERNS = {
 }
 _STOCK_PATTERN = re.compile(r"\bstock\b|\binventory\b|\bwork[\s-]in[\s-]progress\b|\bwip\b", re.IGNORECASE)
 
+# Module-level (not just local to loan_facility_review) so
+# excel_builder.build_non_current_liabilities_sheet_formulas can show the
+# same reminder text against a recognised facility, rather than a second
+# copy of this wording drifting out of sync with this one.
+LOAN_REMINDERS = {
+    "Bounce Back Loan": "Confirm no interest is charged in the first 12 months, and that repayment/interest afterwards is per the BBL calculator.",
+    "Hire Purchase": "Confirm the agreement was received (interest rate, term, deposit, purchase fee), and split the closing balance between due within one year and due after one year.",
+    "Bank Loan": "Confirm the statement was received for the year, and split the closing balance between due within one year and due after one year.",
+    "CBILS/Bounce Back-style Government-backed Loan": "Confirm the facility terms (interest holiday period, repayment start date) and split the closing balance between due within one year and due after one year.",
+}
+
 
 def _find_accounts(tb: pd.DataFrame, pattern: re.Pattern) -> pd.DataFrame:
     if tb is None or tb.empty:
@@ -234,12 +245,7 @@ def loan_facility_review(
         for _, r in found.iterrows():
             code, account_name = str(r["account_code"]), r["account_name"]
             comp_balance = _balance(tb_comparative, [code]) if tb_comparative is not None else 0.0
-            reminders = {
-                "Bounce Back Loan": "Confirm no interest is charged in the first 12 months, and that repayment/interest afterwards is per the BBL calculator.",
-                "Hire Purchase": "Confirm the agreement was received (interest rate, term, deposit, purchase fee), and split the closing balance between due within one year and due after one year.",
-                "Bank Loan": "Confirm the statement was received for the year, and split the closing balance between due within one year and due after one year.",
-                "CBILS/Bounce Back-style Government-backed Loan": "Confirm the facility terms (interest holiday period, repayment start date) and split the closing balance between due within one year and due after one year.",
-            }[label]
+            reminders = LOAN_REMINDERS[label]
 
             rollforward = control_accounts.build_rollforward(code, account_name, tb_current, tb_comparative, nominal_activity)
             if rollforward.status == "ok":
