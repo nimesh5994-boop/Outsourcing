@@ -50,6 +50,12 @@ class JournalsRef:
     def credit_range(self) -> str:
         return range_ref(self.sheet_name, JOURNALS_CREDIT_COLUMN_LETTER, self.first_row, self.last_row)
 
+    def debit_sum_formula(self, code: str) -> str:
+        return sumifs_exact(self.debit_range(), (self.code_range(), quote(code)))
+
+    def credit_sum_formula(self, code: str) -> str:
+        return sumifs_exact(self.credit_range(), (self.code_range(), quote(code)))
+
     def net_effect_formula(self, code: str) -> str:
         """This account code's net Debit-Credit across every journal row posted
         against it - the same formula DATA_TB_Current's balance column uses,

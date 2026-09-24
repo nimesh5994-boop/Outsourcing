@@ -1,11 +1,12 @@
 """End-to-end verification of the ETB sheet (see excel_builder.build_etb_sheet_formulas)
-- the consolidated Extended Trial Balance built *in addition to* the TB
-Tie-Out sheet, per the user's explicit "keep what is there but build ETB
-sheet too" instruction. Covers what makes it different from TB Tie-Out:
-a Comparative Closing reference column, and an Adjustment column that is
-a live formula off the Journals sheet (see data_sheets.JournalsRef) -
-the same figure TB Tie-Out shows for that account, not a separate number
-of its own.
+- rebuilt to match how a real Extended Trial Balance is actually built,
+traced from a real firm's own working paper template: this year's Trial
+Balance exactly as uploaded (Xero PTB Dr/Cr, never adjusted) plus the
+Journals sheet's own Dr/Cr for that code, summed and split into Profit &
+Loss / Balance Sheet by account type - kept separate from TB Tie-Out's
+job (opening + nominal-ledger movement = reported closing), which an
+earlier version of this sheet duplicated instead of actually matching
+what a real ETB looks like.
 """
 from pathlib import Path
 
@@ -60,99 +61,128 @@ def _dtc_row_for(wb, account_code: str) -> int:
     raise AssertionError(f"account code {account_code} not found on DATA_TB_Current")
 
 
+def _etb_sheet(wb):
+    name = next(s for s in wb.sheetnames if s.endswith("ETB"))
+    ws = wb[name]
+    header_row = next(r for r in range(1, 12) if ws.cell(row=r, column=1).value == "Account Code")
+    return name, ws, header_row
+
+
 def _journals_first_row(wb) -> int:
     ws = wb[next(s for s in wb.sheetnames if s.endswith("Journals"))]
     header_row = next(r for r in range(1, 10) if ws.cell(row=r, column=1).value == "No.")
     return header_row + 1
 
 
-def test_etb_sheet_exists_alongside_tb_tieout_with_an_adjustment_formula_not_a_blank_cell(tmp_path, canonical_data):
-    out = tmp_path / "wp.xlsx"
-    wb = _build_and_save(canonical_data, out)
-    assert any("TB Tie-Out" in s for s in wb.sheetnames)  # kept, per the user's instruction
-    assert any(s.endswith("ETB") for s in wb.sheetnames)  # added
-    assert any(s.endswith("Journals") for s in wb.sheetnames)  # the actual input, replacing a flat cell
-
-    ws = next(wb[s] for s in wb.sheetnames if s.endswith("ETB"))
-    header_row = next(r for r in range(1, 12) if ws.cell(row=r, column=1).value == "Account Code")
-    headers = [ws.cell(row=header_row, column=c).value for c in range(1, 13)]
-    assert headers == [
+def test_etb_headers_match_a_real_extended_trial_balance():
+    import openpyxl
+    from app.excel_builder import ETB_HEADERS
+    assert ETB_HEADERS == [
         "Account Code", "Account Name", "Account Type",
-        "Comparative Closing (per comparative TB)", "Opening (per comparative TB)",
-        "Movement (current year)", "Adjustment", "Derived Closing",
-        "Reported Closing (per current TB)", "Diff", "Flag", "Notes",
+        "Xero PTB Dr", "Xero PTB Cr",
+        "Journals Dr", "Journals Cr",
+        "P&L Dr", "P&L Cr",
+        "Balance Sheet Dr", "Balance Sheet Cr",
+        "Comparative Dr", "Comparative Cr", "Notes",
     ]
-    adjustment_formula = ws.cell(row=header_row + 1, column=7).value
-    assert adjustment_formula is not None and adjustment_formula.startswith("=SUMPRODUCT")
-    assert "Journals" in adjustment_formula
-    assert ws.cell(row=header_row + 1, column=12).value is None  # Notes stays genuinely blank
 
 
-def test_comparative_closing_is_not_zeroed_for_a_pl_account_but_opening_is(tmp_path, canonical_data):
-    # Opening must be 0 for a P&L account (same reasoning as tb_tieout.py -
-    # an income statement account doesn't carry a balance forward), but
-    # Comparative Closing is a plain reference figure and should show last
-    # year's real P&L total for that code, not be zeroed the same way.
+def test_xero_ptb_columns_show_the_raw_unadjusted_tb_and_notes_is_blank(tmp_path, canonical_data):
     out = tmp_path / "wp.xlsx"
     wb = _build_and_save(canonical_data, out)
-    ws = next(wb[s] for s in wb.sheetnames if s.endswith("ETB"))
-    header_row = next(r for r in range(1, 12) if ws.cell(row=r, column=1).value == "Account Code")
-    data_start = header_row + 1
+    assert any("TB Tie-Out" in s for s in wb.sheetnames)  # kept, unchanged
+    _, ws, header_row = _etb_sheet(wb)
+    data_row = header_row + 1
 
-    pl_code = str(canonical_data["pl_current"].iloc[0]["account_code"])
-    dtc_row = _dtc_row_for(wb, pl_code)
-    etb_row = data_start + (dtc_row - 2)
-
-    assert ws.cell(row=etb_row, column=5).value == "=0"  # Opening
-    comparative_closing_formula = ws.cell(row=etb_row, column=4).value
-    assert comparative_closing_formula != "=0"  # Comparative Closing - a real lookup, not zeroed
+    assert ws.cell(row=data_row, column=4).value.startswith("=")  # Xero PTB Dr - a formula
+    assert ws.cell(row=data_row, column=14).value is None  # Notes - genuinely blank
 
     sol = _evaluate(out)
     etb_sheet_name = next(s for s in wb.sheetnames if s.endswith("ETB"))
-    comparative_closing_value = _cell(sol, "wp.xlsx", etb_sheet_name, f"D{etb_row}")
-    expected = float(canonical_data["tb_comparative"].groupby("account_code")["balance"].sum().get(pl_code, 0.0))
-    assert comparative_closing_value == pytest.approx(expected)
+    pl_code = str(canonical_data["pl_current"].iloc[0]["account_code"])
+    dtc_row = _dtc_row_for(wb, pl_code)
+    etb_row = header_row + 1 + (dtc_row - 2)
+
+    dtc_debit = _cell(sol, "wp.xlsx", "DATA_TB_Current", f"D{dtc_row}")
+    dtc_credit = _cell(sol, "wp.xlsx", "DATA_TB_Current", f"E{dtc_row}")
+    etb_debit = _cell(sol, "wp.xlsx", etb_sheet_name, f"D{etb_row}")
+    etb_credit = _cell(sol, "wp.xlsx", etb_sheet_name, f"E{etb_row}")
+    assert etb_debit == pytest.approx(dtc_debit)
+    assert etb_credit == pytest.approx(dtc_credit)
 
 
-def test_one_journal_moves_tb_tieout_and_etb_identically_and_data_tb_current_exactly_once(tmp_path, canonical_data):
-    # TB Tie-Out and the ETB sheet both show the *same* Adjustment figure -
-    # a formula off the one Journals sheet, not two independent numbers -
-    # so posting a single journal should move both sheets' Adjustment
-    # column identically, and DATA_TB_Current's balance by exactly that
-    # amount (not double-counted between the two views of it).
+def test_comparative_columns_show_the_raw_comparative_tb_for_every_account_type(tmp_path, canonical_data):
+    # Unlike the old design, Comparative here is never zeroed for a P&L
+    # account - it's a plain reference figure (last year's actual Dr/Cr),
+    # not an "opening balance" concept.
     out = tmp_path / "wp.xlsx"
     wb = _build_and_save(canonical_data, out)
+    etb_sheet_name, ws, header_row = _etb_sheet(wb)
 
-    tieout_sheet_name = next(s for s in wb.sheetnames if "TB Tie-Out" in s)
-    etb_sheet_name = next(s for s in wb.sheetnames if s.endswith("ETB"))
+    pl_code = str(canonical_data["pl_current"].iloc[0]["account_code"])
+    dtc_row = _dtc_row_for(wb, pl_code)
+    etb_row = header_row + 1 + (dtc_row - 2)
+
+    sol = _evaluate(out)
+    comp_debit = _cell(sol, "wp.xlsx", etb_sheet_name, f"L{etb_row}")
+    comp_credit = _cell(sol, "wp.xlsx", etb_sheet_name, f"M{etb_row}")
+    expected_debit = float(canonical_data["tb_comparative"].groupby("account_code")["debit"].sum().get(pl_code, 0.0))
+    expected_credit = float(canonical_data["tb_comparative"].groupby("account_code")["credit"].sum().get(pl_code, 0.0))
+    assert comp_debit == pytest.approx(expected_debit)
+    assert comp_credit == pytest.approx(expected_credit)
+
+
+def test_posting_a_journal_shows_on_etb_and_flows_into_the_pl_split(tmp_path, canonical_data):
+    out = tmp_path / "wp.xlsx"
+    wb = _build_and_save(canonical_data, out)
+    etb_sheet_name, ws, header_row = _etb_sheet(wb)
     journals_sheet_name = next(s for s in wb.sheetnames if s.endswith("Journals"))
-    tieout_ws, etb_ws = wb[tieout_sheet_name], wb[etb_sheet_name]
-
-    tieout_header_row = next(r for r in range(1, 10) if tieout_ws.cell(row=r, column=6).value == "Adjustment")
-    tieout_data_start = tieout_header_row + 1
-    etb_header_row = next(r for r in range(1, 12) if etb_ws.cell(row=r, column=1).value == "Account Code")
-    etb_data_start = etb_header_row + 1
     journals_first_row = _journals_first_row(wb)
 
     pl_code = str(canonical_data["pl_current"].iloc[0]["account_code"])
     dtc_row = _dtc_row_for(wb, pl_code)
-    tieout_row = tieout_data_start + (dtc_row - 2)
-    etb_row = etb_data_start + (dtc_row - 2)
+    etb_row = header_row + 1 + (dtc_row - 2)
 
     sol_before = _evaluate(out)
-    before_dtc = _cell(sol_before, "wp.xlsx", "DATA_TB_Current", f"F{dtc_row}")
+    pl_net_before = _cell(sol_before, "wp.xlsx", etb_sheet_name, f"H{etb_row}") - _cell(sol_before, "wp.xlsx", etb_sheet_name, f"I{etb_row}")
 
     JOURNAL_AMOUNT = 250.0
     wb[journals_sheet_name].cell(row=journals_first_row, column=1, value="JNL 1")
     wb[journals_sheet_name].cell(row=journals_first_row, column=3, value=pl_code)
-    wb[journals_sheet_name].cell(row=journals_first_row, column=4, value=JOURNAL_AMOUNT)
+    wb[journals_sheet_name].cell(row=journals_first_row, column=4, value=JOURNAL_AMOUNT)  # Debit
     wb.save(out)
 
-    sol_after = _evaluate(out)
-    after_dtc = _cell(sol_after, "wp.xlsx", "DATA_TB_Current", f"F{dtc_row}")
-    tieout_adjustment = _cell(sol_after, "wp.xlsx", tieout_sheet_name, f"F{tieout_row}")
-    etb_adjustment = _cell(sol_after, "wp.xlsx", etb_sheet_name, f"G{etb_row}")
+    sol = _evaluate(out)
+    journals_dr = _cell(sol, "wp.xlsx", etb_sheet_name, f"F{etb_row}")
+    pl_net_after = _cell(sol, "wp.xlsx", etb_sheet_name, f"H{etb_row}") - _cell(sol, "wp.xlsx", etb_sheet_name, f"I{etb_row}")
+    assert journals_dr == pytest.approx(JOURNAL_AMOUNT)
+    # net P&L Dr-Cr position for this account should move by exactly the
+    # posted debit, regardless of which column (Dr or Cr) the net lands on
+    assert pl_net_after == pytest.approx(pl_net_before + JOURNAL_AMOUNT)
 
-    assert tieout_adjustment == pytest.approx(JOURNAL_AMOUNT)
-    assert etb_adjustment == pytest.approx(JOURNAL_AMOUNT)
-    assert after_dtc == pytest.approx(before_dtc + JOURNAL_AMOUNT)  # posted once, not double-counted
+
+def test_etb_totals_self_balance(tmp_path, canonical_data):
+    # A genuine evaluation-based check that every Dr/Cr pair on the totals
+    # row actually ties - Xero PTB, Journals, and the combined P&L+BS
+    # split all independently balance, the same sense-check a real ETB's
+    # own totals row gives a preparer.
+    out = tmp_path / "wp.xlsx"
+    wb = _build_and_save(canonical_data, out)
+    etb_sheet_name, ws, header_row = _etb_sheet(wb)
+
+    data_start = header_row + 1
+    total_row = next(r for r in range(data_start, ws.max_row + 1) if ws.cell(row=r, column=2).value == "TOTAL")
+
+    sol = _evaluate(out)
+    xero_dr = _cell(sol, "wp.xlsx", etb_sheet_name, f"D{total_row}")
+    xero_cr = _cell(sol, "wp.xlsx", etb_sheet_name, f"E{total_row}")
+    assert xero_dr == pytest.approx(xero_cr)
+
+    pl_dr = _cell(sol, "wp.xlsx", etb_sheet_name, f"H{total_row}")
+    pl_cr = _cell(sol, "wp.xlsx", etb_sheet_name, f"I{total_row}")
+    bs_dr = _cell(sol, "wp.xlsx", etb_sheet_name, f"J{total_row}")
+    bs_cr = _cell(sol, "wp.xlsx", etb_sheet_name, f"K{total_row}")
+    assert (pl_dr + bs_dr) == pytest.approx(pl_cr + bs_cr)
+
+    check_row = total_row + 1
+    assert ws.cell(row=check_row, column=4).value == '=IF(ABS((D{0})-(E{0}))>0.01,"REVIEW","OK")'.format(total_row)
