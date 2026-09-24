@@ -16,10 +16,11 @@ from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.worksheet.worksheet import Worksheet
 
 from app.accruals_prepayments import _find_accounts as _find_prepayment_accrual_accounts
-from app.compliance_checks import LOAN_REMINDERS, _DLA_PATTERN, _LOAN_PATTERNS, _find_accounts
+from app.compliance_checks import LOAN_REMINDERS, _DLA_PATTERN, _LOAN_PATTERNS, _find_accounts, _find_stock_accounts
 from app.control_accounts import ControlAccountResult, build_rollforward as build_control_account_rollforward
 from app.corporation_tax import CTComputation, find_tax_provision_account
 from app.data_sheets import DataRefs, with_row_ids, write_data_sheets
+from app.interco import find_interco_rows
 from app.financial_statements import (
     _BS_CURRENT_ASSETS,
     _BS_CURRENT_LIABILITIES,
@@ -1283,6 +1284,109 @@ def build_non_current_liabilities_sheet_formulas(
     return ws
 
 
+STOCK_HEADERS = ["Account Code", "Account Name", "Draft (per Xero PTB)", "Adjustment", "Total (per WP)", "Comparative"]
+
+
+def build_stock_sheet_formulas(
+    wb: Workbook, client_name: str, current_label: str, ref: str,
+    accounts: pd.DataFrame, refs: DataRefs, header_cells: dict | None = None,
+) -> Worksheet:
+    """Stock/Inventory/WIP - every account the current TB types Inventory,
+    or whose name reads as stock (_find_stock_accounts, shared with
+    compliance_checks.stock_review's own presence-detection check). Same
+    Draft + Adjustment = Total build-up as every other balance-sheet note
+    schedule here (see build_bank_lead_schedule_formulas); the split into
+    raw materials/WIP/finished goods a real firm template shows isn't
+    derivable from a TB balance alone - that stays a manual breakdown once
+    printed, this schedule gets the total right and ties it to the TB."""
+    sheet_name = f"{ref} Stock"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, current_label, "STOCK", ref, header_cells=header_cells)
+    row += 1
+
+    header_row = row
+    for j, h in enumerate(STOCK_HEADERS):
+        ws.cell(row=header_row, column=1 + j, value=h)
+    _style_header_row(ws, header_row, len(STOCK_HEADERS))
+    data_start_row = header_row + 1
+
+    tb_code_range = refs.tb_current.col_range("account_code")
+
+    for i in range(len(accounts)):
+        r = data_start_row + i
+        code = str(accounts.iloc[i]["account_code"])
+        name = str(accounts.iloc[i]["account_name"])
+
+        ws.cell(row=r, column=1, value=code).border = BORDER
+        ws.cell(row=r, column=2, value=name).border = BORDER
+
+        debit_sum = sumifs_exact(refs.tb_current.col_range("debit"), (tb_code_range, quote(code)))
+        credit_sum = sumifs_exact(refs.tb_current.col_range("credit"), (tb_code_range, quote(code)))
+        draft_formula = f"={debit_sum[1:]}-{credit_sum[1:]}"
+        ws.cell(row=r, column=3, value=draft_formula).number_format = CURRENCY_FMT
+
+        adjustment_formula = refs.journals.net_effect_formula(code) if refs.journals is not None else "=0"
+        ws.cell(row=r, column=4, value=adjustment_formula).number_format = CURRENCY_FMT
+
+        ws.cell(row=r, column=5, value=f"=C{r}+D{r}").number_format = CURRENCY_FMT
+
+        if refs.tb_comparative is not None:
+            comparative_formula = sumifs_exact(refs.tb_comparative.col_range("balance"), (refs.tb_comparative.col_range("account_code"), quote(code)))
+        else:
+            comparative_formula = "=0"
+        ws.cell(row=r, column=6, value=comparative_formula).number_format = CURRENCY_FMT
+
+        for col in range(1, len(STOCK_HEADERS) + 1):
+            ws.cell(row=r, column=col).border = BORDER
+
+    _autosize(ws, pd.DataFrame(columns=STOCK_HEADERS))
+    ws.freeze_panes = f"A{data_start_row}"
+    return ws
+
+
+INTERCO_HEADERS = ["Contact", "Total (per Aged Report)"]
+
+
+def build_interco_sheet_formulas(
+    wb: Workbook, client_name: str, current_label: str, ref: str, title: str,
+    rows: pd.DataFrame, party_field: str, aged_refs, header_cells: dict | None = None,
+) -> Worksheet:
+    """One row per Aged Debtors/Creditors contact the client has flagged
+    as a related party (see interco.find_interco_rows) - Total is a live
+    SUMIFS-equivalent pull of that exact contact's own Total from the
+    aged report DATA sheet, not a second copy of the figure. No
+    Adjustment/Comparative columns: an aged report is a point-in-time
+    listing, not a TB account with its own Journals-sheet adjustment, and
+    this system doesn't carry a comparative aged report (see the
+    Aged Debtors/Creditors upload checklist's own note on that)."""
+    sheet_name = f"{ref} Interco ({'Debtor' if party_field == 'customer' else 'Creditor'})"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, current_label, title, ref, header_cells=header_cells)
+    row += 1
+
+    header_row = row
+    for j, h in enumerate(INTERCO_HEADERS):
+        ws.cell(row=header_row, column=1 + j, value=h)
+    _style_header_row(ws, header_row, len(INTERCO_HEADERS))
+    data_start_row = header_row + 1
+
+    party_range = aged_refs.col_range(party_field)
+    total_range = aged_refs.col_range("total")
+
+    for i in range(len(rows)):
+        r = data_start_row + i
+        name = str(rows.iloc[i][party_field])
+        ws.cell(row=r, column=1, value=name).border = BORDER
+
+        total_formula = sumifs_exact(total_range, (party_range, quote(name)))
+        ws.cell(row=r, column=2, value=total_formula).number_format = CURRENCY_FMT
+        ws.cell(row=r, column=2).border = BORDER
+
+    _autosize(ws, pd.DataFrame(columns=INTERCO_HEADERS))
+    ws.freeze_panes = f"A{data_start_row}"
+    return ws
+
+
 PREPAYMENTS_ACCRUALS_HEADERS = ["Type", "Account Code", "Account Name", "Draft (per Xero PTB)", "Adjustment",
                                 "Total (per WP)", "Comparative"]
 
@@ -2528,10 +2632,28 @@ def _generate_schedules(
     ncl_accounts = pd.DataFrame()
     if data.get("tb_current") is not None and not data["tb_current"].empty:
         ncl_accounts = data["tb_current"][data["tb_current"]["account_type"].astype(str).str.lower() == "non-current liability"]
-    ncl_on = enabled("non_current_liabilities") and not ncl_accounts.empty and refs.tb_current is not None
+    ncl_on = enabled("non_current_liabilities") and not ncl_accounts.empty
     ncl_ref = ref.next() if ncl_on else None
     if ncl_on:
         entries.append({"ref": ncl_ref, "title": "Creditors: amounts falling due after more than one year", "status": "n/a", "message": f"{len(ncl_accounts)} non-current liability account(s)"})
+
+    stock_accounts = _find_stock_accounts(data.get("tb_current"))
+    stock_on = enabled("stock") and not stock_accounts.empty
+    stock_ref = ref.next() if stock_on else None
+    if stock_on:
+        entries.append({"ref": stock_ref, "title": "Stock", "status": "n/a", "message": f"{len(stock_accounts)} stock/inventory account(s)"})
+
+    interco_debtor_rows = find_interco_rows(data.get("aged_debtors"), "customer", data.get("related_party_names"))
+    interco_debtor_on = enabled("interco_debtor") and not interco_debtor_rows.empty
+    interco_debtor_ref = ref.next() if interco_debtor_on else None
+    if interco_debtor_on:
+        entries.append({"ref": interco_debtor_ref, "title": "Interco (Debtor)", "status": "n/a", "message": f"{len(interco_debtor_rows)} related-party debtor(s), per this client's own related-party name list"})
+
+    interco_creditor_rows = find_interco_rows(data.get("aged_creditors"), "supplier", data.get("related_party_names"))
+    interco_creditor_on = enabled("interco_creditor") and not interco_creditor_rows.empty
+    interco_creditor_ref = ref.next() if interco_creditor_on else None
+    if interco_creditor_on:
+        entries.append({"ref": interco_creditor_ref, "title": "Interco (Creditor)", "status": "n/a", "message": f"{len(interco_creditor_rows)} related-party creditor(s), per this client's own related-party name list"})
 
     cl_on = enabled("compliance_checklist")
     cl_ref = ref.next() if cl_on else None
@@ -2675,9 +2797,26 @@ def _generate_schedules(
                 data.get("tb_comparative"), data.get("nominal_current"), refs, header_cells=header_cells,
             ))
 
-    if ncl_on:
+    if ncl_on and refs.tb_current is not None:
         place("non_current_liabilities", lambda: build_non_current_liabilities_sheet_formulas(
             wb, client_name, current_label, ncl_ref, ncl_accounts, refs, header_cells=header_cells,
+        ))
+
+    if stock_on and refs.tb_current is not None:
+        place("stock", lambda: build_stock_sheet_formulas(
+            wb, client_name, current_label, stock_ref, stock_accounts, refs, header_cells=header_cells,
+        ))
+
+    if interco_debtor_on and refs.aged_debtors is not None:
+        place("interco_debtor", lambda: build_interco_sheet_formulas(
+            wb, client_name, current_label, interco_debtor_ref, "INTERCO (DEBTOR)",
+            interco_debtor_rows, "customer", refs.aged_debtors, header_cells=header_cells,
+        ))
+
+    if interco_creditor_on and refs.aged_creditors is not None:
+        place("interco_creditor", lambda: build_interco_sheet_formulas(
+            wb, client_name, current_label, interco_creditor_ref, "INTERCO (CREDITOR)",
+            interco_creditor_rows, "supplier", refs.aged_creditors, header_cells=header_cells,
         ))
 
     if cl_on:

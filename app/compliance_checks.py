@@ -52,6 +52,17 @@ def _find_accounts(tb: pd.DataFrame, pattern: re.Pattern) -> pd.DataFrame:
     return tb[tb["account_name"].astype(str).str.contains(pattern, regex=True, na=False)]
 
 
+def _find_stock_accounts(tb_current: pd.DataFrame) -> pd.DataFrame:
+    """Stock/Inventory/WIP accounts - Xero's own "Inventory" account type,
+    or a name match (_STOCK_PATTERN) as a fallback for a TB that doesn't
+    use that type."""
+    if tb_current is None or tb_current.empty:
+        return pd.DataFrame()
+    is_inventory_type = tb_current["account_type"].astype(str).str.lower() == "inventory"
+    name_match = tb_current["account_name"].astype(str).str.contains(_STOCK_PATTERN, regex=True, na=False)
+    return tb_current[is_inventory_type | name_match]
+
+
 def _balance(tb: pd.DataFrame, codes) -> float:
     if tb is None or tb.empty:
         return 0.0
@@ -299,9 +310,7 @@ def stock_review(
     if tb_current is None or tb_current.empty:
         return ReconResult(name, "n/a", "No trial balance uploaded.")
 
-    is_inventory_type = tb_current["account_type"].astype(str).str.lower() == "inventory"
-    name_match = tb_current["account_name"].astype(str).str.contains(_STOCK_PATTERN, regex=True, na=False)
-    found = tb_current[is_inventory_type | name_match]
+    found = _find_stock_accounts(tb_current)
     if found.empty:
         return ReconResult(name, "n/a", "No Stock/Inventory/WIP account found in the trial balance.")
 

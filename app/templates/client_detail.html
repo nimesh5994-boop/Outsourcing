@@ -54,6 +54,20 @@
     <button type="submit">Save</button>
   </form>
 </div>
+
+<div class="card">
+  <h2>Related Parties</h2>
+  <p class="muted">
+    Names of related companies for this client (a parent, a fellow subsidiary, a director's other company) -
+    not derivable from the Trial Balance or Aged Debtors/Creditors alone, so listed here once per client.
+    Matched (case-insensitive, exact after trimming) against Aged Debtors/Creditors customer/supplier names to
+    build the Interco Debtor/Creditor schedules when a job's aged reports are uploaded. One name per line.
+  </p>
+  <form method="post" action="/clients/{{ client.id }}/related-party-names">
+    <textarea name="names" rows="4" style="width:100%; padding:8px 10px; border:1px solid var(--border); border-radius:6px; font-size:13px; font-family:inherit;" placeholder="Seaview Diner&#10;Parent Holdings Ltd">{{ (client.related_party_names or []) | join('\n') }}</textarea>
+    <button type="submit">Save</button>
+  </form>
+</div>
 {% endif %}
 
 <div class="card">

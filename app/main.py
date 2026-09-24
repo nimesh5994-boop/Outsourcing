@@ -1128,6 +1128,21 @@ def download_pl_variance_client_report(job_id: str, user: dict = Depends(auth.cu
     )
 
 
+@app.post("/clients/{client_id}/related-party-names")
+def save_related_party_names(client_id: str, names: str = Form(""), user: dict = Depends(auth.current_user_dep)):
+    """One name per line - free text the preparer already knows (a parent
+    company, a fellow subsidiary, a director's other company), not
+    something derivable from the TB/aged report alone. Matched
+    case-insensitively, exact (after trimming), against aged report
+    customer/supplier names and TB account names to build the Interco
+    Debtor/Creditor schedules - see interco.find_interco_rows."""
+    client = _authorize_client(user, client_id)
+    parsed = [line.strip() for line in names.splitlines() if line.strip()]
+    client["related_party_names"] = parsed
+    storage.save_client(client)
+    return RedirectResponse(f"/clients/{client_id}", status_code=303)
+
+
 @app.post("/clients/{client_id}/notes/{report_type}")
 def save_report_note(client_id: str, report_type: str, note: str = Form(""), next: str = Form(""),
                       user: dict = Depends(auth.current_user_dep)):
@@ -1818,6 +1833,7 @@ def _generate_workbook_steps(job_id: str, job: dict, client: dict):
         return step_data, step_pl_current, step_profit
 
     data, pl_current, current_year_profit = yield from _run_step_with_retry(event, 1, _step1)
+    data["related_party_names"] = client.get("related_party_names") or []
 
     yield event(2, "running")
     results = recon.run_all_recons(data, materiality, variance_pct_threshold)

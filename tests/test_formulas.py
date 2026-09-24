@@ -19,6 +19,7 @@ import formulas  # noqa: E402
 
 from app import control_accounts as ca  # noqa: E402
 from app import corporation_tax as ct_mod  # noqa: E402
+from app.compliance_checks import _find_stock_accounts  # noqa: E402
 from app import financial_statements as fs  # noqa: E402
 from app import fixed_assets as fa  # noqa: E402
 from app import nominal_matrix as nm  # noqa: E402
@@ -32,12 +33,15 @@ from app.excel_builder import (  # noqa: E402
     build_corporation_tax_sheet_formulas,
     build_dla_activity_sheet_formulas,
     build_fixed_asset_category_sheet_formulas,
+    build_interco_sheet_formulas,
     build_matrix_sheet_formulas,
     build_non_current_liabilities_sheet_formulas,
     build_pl_statement_sheet_formulas,
     build_prepayments_accruals_sheet_formulas,
+    build_stock_sheet_formulas,
     build_tb_lead_schedule_formulas,
 )
+from app.interco import find_interco_rows  # noqa: E402
 from app.parsers import FileDataSource  # noqa: E402
 
 SAMPLE_DIR = Path(__file__).resolve().parent.parent / "sample_data"
@@ -642,6 +646,85 @@ def test_prepayments_accruals_sheet_lists_each_line_with_its_own_draft_adjustmen
     assert _cell(sol, out.name, sheet_name, f"D{data_start}") == pytest.approx(1200.0)  # Draft
     assert _cell(sol, out.name, sheet_name, f"G{data_start}") == pytest.approx(900.0)  # Comparative
     assert _cell(sol, out.name, sheet_name, f"D{data_start + 1}") == pytest.approx(-850.0)
+
+
+def test_stock_sheet_matches_python_ground_truth_and_ties_to_the_tb(tmp_path):
+    tb_current = pd.DataFrame([
+        {"account_code": "630", "account_name": "Stock", "account_type": "Inventory", "debit": 4500.0, "credit": 0.0, "balance": 4500.0},
+        # name match, not the Inventory type - still expected to be caught (fallback path)
+        {"account_code": "631", "account_name": "Work in Progress", "account_type": "Current Asset", "debit": 1200.0, "credit": 0.0, "balance": 1200.0},
+    ])
+    tb_comparative = pd.DataFrame([
+        {"account_code": "630", "account_name": "Stock", "account_type": "Inventory", "debit": 3000.0, "credit": 0.0, "balance": 3000.0},
+    ])
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, {"tb_current": tb_current, "tb_comparative": tb_comparative})
+    sheet_name = "1 Stock"
+    accounts = _find_stock_accounts(tb_current)
+    build_stock_sheet_formulas(wb, "Test Client", "Year ended 31 December 2025", "1", accounts, refs)
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / "stock.xlsx"
+    wb.save(out)
+    sol = _evaluate(out)
+
+    errors = [k for k, v in sol.items() if f"[{out.name}]{sheet_name.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value))]
+    assert not errors, f"formula errors: {errors}"
+
+    ws = wb[sheet_name]
+    header_row = next(r for r in range(1, 10) if ws.cell(row=r, column=1).value == "Account Code")
+    data_start = header_row + 1
+
+    assert ws.cell(row=data_start, column=2).value == "Stock"
+    assert _cell(sol, out.name, sheet_name, f"C{data_start}") == pytest.approx(4500.0)  # Draft
+    assert _cell(sol, out.name, sheet_name, f"F{data_start}") == pytest.approx(3000.0)  # Comparative
+
+    assert ws.cell(row=data_start + 1, column=2).value == "Work in Progress"
+    assert _cell(sol, out.name, sheet_name, f"C{data_start + 1}") == pytest.approx(1200.0)
+    assert _cell(sol, out.name, sheet_name, f"F{data_start + 1}") == pytest.approx(0.0)  # not in the comparative TB
+
+
+def test_interco_debtor_sheet_only_lists_the_clients_own_related_party_names(tmp_path):
+    aged_debtors = pd.DataFrame([
+        {"customer": "Acme Ltd", "current": 500.0, "bucket_1": 0.0, "bucket_2": 0.0, "bucket_3": 0.0, "bucket_4": 0.0, "older": 0.0, "total": 500.0},
+        {"customer": "Seaview Diner", "current": 1790.64, "bucket_1": 0.0, "bucket_2": 0.0, "bucket_3": 0.0, "bucket_4": 0.0, "older": 0.0, "total": 1790.64},
+    ])
+    related_party_names = ["Seaview Diner"]  # matched case-insensitively, exact after trim
+
+    rows = find_interco_rows(aged_debtors, "customer", related_party_names)
+    assert list(rows["customer"]) == ["Seaview Diner"]
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, {"aged_debtors": aged_debtors})
+    sheet_name = "1 Interco (Debtor)"
+    build_interco_sheet_formulas(wb, "Test Client", "Year ended 31 December 2025", "1", "INTERCO (DEBTOR)", rows, "customer", refs.aged_debtors)
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / "interco_debtor.xlsx"
+    wb.save(out)
+    sol = _evaluate(out)
+
+    errors = [k for k, v in sol.items() if f"[{out.name}]{sheet_name.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value))]
+    assert not errors, f"formula errors: {errors}"
+
+    ws = wb[sheet_name]
+    header_row = next(r for r in range(1, 10) if ws.cell(row=r, column=1).value == "Contact")
+    data_start = header_row + 1
+
+    assert ws.cell(row=data_start, column=1).value == "Seaview Diner"
+    assert _cell(sol, out.name, sheet_name, f"B{data_start}") == pytest.approx(1790.64)
+    # Acme Ltd is not in the related-party list - never appears on this sheet at all
+    assert ws.max_row == data_start
+
+
+def test_interco_rows_empty_when_no_related_party_names_configured():
+    aged_creditors = pd.DataFrame([
+        {"supplier": "MLG Magazines", "current": 1000.0, "bucket_1": 0.0, "bucket_2": 0.0, "bucket_3": 0.0, "bucket_4": 0.0, "older": 0.0, "total": 1000.0},
+    ])
+    assert find_interco_rows(aged_creditors, "supplier", []).empty
+    assert find_interco_rows(aged_creditors, "supplier", None).empty
+    assert find_interco_rows(None, "supplier", ["MLG Magazines"]).empty
 
 
 def test_nominal_matrix_formulas_match_python_ground_truth(tmp_path, canonical_data):
