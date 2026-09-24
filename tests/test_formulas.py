@@ -30,6 +30,7 @@ from app.excel_builder import (  # noqa: E402
     build_bs_statement_sheet_formulas,
     build_control_account_sheet_formulas,
     build_corporation_tax_sheet_formulas,
+    build_dla_activity_sheet_formulas,
     build_fixed_asset_category_sheet_formulas,
     build_matrix_sheet_formulas,
     build_pl_statement_sheet_formulas,
@@ -512,6 +513,56 @@ def test_bank_lead_schedule_formulas_match_python_ground_truth_and_show_the_stat
     ws = wb[sheet_name]
     assert ws.cell(row=9, column=1).value == "601"  # Bank Deposit Account
     assert ws.cell(row=9, column=7).value == "No statement uploaded"
+
+
+def test_dla_activity_running_balance_formulas_match_python_ground_truth(tmp_path):
+    tb_current = pd.DataFrame([
+        {"account_code": "800", "account_name": "Directors' Current Account", "account_type": "Current Liability", "debit": 3500.0, "credit": 0.0, "balance": 3500.0},
+    ])
+    tb_comparative = pd.DataFrame([
+        {"account_code": "800", "account_name": "Directors' Current Account", "account_type": "Current Liability", "debit": 2000.0, "credit": 0.0, "balance": 2000.0},
+    ])
+    # deliberately out of date order, to prove the sheet sorts before writing
+    nominal_current = pd.DataFrame([
+        {"date": pd.Timestamp("2025-08-01"), "account_code": "800", "account_name": "Directors' Current Account",
+         "reference": "", "description": "Drawings", "contact": "J Smith", "source_type": "Spend Money", "debit": 1000.0, "credit": 0.0},
+        {"date": pd.Timestamp("2025-03-01"), "account_code": "800", "account_name": "Directors' Current Account",
+         "reference": "", "description": "Repayment", "contact": "J Smith", "source_type": "Receive Money", "debit": 0.0, "credit": 500.0},
+    ])
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, {"tb_current": tb_current, "tb_comparative": tb_comparative})
+    sheet_name = "1 DLA Activity"
+    build_dla_activity_sheet_formulas(
+        wb, "Test Client", "Year ended 31 December 2025", "1", "800", "Directors' Current Account",
+        tb_comparative, nominal_current, refs,
+    )
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / "dla_activity.xlsx"
+    wb.save(out)
+    sol = _evaluate(out)
+
+    errors = [k for k, v in sol.items() if f"[{out.name}]{sheet_name.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value))]
+    assert not errors, f"formula errors: {errors}"
+
+    ws = wb[sheet_name]
+    # header row 4 (title ends row 3, +1), opening row 5
+    opening_row = next(r for r in range(1, 10) if ws.cell(row=r, column=4).value == "Opening balance")
+    assert _cell(sol, out.name, sheet_name, f"G{opening_row}") == pytest.approx(2000.0)
+
+    # earliest transaction (2025-03-01, the 500 credit) should be written first, despite input order
+    assert ws.cell(row=opening_row + 1, column=6).value == pytest.approx(500.0)  # Credit
+    assert _cell(sol, out.name, sheet_name, f"G{opening_row + 1}") == pytest.approx(2000.0 - 500.0)
+
+    assert ws.cell(row=opening_row + 2, column=5).value == pytest.approx(1000.0)  # Debit
+    closing_row = opening_row + 3
+    assert ws.cell(row=closing_row, column=4).value == "Closing balance per this ledger"
+    assert _cell(sol, out.name, sheet_name, f"G{closing_row}") == pytest.approx(2000.0 - 500.0 + 1000.0)
+
+    diff_row = closing_row + 2
+    assert ws.cell(row=diff_row, column=4).value == "Diff (should be nil)"
+    assert _cell(sol, out.name, sheet_name, f"G{diff_row}") == pytest.approx(2500.0 - 3500.0)  # ledger vs TB - a genuine 1000 gap in this fixture
 
 
 def test_nominal_matrix_formulas_match_python_ground_truth(tmp_path, canonical_data):

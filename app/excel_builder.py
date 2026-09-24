@@ -15,6 +15,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.worksheet.worksheet import Worksheet
 
+from app.compliance_checks import _DLA_PATTERN, _find_accounts
 from app.control_accounts import ControlAccountResult, build_rollforward as build_control_account_rollforward
 from app.corporation_tax import CTComputation, find_tax_provision_account
 from app.data_sheets import DataRefs, with_row_ids, write_data_sheets
@@ -1100,6 +1101,107 @@ def build_bank_lead_schedule_formulas(
             ws.cell(row=r, column=col).border = BORDER
 
     _autosize(ws, pd.DataFrame(columns=BANK_LEAD_HEADERS))
+    ws.freeze_panes = f"A{data_start_row}"
+    return ws
+
+
+DLA_ACTIVITY_HEADERS = ["Date", "Source", "Contact", "Description", "Debit", "Credit", "Balance"]
+
+
+def build_dla_activity_sheet_formulas(
+    wb: Workbook, client_name: str, current_label: str, ref: str,
+    account_code: str, account_name: str,
+    tb_comparative: pd.DataFrame | None, nominal_current: pd.DataFrame | None,
+    refs: DataRefs, header_cells: dict | None = None,
+) -> Worksheet:
+    """A running-balance ledger for one Directors' Loan/Current Account -
+    every posting for the year, in date order, with a live running
+    balance - the transaction-by-transaction detail a DLA schedule
+    actually needs (this is typically the one account a preparer reviews
+    line by line, since it drives the S455/close-company points
+    compliance_checks.directors_loan_account_review already flags),
+    rather than just the aggregate movement Control Accounts already
+    shows for every other balance-sheet account.
+
+    Date/Source/Contact/Description/Debit/Credit are Python-computed
+    literals (this needs the individual postings in date order, not an
+    aggregate a SUMPRODUCT can give) but the running Balance column is a
+    live formula, so editing a figure by hand still recalculates
+    correctly. Ends with the ledger's own closing balance checked against
+    DATA_TB_Current for the same code - should be nil if every posting
+    for the year is genuinely accounted for here."""
+    sheet_name = f"{ref} DLA Activity"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, current_label, f"DIRECTORS' LOAN ACCOUNT ACTIVITY ({account_name})", ref, header_cells=header_cells)
+    row += 1
+
+    header_row = row
+    for j, h in enumerate(DLA_ACTIVITY_HEADERS):
+        ws.cell(row=header_row, column=1 + j, value=h)
+    _style_header_row(ws, header_row, len(DLA_ACTIVITY_HEADERS))
+    data_start_row = header_row + 1
+
+    opening_row = data_start_row
+    ws.cell(row=opening_row, column=4, value="Opening balance").border = BORDER
+    if tb_comparative is not None and refs.tb_comparative is not None:
+        opening_formula = sumifs_exact(refs.tb_comparative.col_range("balance"), (refs.tb_comparative.col_range("account_code"), quote(account_code)))
+    else:
+        opening_formula = "=0"
+    opening_cell = ws.cell(row=opening_row, column=7, value=opening_formula)
+    opening_cell.number_format = CURRENCY_FMT
+    for c in range(1, len(DLA_ACTIVITY_HEADERS) + 1):
+        ws.cell(row=opening_row, column=c).border = BORDER
+
+    movement = pd.DataFrame()
+    if nominal_current is not None and not nominal_current.empty:
+        movement = nominal_current[nominal_current["account_code"].astype(str) == account_code].copy()
+        if not movement.empty:
+            movement["date"] = pd.to_datetime(movement["date"], errors="coerce")
+            movement = movement.sort_values("date")
+
+    prev_row = opening_row
+    r = opening_row + 1
+    for _, txn in movement.iterrows():
+        date_val = txn["date"].date() if pd.notna(txn["date"]) else None
+        ws.cell(row=r, column=1, value=date_val).border = BORDER
+        ws.cell(row=r, column=2, value=str(txn.get("source_type", "") or "")).border = BORDER
+        ws.cell(row=r, column=3, value=str(txn.get("contact", "") or "")).border = BORDER
+        ws.cell(row=r, column=4, value=str(txn.get("description", "") or "")).border = BORDER
+        debit_cell = ws.cell(row=r, column=5, value=float(txn.get("debit", 0.0) or 0.0))
+        debit_cell.number_format = CURRENCY_FMT
+        debit_cell.border = BORDER
+        credit_cell = ws.cell(row=r, column=6, value=float(txn.get("credit", 0.0) or 0.0))
+        credit_cell.number_format = CURRENCY_FMT
+        credit_cell.border = BORDER
+        balance_cell = ws.cell(row=r, column=7, value=f"=G{prev_row}+E{r}-F{r}")
+        balance_cell.number_format = CURRENCY_FMT
+        balance_cell.border = BORDER
+        prev_row = r
+        r += 1
+
+    closing_row = r
+    ws.cell(row=closing_row, column=4, value="Closing balance per this ledger").font = BOLD
+    closing_cell = ws.cell(row=closing_row, column=7, value=f"=G{prev_row}")
+    closing_cell.number_format = CURRENCY_FMT
+    closing_cell.font = BOLD
+    r += 1
+
+    tb_row = r
+    ws.cell(row=tb_row, column=4, value="Balance per current TB").font = Font(italic=True, color="595959")
+    if refs.tb_current is not None:
+        tb_formula = sumifs_exact(refs.tb_current.col_range("balance"), (refs.tb_current.col_range("account_code"), quote(account_code)))
+    else:
+        tb_formula = "=0"
+    tb_cell = ws.cell(row=tb_row, column=7, value=tb_formula)
+    tb_cell.number_format = CURRENCY_FMT
+    r += 1
+
+    diff_row = r
+    ws.cell(row=diff_row, column=4, value="Diff (should be nil)").font = Font(italic=True, color="595959")
+    diff_cell = ws.cell(row=diff_row, column=7, value=f"=G{closing_row}-G{tb_row}")
+    diff_cell.number_format = CURRENCY_FMT
+
+    _autosize(ws, pd.DataFrame(columns=DLA_ACTIVITY_HEADERS))
     ws.freeze_panes = f"A{data_start_row}"
     return ws
 
@@ -2272,6 +2374,15 @@ def _generate_schedules(
             mx_refs[r.account_code] = ref.next()
             entries.append({"ref": mx_refs[r.account_code], "title": f"{r.account_name} nominal analysis", "status": r.status, "message": r.message})
 
+    dla_accounts = _find_accounts(data.get("tb_current"), _DLA_PATTERN) if data.get("tb_current") is not None else pd.DataFrame()
+    dla_on = enabled("dla_activity") and not dla_accounts.empty
+    dla_refs = {}
+    if dla_on:
+        for _, dla_row in dla_accounts.iterrows():
+            code = str(dla_row["account_code"])
+            dla_refs[code] = ref.next()
+            entries.append({"ref": dla_refs[code], "title": f"{dla_row['account_name']} activity", "status": "n/a", "message": "Every posting for the year, in date order, with a running balance"})
+
     cl_on = enabled("compliance_checklist")
     cl_ref = ref.next() if cl_on else None
     if cl_on:
@@ -2395,6 +2506,14 @@ def _generate_schedules(
                 place("nominal_matrix", lambda r=r: build_matrix_sheet_formulas(wb, client_name, current_label, mx_refs[r.account_code], r, refs, nominal_current_raw, header_cells=header_cells))
             else:
                 place("nominal_matrix", lambda r=r: build_matrix_sheet(wb, client_name, current_label, mx_refs[r.account_code], r, header_cells=header_cells))
+
+    if dla_on:
+        for _, dla_row in dla_accounts.iterrows():
+            code = str(dla_row["account_code"])
+            place("dla_activity", lambda code=code, name=dla_row["account_name"]: build_dla_activity_sheet_formulas(
+                wb, client_name, current_label, dla_refs[code], code, name,
+                data.get("tb_comparative"), data.get("nominal_current"), refs, header_cells=header_cells,
+            ))
 
     if cl_on:
         place("compliance_checklist", lambda: build_compliance_checklist_sheet(wb, client_name, current_label, cl_ref, header_cells=header_cells))
