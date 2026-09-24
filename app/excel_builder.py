@@ -1006,6 +1006,104 @@ def build_control_account_sheet_formulas(wb: Workbook, client_name: str, current
     ws.freeze_panes = f"A{table_row + 1}"
 
 
+BANK_LEAD_HEADERS = ["Account Code", "Account Name", "Draft (per Xero PTB)", "Adjustment", "Total (per WP)",
+                     "Comparative", "Statement Closing Balance", "Variance vs Statement"]
+
+
+def build_bank_lead_schedule_formulas(
+    wb: Workbook, client_name: str, current_label: str, ref: str,
+    bank_accounts: pd.DataFrame, bank_result: ReconResult, refs: DataRefs,
+    header_cells: dict | None = None,
+) -> Worksheet:
+    """One row per bank-type account in the current TB - Xero's own
+    "Account Transactions" export structurally never includes these (same
+    reasoning as tb_tieout.py's own bank exclusion), so there's no
+    nominal-ledger movement to roll forward the way control_account_sheet
+    does for a real control account; this is a straight build-up instead,
+    the same Draft + Adjustment = Total shape every balance-sheet note
+    schedule in a real working paper uses. Draft is the account's raw
+    current-TB balance (debit-credit, unadjusted); Adjustment is that
+    code's own net effect on the Journals sheet - the one place a
+    correcting entry is posted, same as everywhere else in this workbook;
+    Total is the two added together (matching DATA_TB_Current's own
+    adjusted balance); Comparative is the prior year's raw balance.
+
+    Where a Bank Closing Statement was uploaded and matched to this
+    account (see recon.bank_reconciliation - name-matched, exact then
+    fuzzy-if-unique), its statement balance and variance are shown
+    alongside: Python-computed once at generation time, the same
+    already-computed cross-check simply displayed here rather than
+    silently sitting on a separate, disconnected sheet."""
+    sheet_name = f"{ref} Bank"[:31]
+    ws = wb.create_sheet(sheet_name)
+    row = _write_title(ws, client_name, current_label, "BANK AND CASH", ref, header_cells=header_cells)
+
+    status_cell = ws.cell(row=row, column=1, value=f"Status: {bank_result.status.upper()} - {bank_result.message}")
+    status_cell.font = _status_font(bank_result.status)
+    status_cell.fill = _status_fill(bank_result.status)
+    status_cell.alignment = Alignment(wrap_text=True)
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=len(BANK_LEAD_HEADERS))
+    ws.row_dimensions[row].height = 30
+    row += 2
+
+    header_row = row
+    for j, h in enumerate(BANK_LEAD_HEADERS):
+        ws.cell(row=header_row, column=1 + j, value=h)
+    _style_header_row(ws, header_row, len(BANK_LEAD_HEADERS))
+    data_start_row = header_row + 1
+
+    statement_by_name = {}
+    if bank_result.detail is not None and not bank_result.detail.empty:
+        for _, srow in bank_result.detail.iterrows():
+            statement_by_name[str(srow["Bank account"]).strip().lower()] = srow
+
+    tb_col = refs.tb_current.columns
+    tb_sheet = refs.tb_current.sheet_name
+    tb_code_range = refs.tb_current.col_range("account_code")
+
+    for i in range(len(bank_accounts)):
+        r = data_start_row + i
+        code = str(bank_accounts.iloc[i]["account_code"])
+        name = str(bank_accounts.iloc[i]["account_name"])
+
+        ws.cell(row=r, column=1, value=code).border = BORDER
+        ws.cell(row=r, column=2, value=name).border = BORDER
+
+        debit_sum = sumifs_exact(refs.tb_current.col_range("debit"), (tb_code_range, quote(code)))
+        credit_sum = sumifs_exact(refs.tb_current.col_range("credit"), (tb_code_range, quote(code)))
+        draft_formula = f"={debit_sum[1:]}-{credit_sum[1:]}"
+        ws.cell(row=r, column=3, value=draft_formula).number_format = CURRENCY_FMT
+
+        adjustment_formula = refs.journals.net_effect_formula(code) if refs.journals is not None else "=0"
+        ws.cell(row=r, column=4, value=adjustment_formula).number_format = CURRENCY_FMT
+
+        ws.cell(row=r, column=5, value=f"=C{r}+D{r}").number_format = CURRENCY_FMT
+
+        if refs.tb_comparative is not None:
+            comparative_formula = sumifs_exact(refs.tb_comparative.col_range("balance"), (refs.tb_comparative.col_range("account_code"), quote(code)))
+        else:
+            comparative_formula = "=0"
+        ws.cell(row=r, column=6, value=comparative_formula).number_format = CURRENCY_FMT
+
+        matched = statement_by_name.get(name.strip().lower())
+        if matched is not None:
+            stmt_cell = ws.cell(row=r, column=7, value=float(matched["Statement closing balance"]))
+            stmt_cell.number_format = CURRENCY_FMT
+            var_cell = ws.cell(row=r, column=8, value=float(matched["Unreconciled variance"]))
+            var_cell.number_format = CURRENCY_FMT
+            if abs(matched["Unreconciled variance"]) > 0.01:
+                var_cell.fill = PatternFill("solid", fgColor=AMBER)
+        else:
+            ws.cell(row=r, column=7, value="No statement uploaded")
+
+        for col in range(1, len(BANK_LEAD_HEADERS) + 1):
+            ws.cell(row=r, column=col).border = BORDER
+
+    _autosize(ws, pd.DataFrame(columns=BANK_LEAD_HEADERS))
+    ws.freeze_panes = f"A{data_start_row}"
+    return ws
+
+
 def build_pl_statement_sheet_formulas(wb: Workbook, client_name: str, period_label: str, ref: str, pl_result: StatementResult, refs: DataRefs, header_cells: dict | None = None) -> tuple[str, str | None]:
     """Same summary lines as build_statement_sheet's P&L, but every summary
     figure is a live SUMPRODUCT-by-category formula against DATA_PL, and the
@@ -2255,9 +2353,18 @@ def _generate_schedules(
         config_key, _ = RESULT_SCHEDULE_INFO.get(res.name, (res.name, res.name[:31]))
         r = recon_refs[res.name]
         sheet_title = recon_sheet_names[res.name]
+        bank_accounts = None
+        if res.name == "Bank reconciliation" and refs.tb_current is not None and data.get("tb_current") is not None:
+            candidates = data["tb_current"][data["tb_current"]["account_type"].astype(str).str.lower() == "bank"]
+            bank_accounts = candidates if not candidates.empty else None
+
         if res.name == TB_TIEOUT_NAME and refs.tb_current is not None and data.get("tb_current") is not None:
             place(config_key, lambda r=r, res=res: build_tb_tieout_sheet_formulas(
                 wb, client_name, current_label, r, data["tb_current"], res, refs, header_cells=header_cells,
+            ))
+        elif bank_accounts is not None:
+            place(config_key, lambda r=r, res=res, bank_accounts=bank_accounts: build_bank_lead_schedule_formulas(
+                wb, client_name, current_label, r, bank_accounts, res, refs, header_cells=header_cells,
             ))
         else:
             place(config_key, lambda r=r, sheet_title=sheet_title, res=res: build_recon_sheet(wb, client_name, current_label, r, f"{r} {sheet_title}", res, header_cells=header_cells))

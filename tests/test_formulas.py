@@ -26,6 +26,7 @@ from app import recon, xero_reports as xr  # noqa: E402
 from app.data_sheets import write_data_sheets  # noqa: E402
 from app.excel_builder import (  # noqa: E402
     build_asset_register_sheet_formulas,
+    build_bank_lead_schedule_formulas,
     build_bs_statement_sheet_formulas,
     build_control_account_sheet_formulas,
     build_corporation_tax_sheet_formulas,
@@ -470,6 +471,47 @@ def test_corporation_tax_sheet_appends_a_tax_control_account_rollforward(tmp_pat
     header_row = label_row + 3
     assert ws.cell(row=header_row, column=1).value == "Item"
     assert ws.cell(row=header_row + 1, column=1).value == "BALANCE B/FWD"
+
+
+def test_bank_lead_schedule_formulas_match_python_ground_truth_and_show_the_statement_variance(tmp_path):
+    tb_current = pd.DataFrame([
+        {"account_code": "600", "account_name": "Bank Current Account", "account_type": "Bank", "debit": 5000.0, "credit": 0.0, "balance": 5000.0},
+        {"account_code": "601", "account_name": "Bank Deposit Account", "account_type": "Bank", "debit": 2000.0, "credit": 0.0, "balance": 2000.0},
+        {"account_code": "200", "account_name": "Sales", "account_type": "Revenue", "debit": 0.0, "credit": 7000.0, "balance": -7000.0},
+    ])
+    tb_comparative = pd.DataFrame([
+        {"account_code": "600", "account_name": "Bank Current Account", "account_type": "Bank", "debit": 4000.0, "credit": 0.0, "balance": 4000.0},
+    ])
+    bank_statement = pd.DataFrame([
+        {"account_name": "Bank Current Account", "statement_date": pd.Timestamp("2025-12-31"), "closing_balance": 5750.0},
+    ])
+    bank_result = recon.bank_reconciliation(bank_statement, tb_current)
+    bank_accounts = tb_current[tb_current["account_type"].str.lower() == "bank"].reset_index(drop=True)
+
+    wb = Workbook()
+    refs = write_data_sheets(wb, {"tb_current": tb_current, "tb_comparative": tb_comparative})
+    sheet_name = "1 Bank"
+    build_bank_lead_schedule_formulas(wb, "Test Client", "Year ended 31 December 2025", "1", bank_accounts, bank_result, refs)
+    wb.remove(wb["Sheet"])
+
+    out = tmp_path / "bank_lead_schedule.xlsx"
+    wb.save(out)
+    sol = _evaluate(out)
+
+    errors = [k for k, v in sol.items() if f"[{out.name}]{sheet_name.upper()}" in k and ("VALUE!" in str(v.value) or "REF!" in str(v.value))]
+    assert not errors, f"formula errors: {errors}"
+
+    # data starts row 8 (title block ends row 5, status row 5, blank row 6, header row 7)
+    assert _cell(sol, out.name, sheet_name, "C8") == pytest.approx(5000.0)  # Draft
+    assert _cell(sol, out.name, sheet_name, "D8") == pytest.approx(0.0)  # Adjustment - no journals posted
+    assert _cell(sol, out.name, sheet_name, "E8") == pytest.approx(5000.0)  # Total
+    assert _cell(sol, out.name, sheet_name, "F8") == pytest.approx(4000.0)  # Comparative
+    assert _cell(sol, out.name, sheet_name, "G8") == pytest.approx(5750.0)  # Statement Closing Balance
+    assert _cell(sol, out.name, sheet_name, "H8") == pytest.approx(750.0)  # Variance vs Statement
+
+    ws = wb[sheet_name]
+    assert ws.cell(row=9, column=1).value == "601"  # Bank Deposit Account
+    assert ws.cell(row=9, column=7).value == "No statement uploaded"
 
 
 def test_nominal_matrix_formulas_match_python_ground_truth(tmp_path, canonical_data):
