@@ -8,11 +8,11 @@ from pathlib import Path
 
 import pandas as pd
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import RedirectResponse, Response, StreamingResponse
+from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mailer, mapping, nominal_matrix, parsers, paye_reconciliation, pdf_extraction, pl_variance, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, tb_tieout, vat_periods, vat_reconciliation, xero_reports
+from app import accruals_prepayments, anomaly_detection, auth, brightpay_reports, compliance_checks, control_accounts, corporation_tax, document_detection, financial_statements, fixed_assets, going_concern, mailer, mapping, nominal_matrix, parsers, paye_reconciliation, pdf_extraction, pl_variance, recon, reconciliation_agent, related_party_transactions, statutory_deadlines, storage, tb_tieout, vat_periods, vat_reconciliation, xero_api, xero_pull, xero_reports
 from app.excel_builder import build_workbook, build_workbook_into_template
 from app.models import PAYE_RECON_TYPES, PERIODS, PLATFORMS, REPORT_LABELS, REPORT_SCHEMAS, REPORT_TYPES, REQUIRED_FIELDS, VAT_RECON_TYPES
 
@@ -492,6 +492,7 @@ def client_detail(request: Request, client_id: str, user: dict = Depends(auth.cu
     return templates.TemplateResponse("client_detail.html", {
         "request": request, "current_user": user, "client": client, "jobs": jobs,
         "practice_templates": practice_templates,
+        "xero": _xero_view(client_id, request.query_params.get("xero")),
         "breadcrumbs": [
             {"label": practice["name"], "url": f"/practices/{client['practice_id']}"},
             {"label": "Clients", "url": f"/practices/{client['practice_id']}/clients"},
@@ -657,6 +658,7 @@ def job_detail(request: Request, job_id: str, user: dict = Depends(auth.current_
         "platforms": PLATFORMS, "periods": PERIODS,
         "uploads_by_type": uploads_by_type,
         "report_notes": client.get("report_notes", {}),
+        "xero_job": _xero_job_view(client["id"], job),
         "progress_summary": _summarize_progress(job.get("progress")),
         "vat_recon_types": VAT_RECON_TYPES,
         "paye_recon_types": PAYE_RECON_TYPES,
@@ -1160,6 +1162,169 @@ def save_report_note(client_id: str, report_type: str, note: str = Form(""), nex
     return RedirectResponse(destination, status_code=303)
 
 
+# ---------- Xero connection + pull ----------
+
+_XERO_MESSAGES = {
+    "connected": ("ok", "Xero connected."),
+    "choose": ("ok", "Xero connected - choose which organisation belongs to this client."),
+    "not_configured": ("error", "Xero isn't set up on this server yet (XERO_CLIENT_ID / XERO_CLIENT_SECRET)."),
+    "denied": ("error", "Xero access wasn't granted, so nothing was connected."),
+    "failed": ("error", "Connecting to Xero failed - try again."),
+    "disconnected": ("ok", "Xero disconnected for this client."),
+    "tenant_set": ("ok", "Organisation linked."),
+}
+
+
+def _xero_state_serializer():
+    from itsdangerous import URLSafeTimedSerializer
+    return URLSafeTimedSerializer(os.environ["SECRET_KEY"], salt="wpa-xero-oauth")
+
+
+def _xero_redirect_uri(request: Request) -> str:
+    configured = os.environ.get("XERO_REDIRECT_URI")
+    if configured:
+        return configured
+    base = str(request.base_url).rstrip("/")
+    if base.startswith("http://") and "localhost" not in base and "127.0.0.1" not in base:
+        base = "https://" + base[len("http://"):]
+    return base + "/xero/callback"
+
+
+def _xero_view(client_id: str, message_code: str | None) -> dict:
+    conn = storage.get_xero_connection(client_id)
+    level, text = _XERO_MESSAGES.get(message_code or "", (None, None))
+    return {
+        "configured": xero_api.configured(), "connection": conn, "message_level": level, "message": text,
+        "journals_granted": bool(conn) and xero_api.JOURNALS_SCOPE in (conn.get("scopes") or "").split(),
+    }
+
+
+def _xero_job_view(client_id: str, job: dict) -> dict:
+    conn = storage.get_xero_connection(client_id)
+    return {
+        "configured": xero_api.configured(), "connection": conn,
+        "ready": bool(conn and conn.get("tenant_id")), "pull": job.get("xero_pull"), "message": job.get("xero_message"),
+    }
+
+
+def _xero_client(client_id: str) -> tuple[xero_api.XeroClient, dict]:
+    conn = storage.get_xero_connection(client_id)
+    if not conn or not conn.get("tenant_id"):
+        raise xero_api.XeroError("This client isn't connected to a Xero organisation yet.")
+    return xero_api.XeroClient(conn, lambda c: storage.save_xero_connection(client_id, c)), conn
+
+
+@app.get("/clients/{client_id}/xero/connect")
+def xero_connect(request: Request, client_id: str, user: dict = Depends(auth.current_user_dep)):
+    _authorize_client(user, client_id)
+    auth.require_role(user, "partner", "manager")
+    if not xero_api.configured():
+        return RedirectResponse(f"/clients/{client_id}?xero=not_configured", status_code=303)
+    state = _xero_state_serializer().dumps({"client_id": client_id, "user_id": user["id"]})
+    return RedirectResponse(xero_api.authorize_url(_xero_redirect_uri(request), state), status_code=303)
+
+
+@app.get("/xero/callback")
+def xero_callback(request: Request, code: str = "", state: str = "", error: str = "", user: dict = Depends(auth.current_user_dep)):
+    from itsdangerous import BadSignature
+    try:
+        payload = _xero_state_serializer().loads(state, max_age=600)
+    except BadSignature:
+        raise HTTPException(status_code=400, detail="Invalid or expired Xero connection request - start again from the client page.")
+    if payload["user_id"] != user["id"]:
+        raise HTTPException(status_code=400, detail="This Xero connection request was started by a different user.")
+    client_id = payload["client_id"]
+    _authorize_client(user, client_id)
+    auth.require_role(user, "partner", "manager")
+
+    if error or not code:
+        return RedirectResponse(f"/clients/{client_id}?xero=denied", status_code=303)
+    try:
+        tokens = xero_api.exchange_code(code, _xero_redirect_uri(request))
+        tenants = xero_api.list_tenants(xero_api.decrypt_token(tokens["access_token_enc"]))
+    except xero_api.XeroError:
+        return RedirectResponse(f"/clients/{client_id}?xero=failed", status_code=303)
+    if not tenants:
+        return RedirectResponse(f"/clients/{client_id}?xero=failed", status_code=303)
+
+    connection = {**tokens, "tenants": tenants, "connected_by": user["id"], "connected_at": datetime.now(timezone.utc).isoformat()}
+    if len(tenants) == 1:
+        connection.update(tenant_id=tenants[0]["tenant_id"], tenant_name=tenants[0]["tenant_name"], connection_id=tenants[0]["connection_id"])
+    storage.save_xero_connection(client_id, connection)
+    return RedirectResponse(f"/clients/{client_id}?xero={'connected' if len(tenants) == 1 else 'choose'}", status_code=303)
+
+
+@app.post("/clients/{client_id}/xero/tenant")
+def xero_choose_tenant(client_id: str, tenant_id: str = Form(...), user: dict = Depends(auth.current_user_dep)):
+    _authorize_client(user, client_id)
+    auth.require_role(user, "partner", "manager")
+    conn = storage.get_xero_connection(client_id)
+    chosen = next((t for t in (conn or {}).get("tenants", []) if t["tenant_id"] == tenant_id), None)
+    if not chosen:
+        raise HTTPException(status_code=400, detail="Unknown organisation.")
+    conn.update(tenant_id=chosen["tenant_id"], tenant_name=chosen["tenant_name"], connection_id=chosen["connection_id"])
+    storage.save_xero_connection(client_id, conn)
+    return RedirectResponse(f"/clients/{client_id}?xero=tenant_set", status_code=303)
+
+
+@app.post("/clients/{client_id}/xero/disconnect")
+def xero_disconnect(client_id: str, user: dict = Depends(auth.current_user_dep)):
+    _authorize_client(user, client_id)
+    auth.require_role(user, "partner", "manager")
+    conn = storage.get_xero_connection(client_id)
+    if conn and conn.get("connection_id"):
+        try:
+            client, _ = _xero_client(client_id)
+            xero_api.disconnect(conn["connection_id"], client._access_token())
+        except xero_api.XeroError:
+            pass  # revocation is best effort; the stored credentials are removed regardless
+    storage.delete_xero_connection(client_id)
+    return RedirectResponse(f"/clients/{client_id}?xero=disconnected", status_code=303)
+
+
+@app.post("/jobs/{job_id}/xero/pull")
+def xero_pull_job(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    """Pulls the Trial Balance (current + comparative) and account types
+    from Xero into this job. The ledger (Journals) is pulled separately,
+    in resumable batches - see xero_pull_journals."""
+    job, client = _authorize_job(user, job_id)
+    try:
+        xc, conn = _xero_client(client["id"])
+        xero_pull.pull_core(job, xc, conn["tenant_name"])
+        job["xero_message"] = None
+    except xero_api.XeroError as exc:
+        job = storage.get_job(job_id)
+        job["xero_message"] = str(exc)
+    storage.save_job(job)
+    return RedirectResponse(f"/jobs/{job_id}#xero", status_code=303)
+
+
+@app.get("/jobs/{job_id}/xero/raw/{name}")
+def xero_raw_report(job_id: str, name: str, user: dict = Depends(auth.current_user_dep)):
+    """The unmodified JSON Xero returned for one pulled report, kept with the
+    pull so a number that looks wrong can be traced to what Xero actually
+    sent (and the converters checked against a real organisation)."""
+    job, _client = _authorize_job(user, job_id)
+    auth.require_role(user, "partner", "manager")
+    file_id = ((job.get("xero_pull") or {}).get("raw") or {}).get(name)
+    content = storage.load_file(file_id) if file_id else None
+    if content is None:
+        raise HTTPException(status_code=404)
+    return Response(content=content, media_type="application/json",
+                    headers={"Content-Disposition": f'attachment; filename="xero_{name}.json"'})
+
+
+@app.post("/jobs/{job_id}/xero/pull-journals")
+def xero_pull_journals(job_id: str, user: dict = Depends(auth.current_user_dep)):
+    job, client = _authorize_job(user, job_id)
+    try:
+        xc, _conn = _xero_client(client["id"])
+        state = xero_pull.pull_journals_batch(job, xc)
+    except xero_api.XeroError as exc:
+        return JSONResponse({"status": "error", "message": str(exc)})
+    return JSONResponse({k: v for k, v in state.items() if k != "batch_file_ids"})
+
+
 def _add_ai_reconciliation_notes(results: list, client: dict, job: dict) -> None:
     """Mutates each flagged (review/error) result in place, adding a short
     AI-assisted note - see app/reconciliation_agent.py for what it's given
@@ -1535,7 +1700,10 @@ def _load_canonical_data(job: dict) -> dict:
         if upload["confirmed"] and upload.get("xero_native")
     }
 
-    data = {}
+    # Anything pulled straight from Xero is the base layer; a confirmed file
+    # upload of the same report below then replaces it, so a preparer can
+    # always correct a pulled report by uploading an export instead.
+    data = dict(xero_pull.load_snapshot(job))
     for upload in job["uploads"].values():
         if not upload["confirmed"]:
             continue

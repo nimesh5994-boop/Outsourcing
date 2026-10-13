@@ -68,6 +68,34 @@
     <button type="submit">Save</button>
   </form>
 </div>
+
+<div class="card" id="xero">
+  <h2>Xero</h2>
+  {% if xero.message %}<p class="{{ 'error-text' if xero.message_level == 'error' else 'muted' }}">{{ xero.message }}</p>{% endif %}
+  {% if not xero.configured %}
+  <p class="muted">Xero isn't set up on this server yet. An administrator needs to register an app in the Xero developer portal and set
+    <code>XERO_CLIENT_ID</code>, <code>XERO_CLIENT_SECRET</code> (and <code>XERO_REDIRECT_URI</code>, which must match the portal's redirect URI exactly).</p>
+  {% elif xero.connection and xero.connection.tenant_id %}
+  <p>Connected to <strong>{{ xero.connection.tenant_name }}</strong>. Open any job and use <em>Pull from Xero</em> to bring in the Trial Balance
+    {% if xero.journals_granted %}and the ledger{% endif %} directly &mdash; no exports to download or upload.</p>
+  {% if not xero.journals_granted %}
+  <p class="muted">This connection doesn't include ledger (Journals) access, so schedules that need the nominal ledger still use an uploaded Account Transactions export.</p>
+  {% endif %}
+  <form method="post" action="/clients/{{ client.id }}/xero/disconnect" onsubmit="return confirm('Disconnect Xero for {{ client.name }}? Pulled data already in jobs is kept.')">
+    <button type="submit" class="button secondary">Disconnect</button>
+  </form>
+  {% elif xero.connection %}
+  <form method="post" action="/clients/{{ client.id }}/xero/tenant">
+    <select name="tenant_id">
+      {% for t in xero.connection.tenants %}<option value="{{ t.tenant_id }}">{{ t.tenant_name }}</option>{% endfor %}
+    </select>
+    <button type="submit">Use this organisation</button>
+  </form>
+  {% else %}
+  <p class="muted">Connect this client's Xero organisation once; working papers can then be built from live Xero data.</p>
+  <a class="button" href="/clients/{{ client.id }}/xero/connect">Connect to Xero</a>
+  {% endif %}
+</div>
 {% endif %}
 
 <div class="card">

@@ -235,6 +235,12 @@ def save_file(kind: str, job_id: str | None, filename: str, content: bytes, cont
 
 
 @_with_reconnect
+def delete_file(file_id: str) -> None:
+    with _get_conn().cursor() as cur:
+        cur.execute("DELETE FROM files WHERE id = %s", (file_id,))
+
+
+@_with_reconnect
 def load_file(file_id: str) -> bytes | None:
     with _get_conn().cursor() as cur:
         cur.execute("SELECT content FROM files WHERE id = %s", (file_id,))
@@ -467,6 +473,22 @@ def list_clients(practice_id: str | None = None) -> list[dict]:
     return _list_entities("client", practice_id)
 
 
+# ---------- Xero connection (one per client; holds encrypted OAuth tokens) ----------
+
+def get_xero_connection(client_id: str) -> dict | None:
+    return _get_entity("xero_connection", client_id)
+
+
+def save_xero_connection(client_id: str, connection: dict) -> None:
+    _put_entity("xero_connection", client_id, client_id, connection)
+
+
+@_with_reconnect
+def delete_xero_connection(client_id: str) -> None:
+    with _get_conn().cursor() as cur:
+        cur.execute("DELETE FROM entities WHERE kind = %s AND id = %s", ("xero_connection", client_id))
+
+
 # ---------- jobs ----------
 
 def create_job(
@@ -539,6 +561,7 @@ def delete_client(client_id: str) -> None:
             cur.execute("DELETE FROM entities WHERE kind = %s AND id = ANY(%s)", ("job", job_ids))
         cur.execute("DELETE FROM mapping_profiles WHERE client_id = %s", (client_id,))
         cur.execute("DELETE FROM client_access WHERE client_id = %s", (client_id,))
+        cur.execute("DELETE FROM entities WHERE kind = %s AND id = %s", ("xero_connection", client_id))
         cur.execute("DELETE FROM entities WHERE kind = %s AND id = %s", ("client", client_id))
 
 

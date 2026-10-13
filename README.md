@@ -424,6 +424,71 @@ silently produces wrong numbers on them. What was true on real client data:
 See `app/xero_reports.py` for the parsers and the docstrings for the exact
 quirks each one works around.
 
+## Pulling from Xero directly (no exports to upload)
+
+Instead of exporting reports from Xero and uploading them, a client's Xero
+organisation can be connected once and a job's data pulled straight in
+(`app/xero_api.py`, `app/xero_pull.py`).
+
+**There is no static API key.** Xero uses OAuth 2.0: an app registered in
+the [Xero developer portal](https://developer.xero.com) has a client id +
+secret, and each client organisation is connected by a user consenting once.
+Setup, one time per deployment:
+
+1. Create an app in the Xero developer portal (type: "Web app").
+2. Add the redirect URI `https://<your-host>/xero/callback` (and
+   `http://localhost:3400/xero/callback` for local dev) - it must match
+   `XERO_REDIRECT_URI` exactly.
+3. Set `XERO_CLIENT_ID`, `XERO_CLIENT_SECRET`, `XERO_REDIRECT_URI` (and
+   `SECRET_KEY`, already required - stored refresh tokens are encrypted with
+   a key derived from it, so rotating it requires reconnecting clients).
+4. Optionally set `XERO_SCOPES` (default: `offline_access accounting.settings
+   accounting.reports.trialbalance.read`). Add `accounting.journals.read` only
+   if the app is entitled to it (see below) - requesting a scope the app
+   isn't entitled to makes Xero reject the whole authorization.
+
+Then: client page -> **Connect to Xero** (partner/manager) -> job page ->
+**Pull Trial Balance** (and **Pull ledger** if granted). Pulled data is the
+base layer of the job's data; a file uploaded for the same report replaces
+it, so a figure can always be corrected by uploading an export.
+
+What is pulled: the Trial Balance as at the job's period end and comparative
+period end (year-to-date columns - the same figures as an exported TB),
+Xero's own account type per account (so P&L/Balance Sheet split, bank,
+stock, non-current liabilities etc. are detected exactly as with an export),
+the organisation's financial year end (a warning is shown when the job's
+period can't be what a year-to-date TB represents, e.g. a part year), and -
+only when the connection has ledger access - every posting, converted to the
+same shape as the Account Transactions export (contra account derived from
+the journal's other lines; contact is not available from Journals).
+
+**Xero tier constraints (verified against Xero's published terms, 2026):**
+- The Journals endpoint - the only full-ledger source - requires Xero's
+  top developer tier plus a security assessment and use-case approval; it is
+  not available to a normal app. Without it the TB-driven schedules (ETB,
+  Bank, Prepayments & Accruals, Stock, Creditors > 1yr, DLA balance, P&L,
+  Balance Sheet, Corporation Tax, fixed asset category totals, variance
+  review) work from the pull, and nominal-ledger schedules (TB Tie-Out, DLA
+  Activity, nominal matrix, duplicate/coding checks, control-account
+  movements) keep using an uploaded Account Transactions export.
+- The free Starter tier allows 5 connected organisations; more needs a paid
+  tier with app certification.
+- Apps registered on/after 2 March 2026 can only use granular scopes (the
+  scope names above).
+
+Credentials: access tokens last 30 minutes and are refreshed automatically;
+the refresh token is single-use, so every refresh's result is saved before
+use. Revoked/expired access shows as "reconnect Xero" rather than a crash.
+The raw JSON Xero returned for each pulled report is stored with the pull
+and downloadable from the job page (partner/manager) for tracing a figure.
+
+Verified with fake-server tests only (`tests/test_xero_api.py`,
+`tests/test_xero_routes.py`): the API JSON shapes are Xero's documented
+structure, and the converters key off column header names and the account
+id attribute rather than fixed positions - but the **first pull against a
+real organisation (Xero's free Demo Company is ideal) should be checked
+against the stored raw reports** before relying on it.
+
 ## Uploading: bulk, auto-detected, PDF-aware
 
 Staff don't pick a report type, platform, or period before uploading -

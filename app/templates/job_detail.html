@@ -107,6 +107,56 @@
   {% endif %}
 </div>
 
+<div class="card" id="xero">
+  <h2>Pull from Xero</h2>
+  {% if not xero_job.configured %}
+  <p class="muted">Xero isn't set up on this server yet.</p>
+  {% elif not xero_job.ready %}
+  <p class="muted">This client isn't connected to Xero. <a href="/clients/{{ client.id }}#xero">Connect it on the client page</a>, then pull here.</p>
+  {% else %}
+  <p class="muted">Pulls <strong>{{ xero_job.connection.tenant_name }}</strong>'s Trial Balance as at {{ job.current_period_end }}
+    {% if job.comparative_period_end %}and {{ job.comparative_period_end }}{% endif %} straight from Xero. A file you upload below for the same report replaces the pulled one.</p>
+  {% if xero_job.message %}<p class="error-text">&#9888; {{ xero_job.message }}</p>{% endif %}
+  <form method="post" action="/jobs/{{ job.id }}/xero/pull">
+    <button type="submit">{{ 'Re-pull Trial Balance' if xero_job.pull else 'Pull Trial Balance' }}</button>
+  </form>
+  {% if xero_job.pull %}
+  <p style="margin-top:12px">Pulled {{ xero_job.pull.pulled_at[:16].replace('T', ' ') }} UTC &mdash;
+    {{ xero_job.pull.summary.tb_current_rows }} accounts{% if xero_job.pull.summary.tb_comparative_rows is not none %}, {{ xero_job.pull.summary.tb_comparative_rows }} in the comparative{% endif %}.</p>
+  {% for w in xero_job.pull.warnings %}<p class="error-text">&#9888; {{ w }}</p>{% endfor %}
+  {% if current_user.role in ("partner", "manager") and xero_job.pull.raw %}
+  <p class="muted" style="font-size:13px">Exactly what Xero returned, for checking a figure:
+    {% for key in xero_job.pull.raw %}<a href="/jobs/{{ job.id }}/xero/raw/{{ key }}">{{ key }}</a>{{ ", " if not loop.last }}{% endfor %}</p>
+  {% endif %}
+  {% set jr = xero_job.pull.journals %}
+  {% if jr.status == 'complete' %}
+  <p>Ledger pulled: {{ jr.lines }} postings in the period.</p>
+  {% elif jr.status == 'unavailable' %}
+  <p class="muted">{{ jr.note }}</p>
+  {% else %}
+  <p class="muted">The ledger (every posting, used by the nominal-ledger schedules) can take a few minutes on a large organisation, so it's pulled in batches.</p>
+  <button type="button" id="xero-journals-btn">{{ 'Resume ledger pull' if jr.status == 'in_progress' else 'Pull ledger' }}</button>
+  <span id="xero-journals-status" class="muted" style="margin-left:10px">{% if jr.status == 'in_progress' %}{{ jr.kept }} postings found so far{% endif %}</span>
+  <script>
+  (function () {
+    var btn = document.getElementById("xero-journals-btn"), out = document.getElementById("xero-journals-status");
+    btn.addEventListener("click", function () {
+      btn.disabled = true;
+      (function next() {
+        fetch("/jobs/{{ job.id }}/xero/pull-journals", {method: "POST"}).then(function (r) { return r.json(); }).then(function (s) {
+          if (s.status === "in_progress") { out.textContent = s.kept + " postings found so far (scanned to journal " + s.next_offset + ")..."; next(); }
+          else if (s.status === "error") { out.textContent = s.message; btn.disabled = false; }
+          else { window.location.reload(); }
+        }).catch(function () { out.textContent = "Connection problem - click to resume."; btn.disabled = false; });
+      })();
+    });
+  })();
+  </script>
+  {% endif %}
+  {% endif %}
+  {% endif %}
+</div>
+
 <div class="card" id="generate">
   <h2>Generate</h2>
   <a class="button" href="/jobs/{{ job.id }}/generate/progress">Generate working paper</a>
