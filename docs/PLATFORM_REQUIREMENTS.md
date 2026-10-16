@@ -29,7 +29,7 @@ When this platform is working as intended, for a UK limited company on Xero:
 |---|---|---|
 | Numerical accuracy | 100% of lead-schedule totals agree to source TB (zero unexplained differences) | Automated regression against real client files, run on every change |
 | Preparer time to a reviewable paper | Material reduction vs current manual process | Time a sample of real jobs before/after (baseline needed first) |
-| Share of the standard template's tabs produced automatically | Agree a list of "must-have" tabs; target 100% of those | Tab-by-tab coverage table (section 6) |
+| Share of the standard template's tabs produced automatically | Agree a list of "must-have" tabs; target 100% of those | Tab-by-tab coverage table (section 5, FR-W) |
 | Exceptions caught pre-review | Reviewer finds nothing the platform could have flagged | Reviewer feedback log |
 | Pull reliability | A pull completes first time on a normal-size organisation | Pull success/failure counts |
 
